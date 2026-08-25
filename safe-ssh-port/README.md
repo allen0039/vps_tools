@@ -15,13 +15,13 @@
 
 ## 安装
 
-下载后先检查内容：
+一键安装：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/safe-ssh-port/safe-ssh-port.sh' -o /tmp/safe-ssh-port.sh && less /tmp/safe-ssh-port.sh && sudo bash /tmp/safe-ssh-port.sh install
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/safe-ssh-port/safe-ssh-port.sh' -o /tmp/safe-ssh-port.sh && sudo bash /tmp/safe-ssh-port.sh install
 ```
 
-这是可直接复制的一整行命令；查看脚本后按 `q` 退出 `less`，安装会继续执行。
+这是可直接复制的一整行命令，安装过程中不会进入 `less` 查看器。
 
 `install` 会一次安装两个命令：
 

@@ -14,10 +14,10 @@
 下载安装脚本：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/safe-ssh-port/safe-ssh-port.sh' -o /tmp/safe-ssh-port.sh && less /tmp/safe-ssh-port.sh && sudo bash /tmp/safe-ssh-port.sh install
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/safe-ssh-port/safe-ssh-port.sh' -o /tmp/safe-ssh-port.sh && sudo bash /tmp/safe-ssh-port.sh install
 ```
 
-这是可直接复制的一整行命令；查看脚本后按 `q` 退出 `less`，安装会继续执行。
+这是可直接复制的一整行命令，安装过程中不会进入 `less` 查看器。
 
 首次安装会同时创建正式命令 `safe-ssh-port` 和快捷命令 `allentool`。
 开始修改 SSH 端口时直接运行：
