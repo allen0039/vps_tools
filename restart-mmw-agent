@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+unit="mmw-agent.service"
+
+usage() {
+  cat <<'EOF'
+Usage: restart-mmw-agent
+
+Fully restart mmw-agent, wait for a new PID, and verify that the service stays active.
+Existing proxy connections will be interrupted briefly.
+EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+if (( $# != 0 )); then
+  usage >&2
+  exit 2
+fi
+
+if (( EUID != 0 )); then
+  printf 'ERROR: run this command as root.\n' >&2
+  exit 1
+fi
+
+if ! systemctl cat "$unit" >/dev/null 2>&1; then
+  printf 'ERROR: %s is not installed.\n' "$unit" >&2
+  exit 1
+fi
+
+service_pid() {
+  systemctl show "$unit" --property=MainPID --value
+}
+
+rss_mib() {
+  local pid=$1
+  if [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/status" ]]; then
+    awk '/^VmRSS:/ { printf "%.1f", $2 / 1024 }' "/proc/$pid/status"
+  else
+    printf '0.0'
+  fi
+}
+
+connection_count() {
+  local pid=$1
+  if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+    ss -Htanp 2>/dev/null | awk -v marker="pid=$pid," 'index($0, marker) { count++ } END { print count + 0 }'
+  else
+    printf '0\n'
+  fi
+}
+
+old_pid=$(service_pid)
+old_rss=$(rss_mib "$old_pid")
+old_connections=$(connection_count "$old_pid")
+
+printf 'Restarting %s (PID=%s, RSS=%s MiB, TCP=%s)...\n' \
+  "$unit" "$old_pid" "$old_rss" "$old_connections"
+
+restart_started=$(date --iso-8601=seconds)
+if ! systemctl restart "$unit"; then
+  printf 'ERROR: systemctl restart failed.\n' >&2
+  journalctl -u "$unit" --since "$restart_started" --no-pager -n 30 >&2 || true
+  exit 1
+fi
+
+new_pid=0
+for _ in {1..30}; do
+  candidate=$(service_pid)
+  if systemctl is-active --quiet "$unit" \
+     && [[ "$candidate" =~ ^[1-9][0-9]*$ ]] \
+     && [[ "$candidate" != "$old_pid" ]]; then
+    new_pid=$candidate
+    break
+  fi
+  sleep 1
+done
+
+if [[ "$new_pid" == "0" ]]; then
+  printf 'ERROR: %s did not return with a new PID within 30 seconds.\n' "$unit" >&2
+  journalctl -u "$unit" --since "$restart_started" --no-pager -n 50 >&2 || true
+  exit 1
+fi
+
+# Catch immediate startup failures after systemd first reports the unit active.
+sleep 3
+if ! systemctl is-active --quiet "$unit" || [[ "$(service_pid)" != "$new_pid" ]]; then
+  printf 'ERROR: %s did not remain stable after restart.\n' "$unit" >&2
+  journalctl -u "$unit" --since "$restart_started" --no-pager -n 50 >&2 || true
+  exit 1
+fi
+
+new_rss=$(rss_mib "$new_pid")
+new_connections=$(connection_count "$new_pid")
+guard_state=$(systemctl is-active mmwx-guard-agent.service 2>/dev/null || true)
+
+printf 'OK: %s restarted successfully.\n' "$unit"
+printf 'PID: %s -> %s\n' "$old_pid" "$new_pid"
+printf 'RSS: %s MiB -> %s MiB\n' "$old_rss" "$new_rss"
+printf 'TCP connections: %s -> %s\n' "$old_connections" "$new_connections"
+printf 'Guard: %s (not restarted)\n' "${guard_state:-unknown}"
