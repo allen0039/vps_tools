@@ -40,28 +40,24 @@ die() {
 
 usage() {
     cat <<EOF
-安全修改 OpenSSH 端口（分阶段迁移）
+安全修改 OpenSSH 端口（单端口直接切换）
 
 用法：
   $PROGRAM
   $PROGRAM interactive
   $PROGRAM install
   $PROGRAM install-shortcut
-  sudo $PROGRAM stage <新端口> [--cloud-firewall-ready] [--skip-host-firewall]
-                              [--enable-main-password]
-  sudo $PROGRAM finalize [--verified-new-login]
-  sudo $PROGRAM commit
+  sudo $PROGRAM switch <新端口> [--cloud-firewall-ready] [--skip-host-firewall]
+                               [--enable-main-password]
   sudo $PROGRAM status
-  sudo $PROGRAM rollback
 
 流程：
   1. 先在云厂商安全组/防火墙中放行新端口。
-  2. stage 同时保留旧端口和新端口，并验证 SSH 配置及监听。
-  3. interactive 可选择立即 finalize + commit，自动关闭旧 SSH 监听。
-  4. 也可保留双端口，使用第二个终端验证后再 finalize。
+  2. 备份配置，只写入新端口，并验证 SSH 配置和认证设置。
+  3. reload 后确认新端口监听、旧端口关闭，然后自动提交。
+  4. 任一检查失败时自动恢复原配置；成功后不保留回滚状态。
 
-不带参数运行时默认进入 interactive。interactive 会根据迁移状态引导
-stage、finalize 和 commit，并检测主配置中的
+不带参数运行时默认进入 interactive。interactive 会检测主配置中的
 PasswordAuthentication no，用 y/n 询问是否改为 yes。除非明确选择 y，
 否则脚本不会修改认证配置。
 脚本不会删除 /etc/ssh/sshd_config.d 中的云厂商配置。
@@ -220,6 +216,15 @@ wait_for_port() {
     local attempt
     for attempt in {1..20}; do
         port_is_listening "$port" && return 0
+        sleep 0.25
+    done
+    return 1
+}
+
+wait_for_port_closed() {
+    local port=$1 attempt
+    for attempt in {1..20}; do
+        ! port_is_listening "$port" && return 0
         sleep 0.25
     done
     return 1
@@ -472,7 +477,7 @@ open_host_firewall() {
         if ufw status 2>/dev/null | grep -Eq "^${port}/tcp[[:space:]]"; then
             log "UFW 已放行 ${port}/TCP。"
         else
-            ufw allow "${port}/tcp" comment 'safe-ssh-port staged'
+            ufw allow "${port}/tcp" comment 'safe-ssh-port switch'
             STATE_FIREWALL_RULE_ADDED=yes
         fi
         return 0
@@ -532,10 +537,9 @@ rollback_after_failure() {
     die "${reason}；备份保留在 $STATE_BACKUP_DIR"
 }
 
-stage_port() {
+switch_port() {
     local new_port=$1 cloud_ready=$2 skip_host_firewall=$3 enable_main_password=${4:-no}
-    local auto_finalize=${5:-no}
-    local -a old_ports staged_ports
+    local -a old_ports effective_after
     local discovered_port
     validate_port "$new_port" || die '端口必须是 1 到 65535 之间的整数。'
     [[ ! -e $STATE_FILE ]] || die "已有迁移状态；先运行 $PROGRAM status、finalize 或 rollback。"
@@ -570,7 +574,7 @@ stage_port() {
     if [[ $enable_main_password == yes ]]; then
         set_main_password_yes || rollback_after_failure '无法把主配置 PasswordAuthentication 改为 yes'
     fi
-    write_managed_config "${old_ports[@]}" "$new_port"
+    write_managed_config "$new_port"
 
     "$SSHD_BIN" -t || rollback_after_failure '新 SSH 配置未通过 sshd -t'
 
@@ -585,58 +589,49 @@ stage_port() {
         [[ $auth_after == "$auth_before" ]] || rollback_after_failure '认证配置发生意外变化'
     fi
 
-    staged_ports=()
+    effective_after=()
     while IFS= read -r discovered_port; do
-        [[ -n $discovered_port ]] && staged_ports+=("$discovered_port")
+        [[ -n $discovered_port ]] && effective_after+=("$discovered_port")
     done < <(effective_ports)
     local port
-    for port in "${old_ports[@]}" "$new_port"; do
-        port_in_list "$port" "${staged_ports[@]}" || rollback_after_failure "有效配置中缺少端口 $port"
+    port_in_list "$new_port" "${effective_after[@]}" ||
+        rollback_after_failure "有效配置中缺少端口 $new_port"
+    for port in "${old_ports[@]}"; do
+        ! port_in_list "$port" "${effective_after[@]}" ||
+            rollback_after_failure "有效配置中仍包含旧端口 $port"
     done
 
     reload_ssh || rollback_after_failure 'SSH reload 失败'
-    for port in "${old_ports[@]}" "$new_port"; do
-        wait_for_port "$port" || rollback_after_failure "SSH 未监听端口 $port"
+    wait_for_port "$new_port" || rollback_after_failure "SSH 未监听端口 $new_port"
+    for port in "${old_ports[@]}"; do
+        wait_for_port_closed "$port" || rollback_after_failure "旧端口 $port 仍在监听"
     done
 
-    STATE_STATUS=staged
+    STATE_STATUS=finalized
     write_state
-    log "阶段一完成：SSH 正在同时监听 ${STATE_OLD_PORTS} 和 ${STATE_NEW_PORT}。"
-    if [[ $auto_finalize == yes ]]; then
-        log '快速切换已通过本机检查，正在自动关闭旧 SSH 端口。'
-        return 0
-    fi
-    log "请保持当前会话，另开终端测试：ssh -p $STATE_NEW_PORT user@服务器地址"
-    log "验证新端口登录成功后再次运行：sudo $PROGRAM interactive"
-    log "也可以运行：sudo $PROGRAM finalize --verified-new-login"
-    log "如有问题运行：sudo $PROGRAM rollback"
+    log "切换完成：SSH 现在仅监听端口 ${STATE_NEW_PORT}。"
 }
 
 interactive_resume() {
     load_state
     case $STATE_STATUS in
         staged)
-            printf '当前处于双端口验证阶段：旧端口 %s，新端口 %s。\n' \
-                "$STATE_OLD_PORTS" "$STATE_NEW_PORT"
-            if ! prompt_yes_no "是否已从第二个终端使用新端口 ${STATE_NEW_PORT} 成功登录？"; then
-                warn "仍保留新旧端口。验证成功后再次运行 sudo $PROGRAM interactive；如需恢复请运行 rollback。"
-                return 0
-            fi
-            finalize_port yes
+            warn '检测到旧版双端口状态，正在关闭旧端口并自动提交。'
+            finalize_port yes yes
+            commit_port
             ;;
         finalized)
-            printf '当前已关闭旧端口，SSH 仅监听新端口 %s。\n' "$STATE_NEW_PORT"
+            commit_port
+            ;;
+        staging)
+            warn '检测到中断的切换操作，正在自动恢复原配置。'
+            rollback_port
+            die '原配置已恢复，请重新运行 allentool。'
             ;;
         *)
-            die "无法交互处理迁移状态: $STATE_STATUS"
+            die "无法处理迁移状态: $STATE_STATUS"
             ;;
     esac
-
-    if prompt_yes_no '是否已确认新端口稳定，并结束迁移状态？结束后脚本将不能一键 rollback'; then
-        commit_port
-    else
-        warn "已保留 finalized 状态和一键回滚能力；确认稳定后再次运行 sudo $PROGRAM interactive。"
-    fi
 }
 
 interactive_mode() {
@@ -646,7 +641,7 @@ interactive_mode() {
     fi
     "$SSHD_BIN" -t || die '当前 SSH 配置本身无法通过 sshd -t，拒绝修改。'
 
-    local main_setting effective_setting enable_main_password=no direct_switch=no new_port answer
+    local main_setting effective_setting enable_main_password=no new_port answer
     local -a current_ports
     main_setting=$(main_password_setting)
     effective_setting=$(effective_password_setting)
@@ -692,17 +687,9 @@ interactive_mode() {
         die '请先开放云防火墙端口后再运行脚本。'
     fi
 
-    if prompt_yes_no '是否在本机检查通过后立即关闭旧 SSH 端口？'; then
-        direct_switch=yes
-        warn '已选择快速切换；脚本不会等待第二个终端验证新端口。请保持当前 SSH 会话。'
-    else
-        log '将保留新旧端口，等待第二个终端验证新端口。'
-    fi
-
-    stage_port "$new_port" yes no "$enable_main_password" "$direct_switch"
-    if [[ $direct_switch == yes ]]; then
-        complete_quick_switch
-    fi
+    warn '将直接切换到新端口并关闭旧端口；请保持当前 SSH 会话。'
+    switch_port "$new_port" yes no "$enable_main_password"
+    commit_port
 }
 
 finalize_port() {
@@ -740,11 +727,6 @@ finalize_port() {
     log "备份和 rollback 状态仍保留；确认稳定后可保留，或自行归档 ${STATE_BACKUP_DIR}。"
     log "再次确认稳定后运行：sudo $PROGRAM interactive"
     log "也可以运行：sudo $PROGRAM commit"
-}
-
-complete_quick_switch() {
-    finalize_port yes yes
-    commit_port
 }
 
 commit_port() {
@@ -823,11 +805,11 @@ main() {
             (($# == 0)) || die 'install-shortcut 不接受额外参数。'
             install_shortcut
             ;;
-        stage)
+        switch)
             require_root
             require_commands
             local new_port=${1:-} cloud_ready=no skip_host_firewall=no enable_main_password=no option
-            [[ -n $new_port ]] || die 'stage 需要新端口。'
+            [[ -n $new_port ]] || die 'switch 需要新端口。'
             shift || true
             for option in "$@"; do
                 case $option in
@@ -837,30 +819,7 @@ main() {
                     *) die "未知参数: $option" ;;
                 esac
             done
-            stage_port "$new_port" "$cloud_ready" "$skip_host_firewall" "$enable_main_password"
-            ;;
-        finalize)
-            require_root
-            require_commands
-            local verified=no option
-            for option in "$@"; do
-                case $option in
-                    --verified-new-login) verified=yes ;;
-                    *) die "未知参数: $option" ;;
-                esac
-            done
-            finalize_port "$verified"
-            ;;
-        rollback)
-            require_root
-            require_commands
-            (($# == 0)) || die 'rollback 不接受额外参数。'
-            rollback_port
-            ;;
-        commit)
-            require_root
-            require_commands
-            (($# == 0)) || die 'commit 不接受额外参数。'
+            switch_port "$new_port" "$cloud_ready" "$skip_host_firewall" "$enable_main_password"
             commit_port
             ;;
         status)

@@ -1,17 +1,17 @@
 # safe-ssh-port
 
-使用双端口过渡安全修改 VPS 的 OpenSSH 端口，避免因配置覆盖、防火墙或认证方式变化而锁在服务器外。
+直接把 VPS 的 OpenSSH 从旧端口切换到新端口，成功后只保留新端口。
 
 ## 安全特性
 
-- `stage` 阶段同时保留旧端口和新端口
 - 自动备份 SSH 配置并运行 `sshd -t`
 - 修改前后比较实际生效的认证配置
 - 保留 cloud-init 和其他 `sshd_config.d` 配置
 - 自动管理启用中的 UFW 或 firewalld
-- 新端口、认证或 reload 验证失败时自动回滚
-- 必须从第二个终端验证新端口后才能关闭旧端口
-- 支持 `status`、`rollback` 和最终 `commit`
+- 新配置从一开始只包含新端口，不提供双端口模式
+- reload 后确认新端口监听且旧端口已经关闭
+- 新端口、认证或 reload 检查失败时内部自动恢复原配置
+- 成功后自动提交，不保留迁移或一键回滚状态
 
 ## 安装
 
@@ -58,61 +58,39 @@ allentool
 2. 如果主配置为 `PasswordAuthentication no`，使用 `y/n` 询问是否改为 `yes`。
 3. 循环询问新端口，并检查格式、当前 SSH 端口和端口占用。
 4. 使用 `y/n` 确认云厂商安全组已经放行新端口。
-5. 询问是否在本机检查通过后立即关闭旧 SSH 端口。
 
-选择快速切换 `y` 时，脚本会短暂启用新旧端口完成配置、认证、reload 和监听
-检查，随后自动关闭旧 SSH 监听并 `commit`，最终只保留新端口。快速切换完成后
-不保留一键 `rollback` 状态，也不需要再次运行 `interactive` 或 `commit`。
-请保持当前 SSH 会话，切换完成后立即另开终端测试新端口。配置备份仍会保留
-作为安全存档。
+确认后脚本会直接写入新端口、reload SSH，检查新端口已经监听且旧端口已经关闭，
+然后自动提交。整个流程不提供双端口选择，也不需要再次运行 `allentool`。
 
-选择 `n` 时，脚本会保留新旧两个端口，使用下面的分阶段验证流程。
-
-保持原 SSH 会话，另开一个终端验证新端口：
+请保持原 SSH 会话。完成后另开一个终端验证新端口：
 
 ```bash
 ssh -p 21919 root@服务器地址
 ```
 
-验证成功后，再次运行同一个交互命令：
-
-```bash
-allentool
-```
-
-脚本会识别当前处于双端口验证阶段，使用 `y/n` 询问新端口是否登录成功。
-选择 `y` 后才关闭旧端口，并再次询问是否结束迁移状态。若暂时选择 `n`，
-脚本会保留备份和一键回滚能力；确认稳定后再次运行 `allentool` 即可继续。
-
-也可以使用参数式命令完成后两步：
-
-```bash
-sudo safe-ssh-port finalize --verified-new-login
-sudo safe-ssh-port commit
-```
-
 ## 非交互模式
 
 ```bash
-sudo safe-ssh-port stage 21919 --cloud-firewall-ready
+sudo safe-ssh-port switch 21919 --cloud-firewall-ready
 ```
 
 如果需要同时将主配置中明确的 `PasswordAuthentication no` 改为 `yes`：
 
 ```bash
-sudo safe-ssh-port stage 21919 --cloud-firewall-ready --enable-main-password
+sudo safe-ssh-port switch 21919 --cloud-firewall-ready --enable-main-password
 ```
 
-## 查看状态与回滚
+## 查看状态
 
 ```bash
 sudo safe-ssh-port status
-sudo safe-ssh-port rollback
 ```
 
-在 `commit` 前执行 `rollback` 会恢复原 SSH 端口和认证配置，包括交互模式中选择修改的 `PasswordAuthentication`。
+成功切换后不会保留迁移状态或一键回滚入口。配置备份仍保留在
+`/var/lib/safe-ssh-port/backups/` 作为安全存档。执行过程中若检查失败，脚本会
+自动恢复原 SSH 配置。
 
-快速切换只关闭服务器上的旧 SSH 监听。云厂商安全组中的旧端口放行规则需要
+脚本只关闭服务器上的旧 SSH 监听。云厂商安全组中的旧端口放行规则需要
 登录云厂商控制台自行删除。
 
 ## 适用范围
