@@ -54,8 +54,9 @@ usage() {
   3. 使用第二个终端从公网登录新端口。
   4. finalize 仅保留新端口。
 
-interactive 会检测主配置中的 PasswordAuthentication no，并用 y/n
-询问是否改为 yes。除非明确选择 y，否则脚本不会修改认证配置。
+interactive 会根据迁移状态引导 stage、finalize 和 commit，并检测主配置中的
+PasswordAuthentication no，用 y/n 询问是否改为 yes。除非明确选择 y，
+否则脚本不会修改认证配置。
 脚本不会删除 /etc/ssh/sshd_config.d 中的云厂商配置。
 EOF
 }
@@ -535,12 +536,43 @@ stage_port() {
     write_state
     log "阶段一完成：SSH 正在同时监听 ${STATE_OLD_PORTS} 和 ${STATE_NEW_PORT}。"
     log "请保持当前会话，另开终端测试：ssh -p $STATE_NEW_PORT user@服务器地址"
-    log "验证新端口登录成功后运行：sudo $PROGRAM finalize --verified-new-login"
+    log "验证新端口登录成功后再次运行：sudo $PROGRAM interactive"
+    log "也可以运行：sudo $PROGRAM finalize --verified-new-login"
     log "如有问题运行：sudo $PROGRAM rollback"
 }
 
+interactive_resume() {
+    load_state
+    case $STATE_STATUS in
+        staged)
+            printf '当前处于双端口验证阶段：旧端口 %s，新端口 %s。\n' \
+                "$STATE_OLD_PORTS" "$STATE_NEW_PORT"
+            if ! prompt_yes_no "是否已从第二个终端使用新端口 ${STATE_NEW_PORT} 成功登录？"; then
+                warn "仍保留新旧端口。验证成功后再次运行 sudo $PROGRAM interactive；如需恢复请运行 rollback。"
+                return 0
+            fi
+            finalize_port yes
+            ;;
+        finalized)
+            printf '当前已关闭旧端口，SSH 仅监听新端口 %s。\n' "$STATE_NEW_PORT"
+            ;;
+        *)
+            die "无法交互处理迁移状态: $STATE_STATUS"
+            ;;
+    esac
+
+    if prompt_yes_no '是否已确认新端口稳定，并结束迁移状态？结束后脚本将不能一键 rollback'; then
+        commit_port
+    else
+        warn "已保留 finalized 状态和一键回滚能力；确认稳定后再次运行 sudo $PROGRAM interactive。"
+    fi
+}
+
 interactive_mode() {
-    [[ ! -e $STATE_FILE ]] || die "已有迁移状态；先运行 $PROGRAM status、finalize 或 rollback。"
+    if [[ -e $STATE_FILE ]]; then
+        interactive_resume
+        return 0
+    fi
     "$SSHD_BIN" -t || die '当前 SSH 配置本身无法通过 sshd -t，拒绝修改。'
 
     local main_setting effective_setting enable_main_password=no new_port answer
@@ -624,7 +656,8 @@ finalize_port() {
     write_state
     log "完成：SSH 现在仅监听端口 ${STATE_NEW_PORT}。"
     log "备份和 rollback 状态仍保留；确认稳定后可保留，或自行归档 ${STATE_BACKUP_DIR}。"
-    log "再次确认稳定后运行：sudo $PROGRAM commit"
+    log "再次确认稳定后运行：sudo $PROGRAM interactive"
+    log "也可以运行：sudo $PROGRAM commit"
 }
 
 commit_port() {

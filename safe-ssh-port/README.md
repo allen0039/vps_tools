@@ -46,7 +46,17 @@ sudo safe-ssh-port interactive
 ssh -p 21919 root@服务器地址
 ```
 
-验证成功后关闭旧端口并提交迁移：
+验证成功后，再次运行同一个交互命令：
+
+```bash
+sudo safe-ssh-port interactive
+```
+
+脚本会识别当前处于双端口验证阶段，使用 `y/n` 询问新端口是否登录成功。
+选择 `y` 后才关闭旧端口，并再次询问是否结束迁移状态。若暂时选择 `n`，
+脚本会保留备份和一键回滚能力；确认稳定后再次运行 `interactive` 即可继续。
+
+也可以使用参数式命令完成后两步：
 
 ```bash
 sudo safe-ssh-port finalize --verified-new-login
