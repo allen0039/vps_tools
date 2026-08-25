@@ -21,16 +21,15 @@
 curl -fsSL https://raw.githubusercontent.com/allen0039/vps_tools/main/safe-ssh-port/safe-ssh-port.sh \
   -o /tmp/safe-ssh-port.sh
 less /tmp/safe-ssh-port.sh
-sudo install -m 750 -o root -g root /tmp/safe-ssh-port.sh /usr/local/sbin/safe-ssh-port
+sudo bash /tmp/safe-ssh-port.sh install
 ```
 
-安装快捷命令：
+`install` 会一次安装两个命令：
 
-```bash
-sudo /usr/local/sbin/safe-ssh-port install-shortcut
-```
+- `/usr/local/sbin/safe-ssh-port`：正式命令
+- `/usr/local/bin/allentool`：快捷命令
 
-以后直接运行下面的命令即可进入交互模式：
+安装完成后直接运行：
 
 ```bash
 allentool
@@ -39,6 +38,12 @@ allentool
 快捷命令安装在 `/usr/local/bin/allentool`。普通用户运行时，如果系统提供
 `sudo`，脚本会自动请求管理员权限。若该路径已经存在其他文件，安装程序会
 要求确认，不会静默覆盖。
+
+如果以后只需要重新安装快捷命令，可以运行：
+
+```bash
+sudo safe-ssh-port install-shortcut
+```
 
 ## 推荐：交互模式
 

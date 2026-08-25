@@ -3,6 +3,7 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
+INSTALL_PATH=${SAFE_SSH_PORT_INSTALL_PATH:-/usr/local/sbin/safe-ssh-port}
 ALLENTOOL_PATH=${ALLENTOOL_PATH:-/usr/local/bin/allentool}
 SSHD_CONFIG=${SAFE_SSH_PORT_CONFIG:-/etc/ssh/sshd_config}
 SSHD_DROPIN_DIR=${SAFE_SSH_PORT_DROPIN_DIR:-/etc/ssh/sshd_config.d}
@@ -44,6 +45,7 @@ usage() {
 用法：
   $PROGRAM
   $PROGRAM interactive
+  $PROGRAM install
   $PROGRAM install-shortcut
   sudo $PROGRAM stage <新端口> [--cloud-firewall-ready] [--skip-host-firewall]
                               [--enable-main-password]
@@ -75,27 +77,57 @@ require_root() {
     die '必须以 root 身份运行。'
 }
 
-install_shortcut() {
+require_install_commands() {
     command -v install >/dev/null 2>&1 || die '缺少命令: install'
     command -v cmp >/dev/null 2>&1 || die '缺少命令: cmp'
-    [[ $ALLENTOOL_PATH == /* ]] || die '快捷命令安装路径必须是绝对路径。'
+}
+
+confirm_install_target() {
+    local source_file=$1 target=$2 label=$3
+    [[ $target == /* ]] || die "${label}安装路径必须是绝对路径。"
+    if [[ -e $target || -L $target ]]; then
+        [[ -f $target && ! -L $target ]] ||
+            die "目标已存在且不是普通文件，拒绝覆盖: $target"
+        if [[ $source_file -ef $target ]] || cmp -s "$source_file" "$target"; then
+            return 0
+        fi
+        [[ -t 0 ]] || die "目标已存在；请在交互终端中确认是否覆盖: $target"
+        prompt_yes_no "${target} 已存在，是否用当前版本覆盖？" || die '安装已取消。'
+    fi
+}
+
+install_copy() {
+    local source_file=$1 target=$2 label=$3
+    if [[ -e $target ]] &&
+       { [[ $source_file -ef $target ]] || cmp -s "$source_file" "$target"; }; then
+        log "${label}已经是最新版本: $target"
+        return 0
+    fi
+    install -m 755 "$source_file" "$target"
+    log "${label}已安装：$target"
+}
+
+install_tool() {
+    require_install_commands
+    [[ $INSTALL_PATH != "$ALLENTOOL_PATH" ]] || die '正式命令和快捷命令的安装路径不能相同。'
+
+    local source_file=${BASH_SOURCE[0]}
+    [[ -f $source_file && ! -L $source_file ]] || die '无法从当前脚本安全执行安装。'
+    confirm_install_target "$source_file" "$INSTALL_PATH" '正式命令'
+    confirm_install_target "$source_file" "$ALLENTOOL_PATH" '快捷命令'
+    install_copy "$source_file" "$INSTALL_PATH" '正式命令'
+    install_copy "$source_file" "$ALLENTOOL_PATH" '快捷命令'
+    log '安装完成，以后直接输入 allentool 即可进入交互模式。'
+}
+
+install_shortcut() {
+    require_install_commands
 
     local source_file=${BASH_SOURCE[0]}
     [[ -f $source_file && ! -L $source_file ]] || die '无法从当前脚本安全安装快捷命令。'
+    confirm_install_target "$source_file" "$ALLENTOOL_PATH" '快捷命令'
+    install_copy "$source_file" "$ALLENTOOL_PATH" '快捷命令'
 
-    if [[ -e $ALLENTOOL_PATH || -L $ALLENTOOL_PATH ]]; then
-        [[ -f $ALLENTOOL_PATH && ! -L $ALLENTOOL_PATH ]] ||
-            die "目标已存在且不是普通文件，拒绝覆盖: $ALLENTOOL_PATH"
-        if [[ $source_file -ef $ALLENTOOL_PATH ]] || cmp -s "$source_file" "$ALLENTOOL_PATH"; then
-            log "快捷命令已经是最新版本: $ALLENTOOL_PATH"
-            return 0
-        fi
-        [[ -t 0 ]] || die "目标已存在；请在交互终端中确认是否覆盖: $ALLENTOOL_PATH"
-        prompt_yes_no "${ALLENTOOL_PATH} 已存在，是否用当前版本覆盖？" || die '安装已取消。'
-    fi
-
-    install -m 755 "$source_file" "$ALLENTOOL_PATH"
-    log "快捷命令已安装：$ALLENTOOL_PATH"
     log '以后直接输入 allentool 即可进入交互模式。'
 }
 
@@ -759,6 +791,11 @@ main() {
             require_commands
             (($# == 0)) || die 'interactive 不接受额外参数。'
             interactive_mode
+            ;;
+        install)
+            require_root
+            (($# == 0)) || die 'install 不接受额外参数。'
+            install_tool
             ;;
         install-shortcut)
             require_root
