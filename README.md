@@ -7,7 +7,7 @@
 | 工具 | 用途 | 文档 |
 | --- | --- | --- |
 | `restart-mmw-agent` | 完整重启并验证 `mmw-agent.service`，显示 PID、内存和 TCP 连接变化 | [查看说明](restart-mmw-agent/README.md) |
-| `safe-ssh-port` | 安全切换 OpenSSH 单端口，并提供交互式主机防火墙管理 | [查看说明](safe-ssh-port/README.md) |
+| `safe-ssh-port` | 安全切换 OpenSSH 单端口，并管理端口、IP 与国家黑白名单 | [查看说明](safe-ssh-port/README.md) |
 
 ## safe-ssh-port 快速使用
 
@@ -36,7 +36,11 @@ restrictive iptables/ip6tables，脚本会自动在主机防火墙放行新端�
 Debian/Ubuntu 缺少持久化工具时还会自动安装 `iptables-persistent` 并保存规则。
 
 防火墙菜单会直接显示明确放行和明确关闭的 TCP/UDP 端口，并支持保护及修复 SSH
-规则、仅保留 SSH 入站、保留 SSH 与当前非回环监听端口，以及安装持久化工具。
+规则、仅保留 SSH 入站、保留 SSH 与当前非回环监听端口、IP 黑白名单、国家
+黑白名单，以及安装持久化工具。IP/国家功能使用 allentool 独立链，仅在
+iptables/iptables-nft 后端启用；国家网段通过 IPdeny HTTPS 同时下载并校验
+IPv4 和 IPv6 数据。脚本会拒绝拉黑当前 SSH 客户端，并在“仅允许指定国家”
+模式中保留当前 SSH 来源。
 防火墙规则直接修改，不再产生按时间命名的快照备份。原生自定义 nftables 只做
 状态展示，不会猜测表和链。
 云厂商安全组仍需在服务商控制台单独管理。

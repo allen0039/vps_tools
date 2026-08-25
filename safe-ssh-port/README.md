@@ -17,6 +17,10 @@
 - 可从交互菜单选择历史备份恢复端口和认证设置
 - 恢复前自动备份当前配置，恢复失败时自动还原
 - 防火墙菜单实时汇总明确放行和明确关闭的 TCP/UDP 单端口规则
+- 使用独立链管理 IPv4/IPv6 IP 黑白名单，不清空用户、Docker 或 Fail2ban 规则
+- 使用经完整校验的 IPdeny HTTPS IPv4/IPv6 数据管理国家黑白名单
+- 拒绝拉黑当前 SSH 客户端，国家白名单模式为当前 SSH 来源保留精确例外
+- 原子切换国家 ipset，并在 IPv6 切换失败时恢复原 IPv4 集合
 
 ## 安装
 
@@ -151,11 +155,13 @@ sudo safe-ssh-port switch 21919 --cloud-firewall-ready --enable-main-password
 5. 仅保留 SSH 入站
 6. 保留 SSH 和当前公网监听端口
 7. 安装/修复防火墙持久化
+8. IP 黑白名单         9. 国家黑白名单
 0. 返回上一级菜单
 ```
 
 菜单上方会显示防火墙后端、SSH 保护端口、IPv4/IPv6 默认入站策略、入站保护模式，
-以及当前能够明确解析的“放行”和“关闭”单端口规则。这里显示的是防火墙规则，
+以及当前能够明确解析的“放行”和“关闭”单端口规则；iptables 后端还会紧凑显示
+当前 IP/国家黑白名单。这里显示的是防火墙规则，
 不等同于程序是否正在监听；若默认策略为 `ACCEPT`，没有匹配到规则的其他端口也会
 被默认允许，无法逐个列出。第 4 项会显示非回环监听端口和 iptables 原始规则。
 
@@ -168,11 +174,60 @@ sudo safe-ssh-port switch 21919 --cloud-firewall-ready --enable-main-password
 “安装并保存规则”和“返回”两个选择；只有明确选择安装才会改变系统。也可以从
 菜单第 7 项主动安装或修复持久化。
 
+### IP 黑白名单
+
+选择第 8 项后，页面会实时列出 allentool 当前管理的 IPv4/IPv6 白名单与黑名单，
+并可执行：
+
+```text
+1. 添加 IP 白名单       2. 添加 IP 黑名单
+3. 清除指定 IP 规则     0. 返回
+```
+
+可以输入单个 IPv4/IPv6 地址或 CIDR，例如 `203.0.113.7`、`203.0.113.0/24`、
+`2001:db8::/32`。不接受 `0.0.0.0/0` 和 `::/0`。IP 白名单是显式信任规则，会允许
+该来源访问宿主机端口，因此只应加入可信管理地址；IP 黑名单会拒绝该来源的所有
+宿主机 `INPUT` 流量。若黑名单地址或网段包含当前 `SSH_CONNECTION` 的客户端 IP，
+脚本会拒绝操作，避免立即断开管理入口。
+
+### 国家黑白名单
+
+选择第 9 项后，页面会显示当前国家代码、IPv4/IPv6 类型和网段数量，并可执行：
+
+```text
+1. 仅允许指定国家     2. 阻止指定国家
+3. 解除指定国家限制   4. 刷新全部国家数据
+0. 返回
+```
+
+国家代码使用 ISO 3166-1 alpha-2，例如中国为 `CN`、美国为 `US`。可以配置多个
+白名单或黑名单国家；将同一国家改为另一种模式时会自动清除相反模式。国家白名单
+命中后只会返回正常端口防火墙继续检查，不会自动开放所有端口；只要存在至少一个
+国家白名单，未命中任何白名单的来源就会被拒绝。国家黑名单命中后直接拒绝。
+添加国家白名单或黑名单前会再次要求 `y/n` 确认，高风险操作默认选择“否”。
+
+国家数据分别来自：
+
+- IPv4：`https://www.ipdeny.com/ipblocks/data/aggregated/<cc>-aggregated.zone`
+- IPv6：`https://www.ipdeny.com/ipv6/ipaddresses/aggregated/<cc>-aggregated.zone`
+
+脚本要求 IPv4 和 IPv6 两份数据都成功下载并通过完整格式及 ipset 校验，才会替换
+现有集合，不会应用网页错误内容或只更新一个协议族。屏蔽国家前还会检查当前 SSH
+客户端是否位于下载后的集合中；若命中则拒绝应用。国家白名单模式会为当前 SSH
+客户端添加精确 `RETURN` 例外，但该来源仍需通过已有端口规则。
+
+IP/国家功能目前只在 iptables/iptables-nft 后端提供。UFW、firewalld 仍可管理
+端口，但脚本不会在它们背后混入隐藏的 raw iptables 来源规则；原生自定义
+nftables 仍只读。若系统缺少 `ipset` 或 `curl`，交互页面会询问是否安装，推荐项
+可以直接回车确认。国家规则要求同时存在 `iptables` 和 `ip6tables`，避免只限制
+IPv4 后从 IPv6 绕过。
+
 “仅保留 SSH”与“保留 SSH 和当前公网监听端口”是 iptables/iptables-nft 的高级
 功能。第二种模式只保留绑定到非回环地址的 TCP/UDP 监听端口，不会把
 `127.0.0.1` 或 `::1` 上的数据库等服务公开。应用前会展示完整保留列表并要求
 `y/n` 确认。界面把这一状态称为“入站保护模式”。内部使用独立的
-`ALLENTOOL_INPUT` 子链，让 `INPUT` 流量先经过保留清单，不会执行
+`ALLENTOOL_INPUT` 子链，让 `INPUT` 流量经过 allentool 来源控制后再进入端口保留
+清单，不会执行
 `iptables -F INPUT` 或删除 Docker、Fail2ban、云厂商及用户已有规则；子链中会
 保留已建立连接、回环流量和 ICMP/ICMPv6，然后拒绝其他宿主机 `INPUT` 流量。
 
@@ -184,6 +239,12 @@ Docker 端口，应单独管理 Docker/`DOCKER-USER` 规则。
 `/var/lib/safe-ssh-port/firewall-backups/` 时间戳快照，也不提供防火墙备份恢复菜单。
 升级脚本不会自动删除旧版本已经产生的历史防火墙备份。SSH 配置修改仍会保留独立
 备份，因为它用于 SSH 配置校验失败时自动恢复，和防火墙快照不是一回事。
+
+国家集合内容保存在 `/etc/iptables/ipsets.allentool`，并由
+`allentool-ipset-restore.service` 在 `netfilter-persistent.service` 之前恢复；
+这两个文件是当前规则的持久化状态，不是按时间创建的备份。解除全部国家限制后，
+脚本会移除自己创建的集合状态与恢复单元。普通 IP 规则和 allentool 独立链仍由
+`netfilter-persistent` 保存。
 
 ## 查看状态
 
@@ -233,6 +294,7 @@ SSH 端口，输入编号后再确认云厂商安全组已放行对应端口，�
 
 - 原生 nftables 自定义表/链无法安全推断时仍需人工放行；也可以在确认完成后使用 `--skip-host-firewall`。
 - `ALLENTOOL_INPUT` 只管理宿主机 `INPUT`，不代替云厂商安全组，也不管理 Docker 转发链。
+- `ALLENTOOL_ACCESS`、`ALLENTOOL_IP_ALLOW`、`ALLENTOOL_IP_DENY`、`ALLENTOOL_COUNTRY` 只管理宿主机 `INPUT` 来源，不影响云安全组或 Docker 转发。
 - SELinux enforcing 系统需要提前配置 `ssh_port_t`。
 - 使用 systemd `ssh.socket` 监听的系统需要先人工处理 socket 端口。
 - 修改 SSH 端口不能代替公钥认证、强密码和登录防护。

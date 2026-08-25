@@ -12,6 +12,15 @@ STATE_DIR=${SAFE_SSH_PORT_STATE_DIR:-/var/lib/safe-ssh-port}
 STATE_FILE=$STATE_DIR/state
 BACKUP_ROOT=$STATE_DIR/backups
 FIREWALL_CHAIN=ALLENTOOL_INPUT
+ACCESS_CHAIN=ALLENTOOL_ACCESS
+IP_ALLOW_CHAIN=ALLENTOOL_IP_ALLOW
+IP_DENY_CHAIN=ALLENTOOL_IP_DENY
+COUNTRY_CHAIN=ALLENTOOL_COUNTRY
+IPSET_STATE_FILE=${ALLENTOOL_IPSET_STATE_FILE:-/etc/iptables/ipsets.allentool}
+IPSET_SERVICE_FILE=${ALLENTOOL_IPSET_SERVICE_FILE:-/etc/systemd/system/allentool-ipset-restore.service}
+IPDENY_V4_BASE=https://www.ipdeny.com/ipblocks/data/aggregated
+IPDENY_V6_BASE=https://www.ipdeny.com/ipv6/ipaddresses/aggregated
+ISO_ALPHA2_CODES='ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi bj bl bm bn bo bq br bs bt bv bw by bz ca cc cd cf cg ch ci ck cl cm cn co cr cu cv cw cx cy cz de dj dk dm do dz ec ee eg eh er es et fi fj fk fm fo fr ga gb gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu gw gy hk hm hn hr ht hu id ie il im in io iq ir is it je jm jo jp ke kg kh ki km kn kp kr kw ky kz la lb lc li lk lr ls lt lu lv ly ma mc md me mf mg mh mk ml mm mn mo mp mq mr ms mt mu mv mw mx my mz na nc ne nf ng ni nl no np nr nu nz om pa pe pf pg ph pk pl pm pn pr ps pt pw py qa re ro rs ru rw sa sb sc sd se sg sh si sj sk sl sm sn so sr ss st sv sx sy sz tc td tf tg th tj tk tl tm tn to tr tt tv tw tz ua ug um us uy uz va vc ve vg vi vn vu wf ws ye yt za zm zw'
 SSHD_BIN=${SAFE_SSH_PORT_SSHD_BIN:-sshd}
 SS_BIN=${SAFE_SSH_PORT_SS_BIN:-ss}
 
@@ -33,6 +42,14 @@ log() {
 
 warn() {
     printf '[safe-ssh-port] 警告: %s\n' "$*" >&2
+}
+
+lowercase() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+uppercase() {
+    printf '%s' "$1" | tr '[:lower:]' '[:upper:]'
 }
 
 die() {
@@ -65,7 +82,8 @@ usage() {
 
 不带参数运行时显示功能菜单，可修改/恢复 SSH 配置，或管理主机防火墙。
 防火墙菜单会显示明确放行/关闭的 TCP/UDP 端口，并支持 SSH 放行修复、
-入站保护和 iptables 持久化。防火墙修改直接生效，不创建快照备份。
+入站保护、IP/国家黑白名单和 iptables/ipset 持久化。防火墙修改直接生效，
+不创建快照备份。国家规则同时使用经完整校验的 IPv4 和 IPv6 HTTPS 数据。
 原生自定义 nftables 仅显示状态。
 interactive 会检测主配置中的 PasswordAuthentication no，并询问是否改为 yes；
 需要密码登录时直接回车采用推荐的 yes，输入 n 则保持原认证配置。
@@ -140,7 +158,7 @@ install_shortcut() {
 
 require_commands() {
     local command_name
-    for command_name in "$SSHD_BIN" "$SS_BIN" awk grep sed sort mktemp cp mv chmod chown mkdir find rm date stat sleep; do
+    for command_name in "$SSHD_BIN" "$SS_BIN" awk grep sed sort tr mktemp cp mv chmod chown mkdir find rm date stat sleep; do
         command -v "$command_name" >/dev/null 2>&1 || die "缺少命令: $command_name"
     done
 }
@@ -1137,6 +1155,639 @@ show_firewall_port_overview() {
     fi
 }
 
+current_ssh_client_ip() {
+    if [[ ${SSH_CONNECTION:-} =~ ^([^[:space:]]+)[[:space:]] ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+    fi
+}
+
+install_ipset_tool() {
+    command -v ipset >/dev/null 2>&1 && return 0
+    log 'IP/国家规则需要 ipset。'
+    prompt_yes_no '是否现在安装 ipset（推荐）？' yes || return 1
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get update -qq || warn 'apt-get update 失败，将尝试现有软件包索引。'
+        DEBIAN_FRONTEND=noninteractive apt-get install -y ipset || return 1
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y ipset || return 1
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y ipset || return 1
+    else
+        warn '无法识别软件包管理器，请手动安装 ipset。'
+        return 1
+    fi
+    hash -r
+    command -v ipset >/dev/null 2>&1
+}
+
+require_access_control_backend() {
+    [[ $(detect_firewall_backend) == iptables ]] || {
+        warn 'IP/国家黑白名单目前仅支持 iptables/iptables-nft 后端。'
+        return 1
+    }
+    install_ipset_tool || {
+        warn 'ipset 不可用，无法管理 IP/国家规则。'
+        return 1
+    }
+}
+
+install_country_download_tool() {
+    command -v curl >/dev/null 2>&1 && return 0
+    log '国家规则需要 curl 下载 HTTPS 国家网段数据。'
+    prompt_yes_no '是否现在安装 curl（推荐）？' yes || return 1
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get update -qq || warn 'apt-get update 失败，将尝试现有软件包索引。'
+        DEBIAN_FRONTEND=noninteractive apt-get install -y curl || return 1
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y curl || return 1
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y curl || return 1
+    else
+        warn '无法识别软件包管理器，请手动安装 curl。'
+        return 1
+    fi
+    hash -r
+    command -v curl >/dev/null 2>&1
+}
+
+VALIDATED_IP_FAMILY=
+
+validate_ip_or_cidr() {
+    local value=${1:-} family family_option temp_set result=1
+    VALIDATED_IP_FAMILY=
+    [[ $value != '0.0.0.0/0' && $value != '::/0' ]] || return 1
+    if [[ $value == *:* ]]; then
+        [[ $value =~ ^[0-9A-Fa-f:]+(/[0-9]{1,3})?$ ]] || return 1
+        family=6
+        family_option=inet6
+    else
+        [[ $value =~ ^[0-9.]+(/[0-9]{1,2})?$ ]] || return 1
+        family=4
+        family_option=inet
+    fi
+    printf -v temp_set 'at_val%s_%s_%s' "$family" "$$" "$RANDOM"
+    ipset create "$temp_set" hash:net family "$family_option" maxelem 4 >/dev/null 2>&1 || return 1
+    if ipset add "$temp_set" "$value" >/dev/null 2>&1; then
+        VALIDATED_IP_FAMILY=$family
+        result=0
+    fi
+    ipset destroy "$temp_set" >/dev/null 2>&1 || true
+    return "$result"
+}
+
+network_contains_ip() {
+    local network=$1 ip=$2 family family_option temp_set result=1
+    if [[ $network == *:* ]]; then family=6; family_option=inet6; else family=4; family_option=inet; fi
+    if [[ $ip == *:* ]]; then [[ $family == 6 ]] || return 1; else [[ $family == 4 ]] || return 1; fi
+    printf -v temp_set 'at_tst%s_%s_%s' "$family" "$$" "$RANDOM"
+    ipset create "$temp_set" hash:net family "$family_option" maxelem 4 >/dev/null 2>&1 || return 1
+    if ipset add "$temp_set" "$network" >/dev/null 2>&1 &&
+       ipset test "$temp_set" "$ip" >/dev/null 2>&1; then
+        result=0
+    fi
+    ipset destroy "$temp_set" >/dev/null 2>&1 || true
+    return "$result"
+}
+
+ensure_access_framework() {
+    local command_name=$1 chain
+    for chain in "$ACCESS_CHAIN" "$IP_ALLOW_CHAIN" "$IP_DENY_CHAIN" "$COUNTRY_CHAIN"; do
+        if ! "$command_name" -S "$chain" >/dev/null 2>&1; then
+            "$command_name" -N "$chain" || return 1
+        fi
+    done
+    while "$command_name" -C INPUT -j "$ACCESS_CHAIN" >/dev/null 2>&1; do
+        "$command_name" -D INPUT -j "$ACCESS_CHAIN" || return 1
+    done
+    "$command_name" -F "$ACCESS_CHAIN" || return 1
+    "$command_name" -A "$ACCESS_CHAIN" -i lo -j RETURN || return 1
+    "$command_name" -A "$ACCESS_CHAIN" -j "$IP_ALLOW_CHAIN" || return 1
+    "$command_name" -A "$ACCESS_CHAIN" -j "$IP_DENY_CHAIN" || return 1
+    "$command_name" -A "$ACCESS_CHAIN" -j "$COUNTRY_CHAIN" || return 1
+    "$command_name" -A "$ACCESS_CHAIN" -j RETURN || return 1
+    "$command_name" -I INPUT 1 -j "$ACCESS_CHAIN"
+}
+
+managed_country_set_names() {
+    command -v ipset >/dev/null 2>&1 || return 0
+    ipset list -name 2>/dev/null | awk '
+        /^at_cc_[a-z][a-z]_[ab][46]$/ { print }
+    ' | sort -u
+}
+
+persist_ipset_state() {
+    local set_name state_dir state_tmp service_dir service_tmp ipset_path
+    local -a set_names=()
+    while IFS= read -r set_name; do
+        [[ -n $set_name ]] && set_names+=("$set_name")
+    done < <(managed_country_set_names)
+    ((${#set_names[@]} > 0)) || {
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl disable allentool-ipset-restore.service >/dev/null 2>&1 || true
+        fi
+        rm -f "$IPSET_STATE_FILE" "$IPSET_SERVICE_FILE"
+        command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
+        return 0
+    }
+
+    state_dir=${IPSET_STATE_FILE%/*}
+    service_dir=${IPSET_SERVICE_FILE%/*}
+    mkdir -p "$state_dir" "$service_dir" || return 1
+    state_tmp=$(mktemp "${state_dir}/.ipsets.allentool.XXXXXX") || return 1
+    for set_name in "${set_names[@]}"; do
+        if ! ipset save "$set_name" >> "$state_tmp"; then
+            rm -f "$state_tmp"
+            return 1
+        fi
+    done
+    chmod 600 "$state_tmp" || { rm -f "$state_tmp"; return 1; }
+    mv -f "$state_tmp" "$IPSET_STATE_FILE" || { rm -f "$state_tmp"; return 1; }
+
+    ipset_path=$(command -v ipset)
+    service_tmp=$(mktemp "${service_dir}/.allentool-ipset-restore.XXXXXX") || return 1
+    cat > "$service_tmp" <<EOF
+[Unit]
+Description=Restore allentool country ipsets
+DefaultDependencies=no
+After=local-fs.target
+Before=netfilter-persistent.service
+
+[Service]
+Type=oneshot
+ExecStart=$ipset_path restore -exist -file $IPSET_STATE_FILE
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 644 "$service_tmp" || { rm -f "$service_tmp"; return 1; }
+    mv -f "$service_tmp" "$IPSET_SERVICE_FILE" || { rm -f "$service_tmp"; return 1; }
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || warn '无法刷新 systemd 单元。'
+        systemctl enable allentool-ipset-restore.service >/dev/null 2>&1 ||
+            warn '无法自动启用国家集合恢复服务。'
+    fi
+}
+
+persist_access_control() {
+    if ! persist_ipset_state; then
+        warn '国家 IP 集合持久化失败；当前规则仍然生效，但重启后国家规则可能失效。'
+    fi
+    persist_iptables_rules yes
+}
+
+remove_ip_access_rule() {
+    local command_name=$1 chain=$2 source=$3 comment=$4 verdict=$5 removed=no
+    while "$command_name" -C "$chain" -s "$source" -m comment --comment "$comment" -j "$verdict" >/dev/null 2>&1; do
+        "$command_name" -D "$chain" -s "$source" -m comment --comment "$comment" -j "$verdict" || return 1
+        removed=yes
+    done
+    [[ $removed == yes ]] && ACCESS_RULE_REMOVED=yes
+}
+
+apply_ip_access_rule() {
+    local action=$1 source=$2 command_name chain verdict opposite_chain opposite_comment opposite_verdict
+    local client_ip
+    require_access_control_backend || return 1
+    [[ $action == allow || $action == deny ]] || { warn 'IP 规则动作无效。'; return 1; }
+    validate_ip_or_cidr "$source" || {
+        warn 'IP/CIDR 格式无效，或使用了不允许的全网段 0.0.0.0/0、::/0。'
+        return 1
+    }
+    if [[ $VALIDATED_IP_FAMILY == 6 ]]; then command_name=ip6tables; else command_name=iptables; fi
+    command -v "$command_name" >/dev/null 2>&1 || {
+        warn "缺少 ${command_name}，无法管理该协议族。"
+        return 1
+    }
+    if [[ $action == deny ]]; then
+        client_ip=$(current_ssh_client_ip)
+        if [[ -n $client_ip ]] && network_contains_ip "$source" "$client_ip"; then
+            warn "拒绝拉黑 ${source}：它包含当前 SSH 客户端 ${client_ip}。"
+            return 1
+        fi
+        chain=$IP_DENY_CHAIN; verdict=DROP
+        opposite_chain=$IP_ALLOW_CHAIN; opposite_comment=allentool-ip-allow; opposite_verdict=ACCEPT
+    else
+        chain=$IP_ALLOW_CHAIN; verdict=ACCEPT
+        opposite_chain=$IP_DENY_CHAIN; opposite_comment=allentool-ip-deny; opposite_verdict=DROP
+    fi
+    ensure_access_framework "$command_name" || return 1
+    remove_ip_access_rule "$command_name" "$opposite_chain" "$source" "$opposite_comment" "$opposite_verdict" || return 1
+    local comment="allentool-ip-${action}"
+    if ! "$command_name" -C "$chain" -s "$source" -m comment --comment "$comment" -j "$verdict" >/dev/null 2>&1; then
+        "$command_name" -I "$chain" 1 -s "$source" -m comment --comment "$comment" -j "$verdict" || return 1
+    fi
+    persist_access_control
+    if [[ $action == allow ]]; then log "已加入 IP 白名单：$source"; else log "已加入 IP 黑名单：$source"; fi
+}
+
+delete_ip_access_rules() {
+    local source=$1 command_name
+    require_access_control_backend || return 1
+    validate_ip_or_cidr "$source" || {
+        warn 'IP/CIDR 格式无效。'
+        return 1
+    }
+    if [[ $VALIDATED_IP_FAMILY == 6 ]]; then command_name=ip6tables; else command_name=iptables; fi
+    ensure_access_framework "$command_name" || return 1
+    ACCESS_RULE_REMOVED=no
+    remove_ip_access_rule "$command_name" "$IP_ALLOW_CHAIN" "$source" allentool-ip-allow ACCEPT || return 1
+    remove_ip_access_rule "$command_name" "$IP_DENY_CHAIN" "$source" allentool-ip-deny DROP || return 1
+    persist_access_control
+    if [[ $ACCESS_RULE_REMOVED == yes ]]; then log "已清除 IP 规则：$source"; else log "未找到 allentool 管理的 IP 规则：$source"; fi
+}
+
+ip_access_rule_records_for_command() {
+    local command_name=$1 family=$2 chain action
+    for chain in "$IP_ALLOW_CHAIN" "$IP_DENY_CHAIN"; do
+        if [[ $chain == "$IP_ALLOW_CHAIN" ]]; then action=ALLOW; else action=DENY; fi
+        "$command_name" -S "$chain" 2>/dev/null | awk -v family="$family" -v action="$action" '
+            $1=="-A" {
+                source=""
+                for (i=1; i<=NF; i++) if ($i=="-s" && i<NF) source=$(i+1)
+                if (source != "") print action, family, source
+            }
+        ' || true
+    done
+}
+
+ip_access_rule_records() {
+    command -v iptables >/dev/null 2>&1 && ip_access_rule_records_for_command iptables IPv4
+    command -v ip6tables >/dev/null 2>&1 && ip_access_rule_records_for_command ip6tables IPv6
+}
+
+show_ip_access_summary() {
+    local records values
+    records=$(ip_access_rule_records | sort -u)
+    printf '\nIP 黑白名单\n%s\n' '----------------------------------------'
+    printf '白名单（允许全部宿主机端口）：\n'
+    values=$(awk '$1=="ALLOW" {printf "  %-6s %s\n", $2, $3}' <<< "$records")
+    if [[ -n $values ]]; then printf '%s\n' "$values"; else printf '  （空）\n'; fi
+    printf '黑名单（拒绝全部宿主机端口）：\n'
+    values=$(awk '$1=="DENY" {printf "  %-6s %s\n", $2, $3}' <<< "$records")
+    if [[ -n $values ]]; then printf '%s\n' "$values"; else printf '  （空）\n'; fi
+}
+
+prompt_ip_or_cidr() {
+    local prompt=$1 answer
+    SELECTED_IP_OR_CIDR=
+    while true; do
+        printf '%s（输入 q 取消）: ' "$prompt"
+        read -r answer
+        [[ $answer == q || $answer == Q ]] && return 1
+        if validate_ip_or_cidr "$answer"; then SELECTED_IP_OR_CIDR=$answer; return 0; fi
+        printf 'IP/CIDR 无效，请重新输入。\n'
+    done
+}
+
+ip_access_menu() {
+    local choice
+    require_access_control_backend || return 0
+    while true; do
+        show_ip_access_summary
+        printf '  1. 添加 IP 白名单       2. 添加 IP 黑名单\n'
+        printf '  3. 清除指定 IP 规则     0. 返回\n'
+        printf '请选择 [0-3]: '
+        read -r choice
+        case $choice in
+            1) prompt_ip_or_cidr '请输入允许的 IP 或 CIDR' && apply_ip_access_rule allow "$SELECTED_IP_OR_CIDR" ;;
+            2) prompt_ip_or_cidr '请输入拒绝的 IP 或 CIDR' && apply_ip_access_rule deny "$SELECTED_IP_OR_CIDR" ;;
+            3) prompt_ip_or_cidr '请输入要清除的 IP 或 CIDR' && delete_ip_access_rules "$SELECTED_IP_OR_CIDR" ;;
+            0|q|Q) return 0 ;;
+            *) printf '选项无效，请重新输入。\n' ;;
+        esac
+    done
+}
+
+VALIDATED_COUNTRY_CODE=
+
+validate_country_code() {
+    local code
+    code=$(lowercase "${1:-}")
+    VALIDATED_COUNTRY_CODE=
+    [[ $code =~ ^[a-z]{2}$ ]] || return 1
+    [[ " $ISO_ALPHA2_CODES " == *" $code "* ]] || return 1
+    VALIDATED_COUNTRY_CODE=$code
+}
+
+country_set_name() {
+    local mode=$1 code=$2 family=$3 marker
+    if [[ $mode == allow ]]; then marker=a; else marker=b; fi
+    printf 'at_cc_%s_%s%s\n' "$code" "$marker" "$family"
+}
+
+country_set_names_for() {
+    local mode=$1 family=$2 marker
+    if [[ $mode == allow ]]; then marker=a; else marker=b; fi
+    managed_country_set_names | awk -v suffix="_${marker}${family}" 'index($0, suffix) == length($0)-length(suffix)+1'
+}
+
+country_access_records() {
+    local set_name code marker family mode count
+    while IFS= read -r set_name; do
+        [[ $set_name =~ ^at_cc_([a-z]{2})_([ab])([46])$ ]] || continue
+        code=${BASH_REMATCH[1]}
+        marker=${BASH_REMATCH[2]}
+        family=${BASH_REMATCH[3]}
+        if [[ $marker == a ]]; then mode=ALLOW; else mode=BLOCK; fi
+        count=$(ipset list "$set_name" 2>/dev/null | awk -F ': ' '$1=="Number of entries" {print $2; exit}')
+        printf '%s IPv%s %s %s\n' "$mode" "$family" "${count:-0}" "$(uppercase "$code")"
+    done < <(managed_country_set_names)
+}
+
+show_country_access_summary() {
+    local records values
+    records=$(country_access_records | sort -k1,1 -k4,4 -k2,2)
+    printf '\n国家黑白名单\n%s\n' '----------------------------------------'
+    printf '白名单（命中后继续检查端口；未命中国家拒绝）：\n'
+    values=$(awk '$1=="ALLOW" {printf "  %-4s %-6s %s 个网段\n", $4, $2, $3}' <<< "$records")
+    if [[ -n $values ]]; then printf '%s\n' "$values"; else printf '  （空，未启用仅允许国家模式）\n'; fi
+    printf '黑名单（命中国家直接拒绝）：\n'
+    values=$(awk '$1=="BLOCK" {printf "  %-4s %-6s %s 个网段\n", $4, $2, $3}' <<< "$records")
+    if [[ -n $values ]]; then printf '%s\n' "$values"; else printf '  （空）\n'; fi
+    printf '数据源: IPdeny HTTPS aggregated（IPv4 + IPv6）\n'
+}
+
+show_access_control_overview() {
+    local backend ip_records country_records values
+    backend=$(detect_firewall_backend)
+    [[ $backend == iptables ]] || return 0
+    ip_records=$(ip_access_rule_records | sort -u)
+    country_records=$(country_access_records | sort -u)
+    printf '\n来源访问规则\n%s\n' '----------------------------------------'
+    values=$(awk '$1=="ALLOW" {printf "%s%s:%s", found ? ", " : "", $2, $3; found=1}' <<< "$ip_records")
+    printf 'IP 白名单: %s\n' "${values:-（空）}"
+    values=$(awk '$1=="DENY" {printf "%s%s:%s", found ? ", " : "", $2, $3; found=1}' <<< "$ip_records")
+    printf 'IP 黑名单: %s\n' "${values:-（空）}"
+    values=$(awk '$1=="ALLOW" {print $4}' <<< "$country_records" | sort -u | awk '{printf "%s%s", found ? ", " : "", $1; found=1}')
+    printf '国家白名单: %s\n' "${values:-（空）}"
+    values=$(awk '$1=="BLOCK" {print $4}' <<< "$country_records" | sort -u | awk '{printf "%s%s", found ? ", " : "", $1; found=1}')
+    printf '国家黑名单: %s\n' "${values:-（空）}"
+}
+
+prompt_country_code() {
+    local answer
+    SELECTED_COUNTRY_CODE=
+    while true; do
+        printf '请输入两位国家代码（如 CN、US，输入 q 取消）: '
+        read -r answer
+        [[ $answer == q || $answer == Q ]] && return 1
+        if validate_country_code "$answer"; then
+            SELECTED_COUNTRY_CODE=$VALIDATED_COUNTRY_CODE
+            return 0
+        fi
+        printf '国家代码无效，请输入有效的 ISO 3166-1 alpha-2 代码。\n'
+    done
+}
+
+download_country_file() {
+    local code=$1 family=$2 output=$3 url
+    if [[ $family == 4 ]]; then
+        url="${IPDENY_V4_BASE}/${code}-aggregated.zone"
+    else
+        url="${IPDENY_V6_BASE}/${code}-aggregated.zone"
+    fi
+    curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+        --connect-timeout 15 --max-time 120 "$url" -o "$output"
+}
+
+build_country_temp_set() {
+    local file=$1 family=$2 temp_set=$3 family_option restore_file
+    [[ -s $file ]] || return 1
+    if [[ $family == 6 ]]; then family_option=inet6; else family_option=inet; fi
+    ipset create "$temp_set" hash:net family "$family_option" hashsize 4096 maxelem 200000 >/dev/null 2>&1 || return 1
+    restore_file=$(mktemp) || { ipset destroy "$temp_set" >/dev/null 2>&1 || true; return 1; }
+    if ! awk -v set_name="$temp_set" -v family="$family" '
+        BEGIN { valid=1; count=0 }
+        {
+            sub(/\r$/, "")
+            if (NF != 1) { valid=0; next }
+            if (family == 4 && $1 !~ /^[0-9.]+\/[0-9]{1,2}$/) { valid=0; next }
+            if (family == 6 && $1 !~ /^[0-9A-Fa-f:]+\/[0-9]{1,3}$/) { valid=0; next }
+            print "add", set_name, $1
+            count++
+        }
+        END { if (!valid || count == 0) exit 1 }
+    ' "$file" > "$restore_file"; then
+        rm -f "$restore_file"
+        ipset destroy "$temp_set" >/dev/null 2>&1 || true
+        return 1
+    fi
+    if ! ipset restore -file "$restore_file" >/dev/null 2>&1; then
+        rm -f "$restore_file"
+        ipset destroy "$temp_set" >/dev/null 2>&1 || true
+        return 1
+    fi
+    rm -f "$restore_file"
+}
+
+rollback_activated_country_set() {
+    local temp_set=$1 permanent_set=$2 had_old=$3
+    if [[ $had_old == yes ]]; then
+        ipset swap "$temp_set" "$permanent_set" >/dev/null 2>&1 || return 1
+        ipset destroy "$temp_set" >/dev/null 2>&1 || true
+    else
+        ipset rename "$permanent_set" "$temp_set" >/dev/null 2>&1 || return 1
+        ipset destroy "$temp_set" >/dev/null 2>&1 || true
+    fi
+}
+
+activate_country_temp_sets() {
+    local temp4=$1 set4=$2 temp6=$3 set6=$4 old4=no old6=no
+    if ipset list "$set4" >/dev/null 2>&1; then
+        old4=yes
+        ipset swap "$temp4" "$set4" || return 1
+    else
+        ipset rename "$temp4" "$set4" || return 1
+    fi
+
+    if ipset list "$set6" >/dev/null 2>&1; then
+        old6=yes
+        if ! ipset swap "$temp6" "$set6"; then
+            rollback_activated_country_set "$temp4" "$set4" "$old4" || true
+            return 1
+        fi
+    elif ! ipset rename "$temp6" "$set6"; then
+        rollback_activated_country_set "$temp4" "$set4" "$old4" || true
+        return 1
+    fi
+
+    [[ $old4 == no ]] || ipset destroy "$temp4" >/dev/null 2>&1 || true
+    [[ $old6 == no ]] || ipset destroy "$temp6" >/dev/null 2>&1 || true
+}
+
+flush_country_chains() {
+    local command_name
+    for command_name in iptables ip6tables; do
+        command -v "$command_name" >/dev/null 2>&1 || continue
+        if "$command_name" -S "$COUNTRY_CHAIN" >/dev/null 2>&1; then
+            "$command_name" -F "$COUNTRY_CHAIN" || return 1
+            "$command_name" -A "$COUNTRY_CHAIN" -j RETURN || return 1
+        fi
+    done
+}
+
+rebuild_country_chain() {
+    local command_name=$1 family=$2 set_name code client_ip has_allow=no
+    ensure_access_framework "$command_name" || return 1
+    "$command_name" -F "$COUNTRY_CHAIN" || return 1
+    if [[ -n $(country_set_names_for allow "$family") ]]; then has_allow=yes; fi
+    client_ip=$(current_ssh_client_ip)
+    if [[ $has_allow == yes && -n $client_ip ]] &&
+       { [[ $family == 4 && $client_ip != *:* ]] || [[ $family == 6 && $client_ip == *:* ]]; }; then
+        "$command_name" -A "$COUNTRY_CHAIN" -s "$client_ip" -m comment --comment allentool-country-ssh -j RETURN || return 1
+    fi
+    while IFS= read -r set_name; do
+        [[ -n $set_name ]] || continue
+        code=${set_name#at_cc_}; code=${code%%_*}
+        "$command_name" -A "$COUNTRY_CHAIN" -m set --match-set "$set_name" src \
+            -m comment --comment "allentool-country-block-${code}" -j DROP || return 1
+    done < <(country_set_names_for block "$family")
+    while IFS= read -r set_name; do
+        [[ -n $set_name ]] || continue
+        code=${set_name#at_cc_}; code=${code%%_*}
+        "$command_name" -A "$COUNTRY_CHAIN" -m set --match-set "$set_name" src \
+            -m comment --comment "allentool-country-allow-${code}" -j RETURN || return 1
+    done < <(country_set_names_for allow "$family")
+    if [[ $has_allow == yes ]]; then
+        "$command_name" -A "$COUNTRY_CHAIN" -m comment --comment allentool-country-allow-guard -j DROP || return 1
+    fi
+    "$command_name" -A "$COUNTRY_CHAIN" -j RETURN
+}
+
+rebuild_all_country_chains() {
+    command -v iptables >/dev/null 2>&1 && rebuild_country_chain iptables 4 || return 1
+    if command -v ip6tables >/dev/null 2>&1; then
+        rebuild_country_chain ip6tables 6 || return 1
+    fi
+}
+
+apply_country_access_rule() {
+    local mode=$1 code=$2 save_after=${3:-yes} temp_dir file4 file6 temp4 temp6 set4 set6 opposite4 opposite6
+    local client_ip opposite_mode
+    [[ $mode == allow || $mode == block ]] || return 1
+    require_access_control_backend || return 1
+    install_country_download_tool || { warn 'curl 不可用，无法下载国家网段。'; return 1; }
+    validate_country_code "$code" || { warn '国家代码无效。'; return 1; }
+    code=$VALIDATED_COUNTRY_CODE
+    command -v ip6tables >/dev/null 2>&1 || { warn '缺少 ip6tables；为避免只限制 IPv4 造成绕过，拒绝应用国家规则。'; return 1; }
+
+    temp_dir=$(mktemp -d) || return 1
+    file4=$temp_dir/ipv4.zone; file6=$temp_dir/ipv6.zone
+    temp4="at_tmp4_${$}_${RANDOM}"; temp6="at_tmp6_${$}_${RANDOM}"
+    if ! download_country_file "$code" 4 "$file4" || ! download_country_file "$code" 6 "$file6" ||
+       ! build_country_temp_set "$file4" 4 "$temp4" || ! build_country_temp_set "$file6" 6 "$temp6"; then
+        ipset destroy "$temp4" >/dev/null 2>&1 || true
+        ipset destroy "$temp6" >/dev/null 2>&1 || true
+        rm -r -- "$temp_dir"
+        warn "$(uppercase "$code") 国家网段下载或完整校验失败；没有替换现有规则。"
+        return 1
+    fi
+    rm -r -- "$temp_dir"
+
+    client_ip=$(current_ssh_client_ip)
+    if [[ $mode == block && -n $client_ip ]]; then
+        if { [[ $client_ip == *:* ]] && ipset test "$temp6" "$client_ip" >/dev/null 2>&1; } ||
+           { [[ $client_ip != *:* ]] && ipset test "$temp4" "$client_ip" >/dev/null 2>&1; }; then
+            ipset destroy "$temp4" >/dev/null 2>&1 || true
+            ipset destroy "$temp6" >/dev/null 2>&1 || true
+            warn "拒绝屏蔽 $(uppercase "$code")：当前 SSH 客户端 ${client_ip} 位于该国家网段。"
+            return 1
+        fi
+    fi
+
+    set4=$(country_set_name "$mode" "$code" 4); set6=$(country_set_name "$mode" "$code" 6)
+    if [[ $mode == allow ]]; then opposite_mode=block; else opposite_mode=allow; fi
+    opposite4=$(country_set_name "$opposite_mode" "$code" 4)
+    opposite6=$(country_set_name "$opposite_mode" "$code" 6)
+    if ! activate_country_temp_sets "$temp4" "$set4" "$temp6" "$set6"; then
+        ipset destroy "$temp4" >/dev/null 2>&1 || true
+        ipset destroy "$temp6" >/dev/null 2>&1 || true
+        warn '国家 IPv4/IPv6 集合切换失败；已尝试恢复原有集合。'
+        return 1
+    fi
+    flush_country_chains || return 1
+    ipset destroy "$opposite4" >/dev/null 2>&1 || true
+    ipset destroy "$opposite6" >/dev/null 2>&1 || true
+    rebuild_all_country_chains || return 1
+    [[ $save_after == yes ]] && persist_access_control
+    if [[ $mode == allow ]]; then
+        log "已加入国家白名单：$(uppercase "$code")（IPv4 + IPv6）。"
+    else
+        log "已加入国家黑名单：$(uppercase "$code")（IPv4 + IPv6）。"
+    fi
+}
+
+remove_country_access_rule() {
+    local code=$1 mode family set_name removed=no
+    require_access_control_backend || return 1
+    validate_country_code "$code" || { warn '国家代码无效。'; return 1; }
+    code=$VALIDATED_COUNTRY_CODE
+    flush_country_chains || return 1
+    for mode in allow block; do
+        for family in 4 6; do
+            set_name=$(country_set_name "$mode" "$code" "$family")
+            if ipset list "$set_name" >/dev/null 2>&1; then
+                ipset destroy "$set_name" || return 1
+                removed=yes
+            fi
+        done
+    done
+    rebuild_all_country_chains || return 1
+    persist_access_control
+    if [[ $removed == yes ]]; then log "已解除 $(uppercase "$code") 的国家限制。"; else log "未找到 $(uppercase "$code") 的国家规则。"; fi
+}
+
+refresh_country_access_rules() {
+    local record mode code failed=no found=no
+    require_access_control_backend || return 1
+    install_country_download_tool || return 1
+    while read -r mode code; do
+        [[ -n $mode && -n $code ]] || continue
+        found=yes
+        if [[ $mode == ALLOW ]]; then mode=allow; else mode=block; fi
+        apply_country_access_rule "$mode" "$(lowercase "$code")" no || failed=yes
+    done < <(country_access_records | awk '{print $1, $4}' | sort -u)
+    [[ $found == yes ]] || { log '当前没有需要刷新的国家规则。'; return 0; }
+    persist_access_control
+    [[ $failed == no ]] || { warn '部分国家数据刷新失败，失败项保留原有集合。'; return 1; }
+    log '所有国家网段数据已刷新。'
+}
+
+country_apply_interactive() {
+    local mode=$1 action_label
+    prompt_country_code || return 0
+    if [[ $mode == allow ]]; then
+        action_label="启用/扩展国家白名单 ${SELECTED_COUNTRY_CODE}"
+        warn '国家白名单启用后，未命中任何白名单国家的来源会被拒绝；当前 SSH 客户端会保留精确例外。'
+    else
+        action_label="加入国家黑名单 ${SELECTED_COUNTRY_CODE}"
+    fi
+    prompt_yes_no "确认${action_label}？" no || return 0
+    apply_country_access_rule "$mode" "$SELECTED_COUNTRY_CODE"
+}
+
+country_access_menu() {
+    local choice
+    require_access_control_backend || return 0
+    while true; do
+        show_country_access_summary
+        printf '  1. 仅允许指定国家     2. 阻止指定国家\n'
+        printf '  3. 解除指定国家限制   4. 刷新全部国家数据\n'
+        printf '  0. 返回\n'
+        printf '请选择 [0-4]: '
+        read -r choice
+        case $choice in
+            1) country_apply_interactive allow ;;
+            2) country_apply_interactive block ;;
+            3) prompt_country_code && remove_country_access_rule "$SELECTED_COUNTRY_CODE" ;;
+            4) prompt_yes_no '确认从 IPdeny 刷新全部已配置国家数据（推荐）？' yes && refresh_country_access_rules ;;
+            0|q|Q) return 0 ;;
+            *) printf '选项无效，请重新输入。\n' ;;
+        esac
+    done
+}
+
 prompt_firewall_protocols() {
     local choice
     SELECTED_PROTOCOLS=
@@ -1367,7 +2018,7 @@ show_firewall_status() {
 }
 
 build_lockdown_chain() {
-    local command_name=$1 allowlist=$2 protocol port
+    local command_name=$1 allowlist=$2 protocol port insert_position=1
     if ! "$command_name" -S "$FIREWALL_CHAIN" >/dev/null 2>&1; then
         "$command_name" -N "$FIREWALL_CHAIN" || return 1
     fi
@@ -1375,7 +2026,10 @@ build_lockdown_chain() {
         "$command_name" -D INPUT -j "$FIREWALL_CHAIN" || return 1
     done
     "$command_name" -F "$FIREWALL_CHAIN" || return 1
-    "$command_name" -I INPUT 1 -j "$FIREWALL_CHAIN" || return 1
+    if "$command_name" -C INPUT -j "$ACCESS_CHAIN" >/dev/null 2>&1; then
+        insert_position=2
+    fi
+    "$command_name" -I INPUT "$insert_position" -j "$FIREWALL_CHAIN" || return 1
     "$command_name" -A "$FIREWALL_CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || return 1
     "$command_name" -A "$FIREWALL_CHAIN" -i lo -j ACCEPT || return 1
     if [[ $command_name == ip6tables ]]; then
@@ -1426,6 +2080,7 @@ firewall_menu() {
     local choice
     while true; do
         show_firewall_port_overview
+        show_access_control_overview
         printf '\n防火墙管理\n'
         printf '%s\n' '----------------------------------------'
         printf '  1. 开放指定端口        2. 关闭指定端口\n'
@@ -1434,9 +2089,10 @@ firewall_menu() {
         printf '  5. 仅保留 SSH 入站\n'
         printf '  6. 保留 SSH 和当前公网监听端口\n'
         printf '  7. 安装/修复防火墙持久化\n'
+        printf '  8. IP 黑白名单         9. 国家黑白名单\n'
         printf '%s\n' '----------------------------------------'
         printf '  0. 返回上一级菜单\n'
-        printf '请选择 [0-7]: '
+        printf '请选择 [0-9]: '
         read -r choice
         case $choice in
             1) firewall_open_interactive ;;
@@ -1446,6 +2102,8 @@ firewall_menu() {
             5) firewall_lockdown_interactive ssh ;;
             6) firewall_lockdown_interactive listeners ;;
             7) repair_firewall_persistence ;;
+            8) ip_access_menu ;;
+            9) country_access_menu ;;
             0|q|Q) return 0 ;;
             *) printf '选项无效，请重新输入。\n' ;;
         esac
