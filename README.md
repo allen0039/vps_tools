@@ -31,6 +31,7 @@ allentool
 输入新端口，并确认云厂商安全组已经放行该端口。脚本会直接切换并自动提交，
 最终只监听新端口，不提供双端口模式。服务器若启用了 UFW、firewalld 或
 restrictive iptables/ip6tables，脚本会自动在主机防火墙放行新端口。
+Debian/Ubuntu 缺少持久化工具时还会自动安装 `iptables-persistent` 并保存规则。
 
 每次修改产生的备份会保留在 `/var/lib/safe-ssh-port/backups/`。需要恢复时运行
 `allentool` 并选择“从备份恢复 SSH 设置”；脚本会列出备份时间及其中的端口。

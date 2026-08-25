@@ -66,7 +66,8 @@ interactive 会检测主配置中的
 PasswordAuthentication no，用 y/n 询问是否改为 yes。除非明确选择 y，
 否则脚本不会修改认证配置。
 脚本不会删除 /etc/ssh/sshd_config.d 中的云厂商配置。
-iptables 规则会在已有 netfilter-persistent 时自动保存；未安装时会明确警告。
+Debian/Ubuntu 缺少持久化工具时会自动安装 iptables-persistent 并保存规则。
+安装或保存失败不会中断端口切换，但会明确警告重启后规则可能失效。
 EOF
 }
 
@@ -764,18 +765,43 @@ iptables_input_is_restrictive() {
     grep -Eq '^-P INPUT (DROP|REJECT)$' <<< "$rules"
 }
 
+debian_apt_supported() {
+    [[ -f /etc/debian_version ]] && command -v apt-get >/dev/null 2>&1
+}
+
+install_netfilter_persistence() {
+    debian_apt_supported || return 1
+    log '未检测到 netfilter-persistent，正在自动安装 iptables-persistent。'
+    if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq; then
+        warn 'apt-get update 失败，将尝试使用现有软件包索引继续安装。'
+    fi
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent; then
+        warn 'iptables-persistent 自动安装失败。'
+        return 1
+    fi
+    hash -r
+    if ! command -v netfilter-persistent >/dev/null 2>&1; then
+        warn 'iptables-persistent 安装完成，但未找到 netfilter-persistent 命令。'
+        return 1
+    fi
+    log 'iptables-persistent 已安装。'
+}
+
 persist_iptables_rules() {
     local warn_if_missing=${1:-yes}
-    if command -v netfilter-persistent >/dev/null 2>&1; then
-        if netfilter-persistent save >/dev/null; then
-            log 'iptables/ip6tables 规则已通过 netfilter-persistent 保存。'
-        else
-            warn '端口已在当前防火墙放行，但 netfilter-persistent 保存失败；重启后规则可能失效。'
+    if ! command -v netfilter-persistent >/dev/null 2>&1; then
+        if [[ $warn_if_missing != yes ]]; then
+            return 0
         fi
-        return 0
+        if ! install_netfilter_persistence; then
+            warn '端口已在当前 iptables/ip6tables 防火墙放行，但无法安装持久化工具；重启后规则可能失效。'
+            return 0
+        fi
     fi
-    if [[ $warn_if_missing == yes ]]; then
-        warn '端口已在当前 iptables/ip6tables 防火墙放行，但未检测到 netfilter-persistent；重启后规则可能失效。'
+    if netfilter-persistent save >/dev/null; then
+        log 'iptables/ip6tables 规则已通过 netfilter-persistent 保存。'
+    else
+        warn '端口已在当前防火墙放行，但 netfilter-persistent 保存失败；重启后规则可能失效。'
     fi
 }
 

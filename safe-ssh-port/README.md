@@ -114,8 +114,13 @@ sudo safe-ssh-port switch 21919 --cloud-firewall-ready --enable-main-password
   `iptables-nft` 后端同样适用。
 
 如果系统已安装 `netfilter-persistent`，新增的 iptables/ip6tables 规则会立即
-保存，重启后仍然生效。若未检测到持久化工具，当前运行中的防火墙仍会放行端口，
-但脚本会警告重启后可能失效，不会在 SSH 切换过程中擅自安装软件包。
+保存，重启后仍然生效。在 Debian/Ubuntu 上若未检测到该命令，脚本会通过
+`apt-get` 非交互安装 `iptables-persistent`，然后保存完整的当前 IPv4/IPv6
+规则集。
+
+如果更新软件包索引、安装或保存失败，当前运行中的防火墙规则仍然保留，SSH
+端口切换会继续执行，同时明确警告重启后规则可能失效。脚本不会在其他发行版上
+猜测软件包名称或强行安装持久化服务。
 
 切换或恢复失败时，只清理本次操作由脚本新增的主机防火墙规则，不会删除原有
 规则。云厂商安全组无法由 VPS 内的脚本修改，仍需提前手动放行。
