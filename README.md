@@ -9,6 +9,56 @@
 | `restart-mmw-agent` | 完整重启并验证 `mmw-agent.service`，显示 PID、内存和 TCP 连接变化 | [查看说明](restart-mmw-agent/README.md) |
 | `safe-ssh-port` | 通过双端口过渡、配置校验和自动回滚安全修改 OpenSSH 端口 | [查看说明](safe-ssh-port/README.md) |
 
+## safe-ssh-port 快速使用
+
+下载安装脚本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/allen0039/vps_tools/main/safe-ssh-port/safe-ssh-port.sh \
+  -o /tmp/safe-ssh-port.sh
+less /tmp/safe-ssh-port.sh
+sudo bash /tmp/safe-ssh-port.sh install
+```
+
+首次安装会同时创建正式命令 `safe-ssh-port` 和快捷命令 `allentool`。
+开始修改 SSH 端口时直接运行：
+
+```bash
+allentool
+```
+
+按照提示选择是否将主配置中的 `PasswordAuthentication no` 改为 `yes`、
+输入新端口，并确认云厂商安全组已经放行该端口。脚本会先同时保留新旧端口。
+
+保持当前 SSH 会话，另开一个终端测试新端口：
+
+```bash
+ssh -p 新端口 root@服务器IP
+```
+
+确认登录成功后再次运行：
+
+```bash
+allentool
+```
+
+脚本会交互确认是否关闭旧端口并结束迁移。如果新端口无法登录，请在原会话中运行：
+
+```bash
+sudo safe-ssh-port rollback
+```
+
+完整参数模式、状态检查和适用范围请查看
+[safe-ssh-port 详细说明](safe-ssh-port/README.md)。
+
+## restart-mmw-agent 快速使用
+
+请先查看[工具说明](restart-mmw-agent/README.md)，然后按文档安装并运行：
+
+```bash
+sudo restart-mmw-agent
+```
+
 ## 安全原则
 
 - 建议先下载并检查脚本，再以 `root` 权限运行。
