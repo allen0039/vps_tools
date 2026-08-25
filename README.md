@@ -7,7 +7,7 @@
 | 工具 | 用途 | 文档 |
 | --- | --- | --- |
 | `restart-mmw-agent` | 完整重启并验证 `mmw-agent.service`，显示 PID、内存和 TCP 连接变化 | [查看说明](restart-mmw-agent/README.md) |
-| `safe-ssh-port` | 检查配置后直接切换 OpenSSH 端口，成功后只保留新端口 | [查看说明](safe-ssh-port/README.md) |
+| `safe-ssh-port` | 安全切换 OpenSSH 单端口，并提供交互式主机防火墙管理 | [查看说明](safe-ssh-port/README.md) |
 
 ## safe-ssh-port 快速使用
 
@@ -26,12 +26,19 @@ curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/safe-ssh-
 allentool
 ```
 
-菜单可以修改 SSH 端口、从历史备份恢复 SSH 设置或查看状态。修改端口时，
+菜单可以修改 SSH 端口、恢复历史 SSH 设置、查看状态或管理主机防火墙。修改端口时，
 按照提示选择是否将主配置中的 `PasswordAuthentication no` 改为 `yes`、
 输入新端口，并确认云厂商安全组已经放行该端口。脚本会直接切换并自动提交，
-最终只监听新端口，不提供双端口模式。服务器若启用了 UFW、firewalld 或
+最终只监听新端口，不提供双端口模式。唯一有效的 `Port` 会写入
+`/etc/ssh/sshd_config`，兼容只读取主配置的 Kejilion 防火墙流程。
+服务器若启用了 UFW、firewalld 或
 restrictive iptables/ip6tables，脚本会自动在主机防火墙放行新端口。
 Debian/Ubuntu 缺少持久化工具时还会自动安装 `iptables-persistent` 并保存规则。
+
+防火墙菜单支持查看状态、按 TCP/UDP 开放或关闭端口、保护并修复 SSH 放行规则、
+仅保留 SSH 入站、保留 SSH 与当前非回环监听端口、安装持久化工具，以及恢复
+iptables 规则备份。原生自定义 nftables 只做状态展示，不会猜测表和链。
+云厂商安全组仍需在服务商控制台单独管理。
 
 每次修改产生的备份会保留在 `/var/lib/safe-ssh-port/backups/`。需要恢复时运行
 `allentool` 并选择“从备份恢复 SSH 设置”；脚本会列出备份时间及其中的端口。
@@ -58,6 +65,7 @@ sudo restart-mmw-agent
 
 - 建议先下载并检查脚本，再以 `root` 权限运行。
 - 修改 SSH 端口前必须保留当前会话，并先在云厂商安全组放行新端口。
+- 使用“关闭所有宿主机入站”前应检查脚本展示的保留列表，并确保有云控制台/VNC 救援入口。
 - 脚本无法替代云控制台、VNC、IPMI 或串口等救援入口。
 - 固定版本或固定提交链接比直接执行不断变化的 `main` 分支更适合生产环境。
 

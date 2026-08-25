@@ -1,12 +1,14 @@
 # safe-ssh-port
 
-直接把 VPS 的 OpenSSH 从旧端口切换到新端口，成功后只保留新端口。
+直接把 VPS 的 OpenSSH 从旧端口切换到新端口，成功后只保留新端口；同时提供
+交互式主机防火墙和规则持久化管理。
 
 ## 安全特性
 
 - 自动备份 SSH 配置并运行 `sshd -t`
+- 把唯一有效的 `Port` 写入 `/etc/ssh/sshd_config`，兼容 Kejilion 等只读取主配置的脚本
 - 修改前后比较实际生效的认证配置
-- 保留 cloud-init 和其他 `sshd_config.d` 配置
+- 保留 cloud-init 和其他 `sshd_config.d` 文件，只注释其中冲突的有效 `Port`
 - 自动管理启用中的 UFW、firewalld 或 restrictive iptables/ip6tables
 - 新配置从一开始只包含新端口，不提供双端口模式
 - reload 后确认新端口监听且旧端口已经关闭
@@ -14,6 +16,7 @@
 - 成功后自动提交，不保留迁移或一键回滚状态
 - 可从交互菜单选择历史备份恢复端口和认证设置
 - 恢复前自动备份当前配置，恢复失败时自动还原
+- 防火墙 raw iptables 变更前保存完整 IPv4/IPv6 快照，失败自动恢复
 
 ## 安装
 
@@ -60,11 +63,16 @@ allentool
 1. 修改 SSH 端口
 2. 从备份恢复 SSH 设置
 3. 查看 SSH 状态
-4. 退出
+4. 防火墙管理
+5. 退出
 ```
 
 也可以直接运行 `sudo safe-ssh-port interactive` 进入端口修改流程，或运行
-`sudo safe-ssh-port restore` 进入备份恢复流程。
+`sudo safe-ssh-port restore` 进入备份恢复流程。防火墙菜单可直接运行：
+
+```bash
+sudo safe-ssh-port firewall
+```
 
 ## 修改 SSH 端口
 
@@ -82,8 +90,10 @@ allentool
 4. 使用 `y/n` 确认云厂商安全组已经放行新端口。
 5. 自动检测主机防火墙，并在需要时放行新端口。
 
-确认后脚本会直接写入新端口、reload SSH，检查新端口已经监听且旧端口已经关闭，
-然后自动提交。整个流程不提供双端口选择，也不需要再次运行 `allentool`。
+确认后脚本会注释主配置和 drop-in 中原有的有效 `Port`，再把一个新的 `Port`
+写到 `/etc/ssh/sshd_config` 的第一个 `Match` 块之前。之后 reload SSH，检查新端口
+已经监听且旧端口已经关闭，然后自动提交。整个流程不提供双端口选择，也不需要
+再次运行 `allentool`。原配置内容和 provider drop-in 文件会保留在备份中。
 
 请保持原 SSH 会话。完成后另开一个终端验证新端口：
 
@@ -103,7 +113,7 @@ sudo safe-ssh-port switch 21919 --cloud-firewall-ready
 sudo safe-ssh-port switch 21919 --cloud-firewall-ready --enable-main-password
 ```
 
-## 主机防火墙管理
+## 修改 SSH 端口时的自动防火墙处理
 
 修改或恢复 SSH 端口时，脚本会自动处理：
 
@@ -124,6 +134,52 @@ sudo safe-ssh-port switch 21919 --cloud-firewall-ready --enable-main-password
 
 切换或恢复失败时，只清理本次操作由脚本新增的主机防火墙规则，不会删除原有
 规则。云厂商安全组无法由 VPS 内的脚本修改，仍需提前手动放行。
+
+## 交互式防火墙管理
+
+运行 `allentool` 选择 `4. 防火墙管理`，菜单提供：
+
+```text
+1. 查看防火墙与持久化状态
+2. 开放指定端口
+3. 关闭指定端口
+4. 重新检测并放行当前 SSH 端口
+5. 关闭所有宿主机入站，仅保留 SSH
+6. 关闭所有宿主机入站，保留 SSH 和当前公网监听端口
+7. 安装/修复防火墙持久化
+8. 恢复防火墙备份
+0. 返回
+```
+
+开放或关闭指定端口时，可以选择 `TCP`、`UDP` 或 `TCP + UDP`。通常服务端口应按
+实际协议开放，默认推荐 TCP；只有确认应用同时使用两种协议时才选择同时开放。
+关闭 TCP 端口前，脚本会读取 `sshd -T` 的有效端口和当前 `SSH_CONNECTION`，拒绝
+关闭任何正在使用的 SSH 端口。若端口当前有非回环监听程序，还会再次询问。
+
+状态页本身只读取信息。iptables 后端没有 `netfilter-persistent` 时，状态页会显示
+“安装并保存规则”和“返回”两个选择；只有明确选择安装才会改变系统。也可以从
+菜单第 7 项主动安装或修复持久化。
+
+“仅保留 SSH”与“保留 SSH 和当前公网监听端口”是 iptables/iptables-nft 的高级
+功能。第二种模式只保留绑定到非回环地址的 TCP/UDP 监听端口，不会把
+`127.0.0.1` 或 `::1` 上的数据库等服务公开。应用前会展示完整保留列表并要求
+`y/n` 确认。脚本使用独立的 `ALLENTOOL_INPUT` 链，不会执行 `iptables -F INPUT`
+或删除 Docker、Fail2ban、云厂商及用户已有规则；链中会保留已建立连接、回环流量
+和 ICMP/ICMPv6，然后拒绝其他宿主机 `INPUT` 流量。
+
+Docker 发布端口通常经过 `FORWARD`/`DOCKER-USER`，不属于宿主机 `INPUT`，因此
+不会自动出现在上述保留列表中，也不受 `ALLENTOOL_INPUT` 链直接控制。若要限制
+Docker 端口，应单独管理 Docker/`DOCKER-USER` 规则。
+
+raw iptables 的端口变更和入站收紧都会先保存完整规则到：
+
+```text
+/var/lib/safe-ssh-port/firewall-backups/
+```
+
+恢复备份前会先验证 IPv4/IPv6 文件，再保存一份当前规则作为紧急快照。若恢复过程
+失败，脚本会自动重放紧急快照。此备份/恢复功能不适用于 UFW、firewalld 或原生
+自定义 nftables；这些后端分别使用自己的原生命令或仅做只读展示。
 
 ## 查看状态
 
@@ -172,6 +228,7 @@ SSH 端口，输入编号后再确认云厂商安全组已放行对应端口，�
 目前主要面向使用 `ssh.service` 或 `sshd.service` 的 Debian/Ubuntu VPS。
 
 - 原生 nftables 自定义表/链无法安全推断时仍需人工放行；也可以在确认完成后使用 `--skip-host-firewall`。
+- `ALLENTOOL_INPUT` 只管理宿主机 `INPUT`，不代替云厂商安全组，也不管理 Docker 转发链。
 - SELinux enforcing 系统需要提前配置 `ssh_port_t`。
 - 使用 systemd `ssh.socket` 监听的系统需要先人工处理 socket 端口。
 - 修改 SSH 端口不能代替公钥认证、强密码和登录防护。

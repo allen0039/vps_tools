@@ -11,6 +11,8 @@ MANAGED_CONFIG=${SAFE_SSH_PORT_MANAGED_CONFIG:-$SSHD_DROPIN_DIR/00-safe-ssh-port
 STATE_DIR=${SAFE_SSH_PORT_STATE_DIR:-/var/lib/safe-ssh-port}
 STATE_FILE=$STATE_DIR/state
 BACKUP_ROOT=$STATE_DIR/backups
+FIREWALL_BACKUP_ROOT=${SAFE_SSH_PORT_FIREWALL_BACKUP_ROOT:-$STATE_DIR/firewall-backups}
+FIREWALL_CHAIN=ALLENTOOL_INPUT
 SSHD_BIN=${SAFE_SSH_PORT_SSHD_BIN:-sshd}
 SS_BIN=${SAFE_SSH_PORT_SS_BIN:-ss}
 
@@ -48,6 +50,7 @@ usage() {
   $PROGRAM menu
   $PROGRAM interactive
   $PROGRAM restore
+  $PROGRAM firewall
   $PROGRAM install
   $PROGRAM install-shortcut
   sudo $PROGRAM switch <新端口> [--cloud-firewall-ready] [--skip-host-firewall]
@@ -57,11 +60,13 @@ usage() {
 流程：
   1. 先在云厂商安全组/防火墙中放行新端口。
   2. 自动在启用中的 UFW、firewalld 或 restrictive iptables 放行新端口。
-  3. 备份配置，只写入新端口，并验证 SSH 配置和认证设置。
+  3. 备份配置，把唯一有效的 Port 写入 /etc/ssh/sshd_config，并验证 SSH 配置和认证设置。
   4. reload 后确认新端口监听、旧端口关闭，然后自动提交。
   5. 任一检查失败时自动恢复原配置并清理本次新增的防火墙规则。
 
-不带参数运行时显示功能菜单，可选择修改端口、从备份恢复或查看状态。
+不带参数运行时显示功能菜单，可修改/恢复 SSH 配置，或管理主机防火墙。
+防火墙菜单支持状态检查、TCP/UDP 端口规则、SSH 放行修复、入站收紧、
+iptables 持久化以及规则备份恢复。原生自定义 nftables 仅显示状态。
 interactive 会检测主配置中的
 PasswordAuthentication no，用 y/n 询问是否改为 yes。除非明确选择 y，
 否则脚本不会修改认证配置。
@@ -382,19 +387,32 @@ set_main_password_yes() {
     [[ $(main_password_setting) == yes ]]
 }
 
-write_managed_config() {
-    local temporary port
-    mkdir -p "$SSHD_DROPIN_DIR"
-    temporary=$(mktemp "$SSHD_DROPIN_DIR/.00-safe-ssh-port.XXXXXX")
-    {
-        printf '%s\n' '# Managed by safe_ssh_port.sh. Do not edit during migration.'
-        for port in "$@"; do
-            printf 'Port %s\n' "$port"
-        done
-    } > "$temporary"
-    chmod 644 "$temporary"
-    chown root:root "$temporary"
-    mv "$temporary" "$MANAGED_CONFIG"
+ensure_main_in_backup() {
+    [[ -n $STATE_BACKUP_DIR && -f $STATE_BACKUP_DIR/sshd_config && -f $STATE_BACKUP_DIR/modified-files ]] || return 1
+    grep -Fxq "$SSHD_CONFIG" "$STATE_BACKUP_DIR/modified-files" ||
+        printf '%s\n' "$SSHD_CONFIG" >> "$STATE_BACKUP_DIR/modified-files"
+}
+
+write_main_port() {
+    local port=$1 temporary
+    validate_port "$port" || return 1
+    temporary=$(mktemp "${SSHD_CONFIG}.safe-ssh-port.XXXXXX")
+    awk -v port="$port" '
+        !inserted && tolower($1) == "match" {
+            print "Port " port
+            inserted=1
+        }
+        { print }
+        END {
+            if (!inserted) print "Port " port
+        }
+    ' "$SSHD_CONFIG" > "$temporary"
+    replace_file_preserving_metadata "$SSHD_CONFIG" "$temporary"
+    rm -f "$MANAGED_CONFIG"
+    [[ $(awk '
+        tolower($1) == "match" { exit }
+        tolower($1) == "port" { print $2; exit }
+    ' "$SSHD_CONFIG") == "$port" ]]
 }
 
 restore_config_files() {
@@ -761,6 +779,10 @@ confirm_cloud_firewall() {
 
 iptables_input_is_restrictive() {
     local firewall_command=$1 rules
+    if "$firewall_command" -S "$FIREWALL_CHAIN" >/dev/null 2>&1 &&
+       "$firewall_command" -C INPUT -j "$FIREWALL_CHAIN" >/dev/null 2>&1; then
+        return 0
+    fi
     rules=$("$firewall_command" -S INPUT 2>/dev/null) || return 1
     grep -Eq '^-P INPUT (DROP|REJECT)$' <<< "$rules"
 }
@@ -806,27 +828,44 @@ persist_iptables_rules() {
 }
 
 delete_iptables_allow_rules() {
-    local port=$1 families=$2 firewall_command
+    local port=$1 families=$2 firewall_command target_chain
     for firewall_command in $families; do
         command -v "$firewall_command" >/dev/null 2>&1 || continue
-        if "$firewall_command" -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null; then
-            "$firewall_command" -D INPUT -p tcp --dport "$port" -j ACCEPT || return 1
+        target_chain=$(iptables_target_chain "$firewall_command")
+        if "$firewall_command" -C "$target_chain" -p tcp --dport "$port" -j ACCEPT 2>/dev/null; then
+            "$firewall_command" -D "$target_chain" -p tcp --dport "$port" -j ACCEPT || return 1
         fi
     done
     [[ -z $families ]] || persist_iptables_rules no
 }
 
+iptables_target_chain() {
+    local firewall_command=$1
+    if "$firewall_command" -S "$FIREWALL_CHAIN" >/dev/null 2>&1 &&
+       "$firewall_command" -C INPUT -j "$FIREWALL_CHAIN" >/dev/null 2>&1; then
+        printf '%s\n' "$FIREWALL_CHAIN"
+    else
+        printf 'INPUT\n'
+    fi
+}
+
 open_iptables_firewall() {
-    local port=$1 firewall_command restrictive=no added=no added_families=
+    local port=$1 firewall_command restrictive=no added=no added_families= target_chain
     for firewall_command in iptables ip6tables; do
         command -v "$firewall_command" >/dev/null 2>&1 || continue
         iptables_input_is_restrictive "$firewall_command" || continue
         restrictive=yes
-        if "$firewall_command" -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null; then
+        target_chain=$(iptables_target_chain "$firewall_command")
+        if "$firewall_command" -C "$target_chain" -p tcp --dport "$port" -j ACCEPT 2>/dev/null; then
             log "${firewall_command} 已放行 ${port}/TCP。"
             continue
         fi
-        if ! "$firewall_command" -A INPUT -p tcp --dport "$port" -j ACCEPT; then
+        if [[ $target_chain == "$FIREWALL_CHAIN" ]]; then
+            "$firewall_command" -I "$target_chain" 1 -p tcp --dport "$port" -j ACCEPT || {
+                delete_iptables_allow_rules "$port" "$added_families" || true
+                die "无法通过 ${firewall_command} 放行 ${port}/TCP。"
+            }
+        elif ! "$firewall_command" -A INPUT -p tcp --dport "$port" -j ACCEPT; then
             delete_iptables_allow_rules "$port" "$added_families" || true
             die "无法通过 ${firewall_command} 放行 ${port}/TCP。"
         fi
@@ -903,6 +942,502 @@ close_staged_firewall_rule() {
     esac
 }
 
+detect_firewall_backend() {
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+        printf 'ufw\n'
+    elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        printf 'firewalld\n'
+    elif command -v iptables >/dev/null 2>&1 && iptables -S INPUT >/dev/null 2>&1; then
+        printf 'iptables\n'
+    elif command -v nft >/dev/null 2>&1 && nft list ruleset >/dev/null 2>&1; then
+        printf 'nftables\n'
+    else
+        printf 'none\n'
+    fi
+}
+
+protected_ssh_ports() {
+    {
+        effective_ports || true
+        if [[ ${SSH_CONNECTION:-} =~ ^[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+([0-9]+)$ ]]; then
+            printf '%s\n' "${BASH_REMATCH[1]}"
+        fi
+    } | awk '$1 ~ /^[0-9]+$/ && $1 >= 1 && $1 <= 65535 { print $1 }' | sort -nu
+}
+
+public_listeners() {
+    local protocol option
+    for protocol in tcp udp; do
+        if [[ $protocol == tcp ]]; then option=-ltnp; else option=-lunp; fi
+        "$SS_BIN" -H "$option" 2>/dev/null | awk -v protocol="$protocol" '
+            {
+                endpoint=$4
+                port=endpoint
+                sub(/^.*:/, "", port)
+                address=endpoint
+                sub(/:[^:]*$/, "", address)
+                gsub(/^\[/, "", address)
+                gsub(/\]$/, "", address)
+                numeric_port=port + 0
+                if (port !~ /^[0-9]+$/ || numeric_port < 1 || numeric_port > 65535) next
+                if (address == "::1" || address ~ /^127\./) next
+                print protocol, numeric_port
+            }
+        '
+    done | sort -k1,1 -k2,2n -u
+}
+
+prompt_firewall_protocols() {
+    local choice
+    SELECTED_PROTOCOLS=
+    printf '请选择协议：\n  1. TCP（推荐）\n  2. UDP\n  3. TCP + UDP\n  0. 取消\n'
+    while true; do
+        printf '请选择 [0-3]: '
+        read -r choice
+        case $choice in
+            1) SELECTED_PROTOCOLS=tcp; return 0 ;;
+            2) SELECTED_PROTOCOLS=udp; return 0 ;;
+            3) SELECTED_PROTOCOLS='tcp udp'; return 0 ;;
+            0|q|Q) return 1 ;;
+            *) printf '选项无效，请重新输入。\n' ;;
+        esac
+    done
+}
+
+prompt_firewall_port() {
+    local answer
+    SELECTED_FIREWALL_PORT=
+    while true; do
+        printf '请输入端口（1-65535，输入 q 取消）: '
+        read -r answer
+        [[ $answer == q || $answer == Q ]] && return 1
+        if validate_port "$answer"; then
+            SELECTED_FIREWALL_PORT=$answer
+            return 0
+        fi
+        printf '端口无效，请重新输入。\n'
+    done
+}
+
+make_firewall_backup() {
+    command -v iptables-save >/dev/null 2>&1 || {
+        warn '缺少 iptables-save，无法在修改前备份防火墙；未修改任何规则。'
+        return 1
+    }
+    local timestamp candidate counter=0
+    timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+    mkdir -p "$STATE_DIR" "$FIREWALL_BACKUP_ROOT"
+    candidate=$FIREWALL_BACKUP_ROOT/$timestamp
+    while [[ -e $candidate || -L $candidate ]]; do
+        ((counter += 1))
+        printf -v candidate '%s/%s-%02d' "$FIREWALL_BACKUP_ROOT" "$timestamp" "$counter"
+    done
+    mkdir "$candidate"
+    chmod 700 "$STATE_DIR" "$FIREWALL_BACKUP_ROOT" "$candidate"
+    if ! iptables-save > "$candidate/ipv4.rules"; then
+        warn "IPv4 防火墙备份失败；未修改任何规则。未完成目录保留在：$candidate"
+        return 1
+    fi
+    chmod 600 "$candidate/ipv4.rules"
+    if command -v ip6tables-save >/dev/null 2>&1; then
+        if ! ip6tables-save > "$candidate/ipv6.rules"; then
+            warn "IPv6 防火墙备份失败；未修改任何规则。未完成目录保留在：$candidate"
+            return 1
+        fi
+        chmod 600 "$candidate/ipv6.rules"
+    fi
+    printf 'version=1\nbackend=iptables\n' > "$candidate/metadata"
+    chmod 600 "$candidate/metadata"
+    LAST_FIREWALL_BACKUP=$candidate
+    log "防火墙备份已创建：$candidate"
+}
+
+validate_firewall_backup() {
+    local backup_dir=$1 name
+    [[ -d $backup_dir && ! -L $backup_dir ]] || return 1
+    [[ ${backup_dir%/*} == "$FIREWALL_BACKUP_ROOT" ]] || return 1
+    name=${backup_dir##*/}
+    [[ $name =~ ^[0-9]{8}T[0-9]{6}Z(-[0-9]{2,})?$ ]] || return 1
+    [[ -f $backup_dir/ipv4.rules && ! -L $backup_dir/ipv4.rules ]] || return 1
+    [[ -f $backup_dir/metadata && ! -L $backup_dir/metadata ]] || return 1
+    if [[ -e $backup_dir/ipv6.rules || -L $backup_dir/ipv6.rules ]]; then
+        [[ -f $backup_dir/ipv6.rules && ! -L $backup_dir/ipv6.rules ]] || return 1
+    fi
+    grep -Fxq 'version=1' "$backup_dir/metadata" && grep -Fxq 'backend=iptables' "$backup_dir/metadata"
+}
+
+test_firewall_backup_rules() {
+    local backup_dir=$1
+    validate_firewall_backup "$backup_dir" || return 1
+    command -v iptables-restore >/dev/null 2>&1 || return 1
+    iptables-restore --test < "$backup_dir/ipv4.rules" 2>/dev/null || return 1
+    if [[ -f $backup_dir/ipv6.rules ]]; then
+        command -v ip6tables-restore >/dev/null 2>&1 || return 1
+        ip6tables-restore --test < "$backup_dir/ipv6.rules" 2>/dev/null || return 1
+    fi
+}
+
+apply_firewall_backup_rules() {
+    local backup_dir=$1
+    iptables-restore < "$backup_dir/ipv4.rules" || return 1
+    if [[ -f $backup_dir/ipv6.rules ]]; then
+        ip6tables-restore < "$backup_dir/ipv6.rules" || return 1
+    fi
+}
+
+restore_firewall_backup_dir() {
+    local backup_dir=$1
+    test_firewall_backup_rules "$backup_dir" || return 1
+    apply_firewall_backup_rules "$backup_dir" || return 1
+    persist_iptables_rules yes
+}
+
+FIREWALL_BACKUP_CHOICES=()
+SELECTED_FIREWALL_BACKUP=
+
+select_firewall_backup() {
+    FIREWALL_BACKUP_CHOICES=()
+    [[ -d $FIREWALL_BACKUP_ROOT ]] || return 1
+    local backup_dir answer index
+    while IFS= read -r backup_dir; do
+        [[ -n $backup_dir ]] || continue
+        validate_firewall_backup "$backup_dir" && FIREWALL_BACKUP_CHOICES+=("$backup_dir")
+    done < <(find "$FIREWALL_BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -print | sort -r)
+    ((${#FIREWALL_BACKUP_CHOICES[@]} > 0)) || return 1
+    printf '可用防火墙备份（最新在前）：\n'
+    for index in "${!FIREWALL_BACKUP_CHOICES[@]}"; do
+        printf '  %d. %s\n' "$((index + 1))" "${FIREWALL_BACKUP_CHOICES[$index]##*/}"
+    done
+    while true; do
+        printf '请选择备份编号（输入 q 取消）: '
+        read -r answer
+        [[ $answer == q || $answer == Q ]] && return 1
+        if [[ $answer =~ ^[0-9]+$ ]]; then
+            index=$((10#$answer - 1))
+            if ((index >= 0 && index < ${#FIREWALL_BACKUP_CHOICES[@]})); then
+                SELECTED_FIREWALL_BACKUP=${FIREWALL_BACKUP_CHOICES[$index]}
+                return 0
+            fi
+        fi
+        printf '编号无效，请重新输入。\n'
+    done
+}
+
+firewall_restore_interactive() {
+    [[ $(detect_firewall_backend) == iptables ]] || {
+        warn '防火墙备份恢复目前仅支持 iptables/iptables-nft。'
+        return 0
+    }
+    if ! select_firewall_backup; then
+        log '没有选择可用的防火墙备份。'
+        return 0
+    fi
+    prompt_yes_no "确认恢复 ${SELECTED_FIREWALL_BACKUP##*/}？" || return 0
+    test_firewall_backup_rules "$SELECTED_FIREWALL_BACKUP" || {
+        warn '所选防火墙备份无法通过恢复预检，未修改当前规则。'
+        return 0
+    }
+    make_firewall_backup || {
+        warn '无法创建恢复前紧急备份，已取消恢复。'
+        return 0
+    }
+    local emergency_backup=$LAST_FIREWALL_BACKUP
+    if ! apply_firewall_backup_rules "$SELECTED_FIREWALL_BACKUP"; then
+        warn '防火墙备份恢复失败，正在还原操作前规则。'
+        if test_firewall_backup_rules "$emergency_backup" &&
+           apply_firewall_backup_rules "$emergency_backup"; then
+            persist_iptables_rules yes
+            warn "已还原操作前规则；紧急备份位于：$emergency_backup"
+            return 0
+        fi
+        die "自动还原操作前规则失败，请通过控制台救援；紧急备份位于：$emergency_backup"
+    fi
+    persist_iptables_rules yes
+    log "防火墙已从备份恢复：$SELECTED_FIREWALL_BACKUP"
+    log "恢复前规则的紧急备份保留在：$emergency_backup"
+}
+
+iptables_remove_tagged_rule() {
+    local command_name=$1 chain=$2 protocol=$3 port=$4 verdict=$5
+    while "$command_name" -C "$chain" -p "$protocol" --dport "$port" -m comment --comment allentool-managed -j "$verdict" 2>/dev/null; do
+        "$command_name" -D "$chain" -p "$protocol" --dport "$port" -m comment --comment allentool-managed -j "$verdict" || return 1
+    done
+}
+
+iptables_apply_tagged_port() {
+    local action=$1 port=$2 protocols=$3 command_name protocol chain verdict opposite backup failed=no
+    make_firewall_backup || return 1
+    backup=$LAST_FIREWALL_BACKUP
+    for command_name in iptables ip6tables; do
+        command -v "$command_name" >/dev/null 2>&1 || continue
+        chain=$(iptables_target_chain "$command_name")
+        for protocol in $protocols; do
+            if [[ $action == open ]]; then verdict=ACCEPT; opposite=DROP; else verdict=DROP; opposite=ACCEPT; fi
+            if ! iptables_remove_tagged_rule "$command_name" "$chain" "$protocol" "$port" "$opposite"; then
+                failed=yes
+            elif ! "$command_name" -C "$chain" -p "$protocol" --dport "$port" -m comment --comment allentool-managed -j "$verdict" 2>/dev/null; then
+                "$command_name" -I "$chain" 1 -p "$protocol" --dport "$port" -m comment --comment allentool-managed -j "$verdict" || failed=yes
+            fi
+            if [[ $failed == yes ]]; then
+                warn '防火墙端口规则修改失败，正在恢复修改前规则。'
+                restore_firewall_backup_dir "$backup" || die "自动恢复失败，请从 $backup 手动恢复。"
+                return 1
+            fi
+        done
+    done
+    persist_iptables_rules yes
+}
+
+firewall_apply_port() {
+    local action=$1 port=$2 protocols=$3 backend protocol action_label
+    [[ $action == open || $action == close ]] || {
+        warn "不支持的防火墙操作：$action"
+        return 1
+    }
+    validate_port "$port" || {
+        warn '防火墙端口必须是 1 到 65535 之间的整数。'
+        return 1
+    }
+    for protocol in $protocols; do
+        [[ $protocol == tcp || $protocol == udp ]] || {
+            warn "不支持的协议：$protocol"
+            return 1
+        }
+    done
+    [[ -n $protocols ]] || {
+        warn '没有选择 TCP 或 UDP 协议。'
+        return 1
+    }
+    backend=$(detect_firewall_backend)
+    case $backend in
+        ufw)
+            for protocol in $protocols; do
+                if [[ $action == open ]]; then
+                    ufw --force delete deny "${port}/${protocol}" >/dev/null 2>&1 || true
+                    ufw allow "${port}/${protocol}"
+                else
+                    ufw --force delete allow "${port}/${protocol}" >/dev/null 2>&1 || true
+                    ufw deny "${port}/${protocol}"
+                fi
+            done
+            ;;
+        firewalld)
+            for protocol in $protocols; do
+                if [[ $action == open ]]; then
+                    firewall-cmd --permanent --add-port="${port}/${protocol}"
+                else
+                    firewall-cmd --permanent --remove-port="${port}/${protocol}" || true
+                fi
+            done
+            firewall-cmd --reload
+            ;;
+        iptables) iptables_apply_tagged_port "$action" "$port" "$protocols" ;;
+        nftables)
+            warn '检测到原生 nftables 自定义规则，拒绝猜测表和链；请人工处理。'
+            return 1
+            ;;
+        none)
+            warn '没有检测到可管理的主机防火墙。'
+            return 1
+            ;;
+    esac
+    if [[ $action == open ]]; then action_label=开放; else action_label=关闭; fi
+    log "已${action_label}端口 ${port}（${protocols// /+}）。"
+}
+
+firewall_open_interactive() {
+    prompt_firewall_port || return 0
+    prompt_firewall_protocols || return 0
+    firewall_apply_port open "$SELECTED_FIREWALL_PORT" "$SELECTED_PROTOCOLS"
+}
+
+firewall_close_interactive() {
+    prompt_firewall_port || return 0
+    prompt_firewall_protocols || return 0
+    local ssh_port listener protocol
+    if [[ $SELECTED_PROTOCOLS == *tcp* ]]; then
+        while IFS= read -r ssh_port; do
+            if [[ $ssh_port == "$SELECTED_FIREWALL_PORT" ]]; then
+                warn "端口 $ssh_port 是当前 SSH 端口，拒绝关闭。"
+                return 0
+            fi
+        done < <(protected_ssh_ports)
+    fi
+    while read -r protocol listener; do
+        if [[ $listener == "$SELECTED_FIREWALL_PORT" && $SELECTED_PROTOCOLS == *"$protocol"* ]]; then
+            prompt_yes_no "端口 ${listener}/${protocol} 当前正在公网监听，仍要关闭吗？" || return 0
+        fi
+    done < <(public_listeners)
+    firewall_apply_port close "$SELECTED_FIREWALL_PORT" "$SELECTED_PROTOCOLS"
+}
+
+repair_ssh_firewall() {
+    local port found=no
+    while IFS= read -r port; do
+        [[ -n $port ]] || continue
+        found=yes
+        firewall_apply_port open "$port" tcp || return 1
+    done < <(protected_ssh_ports)
+    [[ $found == yes ]] || {
+        warn '无法读取当前 SSH 端口。'
+        return 1
+    }
+    log '当前所有 SSH 端口均已重新放行。'
+}
+
+repair_firewall_persistence() {
+    [[ $(detect_firewall_backend) == iptables ]] || {
+        warn '当前后端不使用 netfilter-persistent。'
+        return 0
+    }
+    if ! command -v netfilter-persistent >/dev/null 2>&1; then
+        install_netfilter_persistence || {
+            warn '持久化工具安装失败。'
+            return 1
+        }
+    fi
+    netfilter-persistent save >/dev/null || return 1
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable netfilter-persistent.service >/dev/null 2>&1 || warn '无法自动启用 netfilter-persistent.service。'
+    fi
+    log '防火墙持久化已经安装并保存当前规则。'
+}
+
+show_firewall_status() {
+    local offer_install=${1:-no} backend port policy service_enabled=未知 service_active=未知 answer
+    backend=$(detect_firewall_backend)
+    printf '防火墙后端: %s\n' "$backend"
+    printf '当前有效 SSH 端口: '
+    protected_ssh_ports | awk 'BEGIN { first=1 } { printf "%s%s", first ? "" : ",", $1; first=0 } END { print first ? "未知" : "" }'
+    printf '当前非回环监听端口:\n'
+    public_listeners | sed 's/^/  /'
+    case $backend in
+        iptables)
+            for policy in iptables ip6tables; do
+                command -v "$policy" >/dev/null 2>&1 || continue
+                "$policy" -S INPUT 2>/dev/null | awk -v name="$policy" '$1=="-P" && $2=="INPUT" {print name " INPUT策略: " $3}'
+            done
+            if iptables_target_chain iptables | grep -Fxq "$FIREWALL_CHAIN"; then
+                printf 'allentool 收紧链: 已启用\n'
+            else
+                printf 'allentool 收紧链: 未启用\n'
+            fi
+            if command -v netfilter-persistent >/dev/null 2>&1; then
+                if command -v systemctl >/dev/null 2>&1; then
+                    service_enabled=$(systemctl is-enabled netfilter-persistent.service 2>/dev/null || true)
+                    service_active=$(systemctl is-active netfilter-persistent.service 2>/dev/null || true)
+                fi
+                printf '持久化工具: 已安装（enabled=%s, active=%s）\n' "$service_enabled" "$service_active"
+                printf 'IPv4规则文件: %s\n' "$([[ -s /etc/iptables/rules.v4 ]] && printf 已存在 || printf 缺失)"
+                printf 'IPv6规则文件: %s\n' "$([[ -f /etc/iptables/rules.v6 ]] && printf 已存在 || printf 缺失)"
+            else
+                printf '持久化工具: 未安装\n'
+                if [[ $offer_install == yes ]]; then
+                    printf '  1. 安装 iptables-persistent 并保存规则\n  0. 返回\n请选择 [0-1]: '
+                    read -r answer
+                    [[ $answer == 1 ]] && repair_firewall_persistence
+                fi
+            fi
+            ;;
+        ufw) ufw status verbose || true ;;
+        firewalld) firewall-cmd --list-all || true ;;
+        nftables) warn '原生 nftables 仅提供状态展示，不执行自动规则变更。' ;;
+        none) warn '未检测到防火墙后端。' ;;
+    esac
+}
+
+build_lockdown_chain() {
+    local command_name=$1 allowlist=$2 protocol port
+    if ! "$command_name" -S "$FIREWALL_CHAIN" >/dev/null 2>&1; then
+        "$command_name" -N "$FIREWALL_CHAIN" || return 1
+    fi
+    while "$command_name" -C INPUT -j "$FIREWALL_CHAIN" >/dev/null 2>&1; do
+        "$command_name" -D INPUT -j "$FIREWALL_CHAIN" || return 1
+    done
+    "$command_name" -F "$FIREWALL_CHAIN" || return 1
+    "$command_name" -I INPUT 1 -j "$FIREWALL_CHAIN" || return 1
+    "$command_name" -A "$FIREWALL_CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || return 1
+    "$command_name" -A "$FIREWALL_CHAIN" -i lo -j ACCEPT || return 1
+    if [[ $command_name == ip6tables ]]; then
+        # IPv6 邻居发现、路径 MTU 等依赖 ICMPv6，不能作为普通“入站端口”关闭。
+        "$command_name" -A "$FIREWALL_CHAIN" -p ipv6-icmp -j ACCEPT || return 1
+    else
+        # 保留 IPv4 错误报告、路径 MTU 和诊断能力；ICMP 不开放 TCP/UDP 端口。
+        "$command_name" -A "$FIREWALL_CHAIN" -p icmp -j ACCEPT || return 1
+    fi
+    while read -r protocol port; do
+        [[ -n $protocol && -n $port ]] || continue
+        "$command_name" -A "$FIREWALL_CHAIN" -p "$protocol" --dport "$port" -j ACCEPT || return 1
+    done <<< "$allowlist"
+    "$command_name" -A "$FIREWALL_CHAIN" -j DROP
+}
+
+firewall_lockdown_interactive() {
+    local mode=$1 backend allowlist backup command_name port
+    backend=$(detect_firewall_backend)
+    [[ $backend == iptables ]] || {
+        warn '“关闭所有宿主机入站”目前仅支持 iptables/iptables-nft。'
+        return 0
+    }
+    allowlist=$(while IFS= read -r port; do [[ -n $port ]] && printf 'tcp %s\n' "$port"; done < <(protected_ssh_ports))
+    if [[ $mode == listeners ]]; then
+        allowlist=$(printf '%s\n%s\n' "$allowlist" "$(public_listeners)" | awk 'NF==2' | sort -k1,1 -k2,2n -u)
+    fi
+    [[ -n $allowlist ]] || {
+        warn '无法生成安全的端口保留列表。'
+        return 0
+    }
+    printf '即将保留的宿主机入站端口：\n'
+    printf '%s\n' "$allowlist" | awk '{printf "  %s/%s\n", $2, $1}'
+    warn '其他宿主机 INPUT 流量将被 allentool 管理链拒绝；会保留 ICMP/ICMPv6，Docker 转发端口不属于 INPUT。'
+    prompt_yes_no '确认应用此收紧规则？' || return 0
+    if ! make_firewall_backup; then
+        warn '无法创建收紧前防火墙备份，已取消操作。'
+        return 0
+    fi
+    backup=$LAST_FIREWALL_BACKUP
+    for command_name in iptables ip6tables; do
+        command -v "$command_name" >/dev/null 2>&1 || continue
+        if ! build_lockdown_chain "$command_name" "$allowlist"; then
+            warn '收紧规则应用失败，正在恢复修改前防火墙。'
+            restore_firewall_backup_dir "$backup" || die "自动恢复失败，请从 $backup 手动恢复。"
+            return 1
+        fi
+    done
+    persist_iptables_rules yes
+    log "宿主机入站规则已收紧，备份保留在：$backup"
+}
+
+firewall_menu() {
+    local choice
+    while true; do
+        printf '\n防火墙管理\n'
+        printf '  1. 查看防火墙与持久化状态\n'
+        printf '  2. 开放指定端口\n'
+        printf '  3. 关闭指定端口\n'
+        printf '  4. 重新检测并放行当前 SSH 端口\n'
+        printf '  5. 关闭所有宿主机入站，仅保留 SSH\n'
+        printf '  6. 关闭所有宿主机入站，保留 SSH 和当前公网监听端口\n'
+        printf '  7. 安装/修复防火墙持久化\n'
+        printf '  8. 恢复防火墙备份\n'
+        printf '  0. 返回\n'
+        printf '请选择 [0-8]: '
+        read -r choice
+        case $choice in
+            1) show_firewall_status yes ;;
+            2) firewall_open_interactive ;;
+            3) firewall_close_interactive ;;
+            4) repair_ssh_firewall ;;
+            5) firewall_lockdown_interactive ssh ;;
+            6) firewall_lockdown_interactive listeners ;;
+            7) repair_firewall_persistence ;;
+            8) firewall_restore_interactive ;;
+            0|q|Q) return 0 ;;
+            *) printf '选项无效，请重新输入。\n' ;;
+        esac
+    done
+}
+
 rollback_after_failure() {
     local reason=$1
     warn "${reason}，正在自动回滚。"
@@ -947,14 +1482,14 @@ switch_port() {
     STATE_NEW_PORT=$new_port
     STATE_OLD_PORTS=${old_ports[*]}
     STATE_MAIN_PASSWORD_CHANGED=$enable_main_password
-    make_backup "$enable_main_password"
+    make_backup yes
     write_state
 
     comment_active_ports
     if [[ $enable_main_password == yes ]]; then
         set_main_password_yes || rollback_after_failure '无法把主配置 PasswordAuthentication 改为 yes'
     fi
-    write_managed_config "$new_port"
+    write_main_port "$new_port" || rollback_after_failure '无法把新端口写入 SSH 主配置'
 
     "$SSHD_BIN" -t || rollback_after_failure '新 SSH 配置未通过 sshd -t'
 
@@ -1086,7 +1621,8 @@ finalize_port() {
 
     "$SSHD_BIN" -t || die '当前 SSH 配置无法通过 sshd -t，拒绝 finalize。'
     auth_before=$(auth_fingerprint)
-    write_managed_config "$STATE_NEW_PORT"
+    ensure_main_in_backup || die '旧版迁移备份不完整，无法安全写入 SSH 主配置。'
+    write_main_port "$STATE_NEW_PORT" || rollback_after_failure '无法把新端口写入 SSH 主配置'
     "$SSHD_BIN" -t || rollback_after_failure 'finalize 后配置未通过 sshd -t'
     auth_after=$(auth_fingerprint)
     [[ $auth_after == "$auth_before" ]] || rollback_after_failure 'finalize 导致认证配置变化'
@@ -1165,16 +1701,18 @@ menu_mode() {
     printf '  1. 修改 SSH 端口\n'
     printf '  2. 从备份恢复 SSH 设置\n'
     printf '  3. 查看 SSH 状态\n'
-    printf '  4. 退出\n'
+    printf '  4. 防火墙管理\n'
+    printf '  5. 退出\n'
     while true; do
-        printf '请选择 [1-4]: '
+        printf '请选择 [1-5]: '
         read -r choice
         case $choice in
             1) interactive_mode; return 0 ;;
             2) restore_backup_interactive; return 0 ;;
             3) show_status; return 0 ;;
-            4|q|Q) log '已退出。'; return 0 ;;
-            *) printf '选项无效，请输入 1、2、3 或 4。\n' ;;
+            4) firewall_menu; return 0 ;;
+            5|q|Q) log '已退出。'; return 0 ;;
+            *) printf '选项无效，请输入 1、2、3、4 或 5。\n' ;;
         esac
     done
 }
@@ -1206,6 +1744,12 @@ main() {
             require_commands
             (($# == 0)) || die 'restore 不接受额外参数。'
             restore_backup_interactive
+            ;;
+        firewall)
+            require_root
+            require_commands
+            (($# == 0)) || die 'firewall 不接受额外参数。'
+            firewall_menu
             ;;
         install)
             require_root
