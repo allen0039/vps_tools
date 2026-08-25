@@ -3,6 +3,7 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
+ALLENTOOL_PATH=${ALLENTOOL_PATH:-/usr/local/bin/allentool}
 SSHD_CONFIG=${SAFE_SSH_PORT_CONFIG:-/etc/ssh/sshd_config}
 SSHD_DROPIN_DIR=${SAFE_SSH_PORT_DROPIN_DIR:-/etc/ssh/sshd_config.d}
 MANAGED_CONFIG=${SAFE_SSH_PORT_MANAGED_CONFIG:-$SSHD_DROPIN_DIR/00-safe-ssh-port.conf}
@@ -21,6 +22,7 @@ STATE_SERVICE_NAME=
 STATE_FIREWALL_MANAGER=none
 STATE_FIREWALL_RULE_ADDED=no
 STATE_MAIN_PASSWORD_CHANGED=no
+ORIGINAL_ARGS=()
 
 log() {
     printf '[safe-ssh-port] %s\n' "$*"
@@ -40,7 +42,9 @@ usage() {
 安全修改 OpenSSH 端口（分阶段迁移）
 
 用法：
-  sudo $PROGRAM interactive
+  $PROGRAM
+  $PROGRAM interactive
+  $PROGRAM install-shortcut
   sudo $PROGRAM stage <新端口> [--cloud-firewall-ready] [--skip-host-firewall]
                               [--enable-main-password]
   sudo $PROGRAM finalize [--verified-new-login]
@@ -54,7 +58,8 @@ usage() {
   3. 使用第二个终端从公网登录新端口。
   4. finalize 仅保留新端口。
 
-interactive 会根据迁移状态引导 stage、finalize 和 commit，并检测主配置中的
+不带参数运行时默认进入 interactive。interactive 会根据迁移状态引导
+stage、finalize 和 commit，并检测主配置中的
 PasswordAuthentication no，用 y/n 询问是否改为 yes。除非明确选择 y，
 否则脚本不会修改认证配置。
 脚本不会删除 /etc/ssh/sshd_config.d 中的云厂商配置。
@@ -62,7 +67,36 @@ EOF
 }
 
 require_root() {
-    [[ $EUID -eq 0 ]] || die '必须以 root 身份运行。'
+    [[ $EUID -eq 0 ]] && return 0
+    if [[ -t 0 ]] && command -v sudo >/dev/null 2>&1; then
+        log '需要管理员权限，正在通过 sudo 重新运行。'
+        exec sudo -- "$0" "${ORIGINAL_ARGS[@]}"
+    fi
+    die '必须以 root 身份运行。'
+}
+
+install_shortcut() {
+    command -v install >/dev/null 2>&1 || die '缺少命令: install'
+    command -v cmp >/dev/null 2>&1 || die '缺少命令: cmp'
+    [[ $ALLENTOOL_PATH == /* ]] || die '快捷命令安装路径必须是绝对路径。'
+
+    local source_file=${BASH_SOURCE[0]}
+    [[ -f $source_file && ! -L $source_file ]] || die '无法从当前脚本安全安装快捷命令。'
+
+    if [[ -e $ALLENTOOL_PATH || -L $ALLENTOOL_PATH ]]; then
+        [[ -f $ALLENTOOL_PATH && ! -L $ALLENTOOL_PATH ]] ||
+            die "目标已存在且不是普通文件，拒绝覆盖: $ALLENTOOL_PATH"
+        if [[ $source_file -ef $ALLENTOOL_PATH ]] || cmp -s "$source_file" "$ALLENTOOL_PATH"; then
+            log "快捷命令已经是最新版本: $ALLENTOOL_PATH"
+            return 0
+        fi
+        [[ -t 0 ]] || die "目标已存在；请在交互终端中确认是否覆盖: $ALLENTOOL_PATH"
+        prompt_yes_no "${ALLENTOOL_PATH} 已存在，是否用当前版本覆盖？" || die '安装已取消。'
+    fi
+
+    install -m 755 "$source_file" "$ALLENTOOL_PATH"
+    log "快捷命令已安装：$ALLENTOOL_PATH"
+    log '以后直接输入 allentool 即可进入交互模式。'
 }
 
 require_commands() {
@@ -711,9 +745,9 @@ show_status() {
 }
 
 main() {
-    local action=${1:-}
-    [[ -n $action ]] || { usage; exit 2; }
-    shift || true
+    ORIGINAL_ARGS=("$@")
+    local action=${1:-interactive}
+    (($# == 0)) || shift
 
     case $action in
         -h|--help|help)
@@ -725,6 +759,11 @@ main() {
             require_commands
             (($# == 0)) || die 'interactive 不接受额外参数。'
             interactive_mode
+            ;;
+        install-shortcut)
+            require_root
+            (($# == 0)) || die 'install-shortcut 不接受额外参数。'
+            install_shortcut
             ;;
         stage)
             require_root

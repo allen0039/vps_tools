@@ -24,12 +24,28 @@ less /tmp/safe-ssh-port.sh
 sudo install -m 750 -o root -g root /tmp/safe-ssh-port.sh /usr/local/sbin/safe-ssh-port
 ```
 
+安装快捷命令：
+
+```bash
+sudo /usr/local/sbin/safe-ssh-port install-shortcut
+```
+
+以后直接运行下面的命令即可进入交互模式：
+
+```bash
+allentool
+```
+
+快捷命令安装在 `/usr/local/bin/allentool`。普通用户运行时，如果系统提供
+`sudo`，脚本会自动请求管理员权限。若该路径已经存在其他文件，安装程序会
+要求确认，不会静默覆盖。
+
 ## 推荐：交互模式
 
 先在云厂商安全组放行计划使用的新端口，然后执行：
 
 ```bash
-sudo safe-ssh-port interactive
+allentool
 ```
 
 交互模式会：
@@ -49,12 +65,12 @@ ssh -p 21919 root@服务器地址
 验证成功后，再次运行同一个交互命令：
 
 ```bash
-sudo safe-ssh-port interactive
+allentool
 ```
 
 脚本会识别当前处于双端口验证阶段，使用 `y/n` 询问新端口是否登录成功。
 选择 `y` 后才关闭旧端口，并再次询问是否结束迁移状态。若暂时选择 `n`，
-脚本会保留备份和一键回滚能力；确认稳定后再次运行 `interactive` 即可继续。
+脚本会保留备份和一键回滚能力；确认稳定后再次运行 `allentool` 即可继续。
 
 也可以使用参数式命令完成后两步：
 
