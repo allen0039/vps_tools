@@ -57,8 +57,8 @@ usage() {
 流程：
   1. 先在云厂商安全组/防火墙中放行新端口。
   2. stage 同时保留旧端口和新端口，并验证 SSH 配置及监听。
-  3. 使用第二个终端从公网登录新端口。
-  4. finalize 仅保留新端口。
+  3. interactive 可选择立即 finalize，自动关闭旧 SSH 监听。
+  4. 也可保留双端口，使用第二个终端验证后再 finalize。
 
 不带参数运行时默认进入 interactive。interactive 会根据迁移状态引导
 stage、finalize 和 commit，并检测主配置中的
@@ -534,6 +534,7 @@ rollback_after_failure() {
 
 stage_port() {
     local new_port=$1 cloud_ready=$2 skip_host_firewall=$3 enable_main_password=${4:-no}
+    local auto_finalize=${5:-no}
     local -a old_ports staged_ports
     local discovered_port
     validate_port "$new_port" || die '端口必须是 1 到 65535 之间的整数。'
@@ -601,6 +602,10 @@ stage_port() {
     STATE_STATUS=staged
     write_state
     log "阶段一完成：SSH 正在同时监听 ${STATE_OLD_PORTS} 和 ${STATE_NEW_PORT}。"
+    if [[ $auto_finalize == yes ]]; then
+        log '快速切换已通过本机检查，正在自动关闭旧 SSH 端口。'
+        return 0
+    fi
     log "请保持当前会话，另开终端测试：ssh -p $STATE_NEW_PORT user@服务器地址"
     log "验证新端口登录成功后再次运行：sudo $PROGRAM interactive"
     log "也可以运行：sudo $PROGRAM finalize --verified-new-login"
@@ -641,7 +646,7 @@ interactive_mode() {
     fi
     "$SSHD_BIN" -t || die '当前 SSH 配置本身无法通过 sshd -t，拒绝修改。'
 
-    local main_setting effective_setting enable_main_password=no new_port answer
+    local main_setting effective_setting enable_main_password=no direct_switch=no new_port answer
     local -a current_ports
     main_setting=$(main_password_setting)
     effective_setting=$(effective_password_setting)
@@ -687,7 +692,17 @@ interactive_mode() {
         die '请先开放云防火墙端口后再运行脚本。'
     fi
 
-    stage_port "$new_port" yes no "$enable_main_password"
+    if prompt_yes_no '是否在本机检查通过后立即关闭旧 SSH 端口？'; then
+        direct_switch=yes
+        warn '已选择快速切换；脚本不会等待第二个终端验证新端口。请保持当前 SSH 会话。'
+    else
+        log '将保留新旧端口，等待第二个终端验证新端口。'
+    fi
+
+    stage_port "$new_port" yes no "$enable_main_password" "$direct_switch"
+    if [[ $direct_switch == yes ]]; then
+        finalize_port yes
+    fi
 }
 
 finalize_port() {
