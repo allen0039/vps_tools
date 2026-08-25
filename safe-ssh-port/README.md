@@ -7,7 +7,7 @@
 - 自动备份 SSH 配置并运行 `sshd -t`
 - 修改前后比较实际生效的认证配置
 - 保留 cloud-init 和其他 `sshd_config.d` 配置
-- 自动管理启用中的 UFW 或 firewalld
+- 自动管理启用中的 UFW、firewalld 或 restrictive iptables/ip6tables
 - 新配置从一开始只包含新端口，不提供双端口模式
 - reload 后确认新端口监听且旧端口已经关闭
 - 新端口、认证或 reload 检查失败时内部自动恢复原配置
@@ -80,6 +80,7 @@ allentool
 2. 如果主配置为 `PasswordAuthentication no`，使用 `y/n` 询问是否改为 `yes`。
 3. 循环询问新端口，并检查格式、当前 SSH 端口和端口占用。
 4. 使用 `y/n` 确认云厂商安全组已经放行新端口。
+5. 自动检测主机防火墙，并在需要时放行新端口。
 
 确认后脚本会直接写入新端口、reload SSH，检查新端口已经监听且旧端口已经关闭，
 然后自动提交。整个流程不提供双端口选择，也不需要再次运行 `allentool`。
@@ -101,6 +102,23 @@ sudo safe-ssh-port switch 21919 --cloud-firewall-ready
 ```bash
 sudo safe-ssh-port switch 21919 --cloud-firewall-ready --enable-main-password
 ```
+
+## 主机防火墙管理
+
+修改或恢复 SSH 端口时，脚本会自动处理：
+
+- UFW：添加 `<端口>/tcp` 规则。
+- firewalld：添加永久 TCP 端口规则并 reload。
+- iptables/ip6tables：当 `INPUT` 默认策略为 `DROP/REJECT` 时，追加精确的
+  `TCP/SSH端口 ACCEPT` 规则，使其在默认拒绝策略前生效；已有规则顺序保持不变。
+  `iptables-nft` 后端同样适用。
+
+如果系统已安装 `netfilter-persistent`，新增的 iptables/ip6tables 规则会立即
+保存，重启后仍然生效。若未检测到持久化工具，当前运行中的防火墙仍会放行端口，
+但脚本会警告重启后可能失效，不会在 SSH 切换过程中擅自安装软件包。
+
+切换或恢复失败时，只清理本次操作由脚本新增的主机防火墙规则，不会删除原有
+规则。云厂商安全组无法由 VPS 内的脚本修改，仍需提前手动放行。
 
 ## 查看状态
 
@@ -148,7 +166,7 @@ SSH 端口，输入编号后再确认云厂商安全组已放行对应端口，�
 
 目前主要面向使用 `ssh.service` 或 `sshd.service` 的 Debian/Ubuntu VPS。
 
-- 自定义 iptables/nftables 默认拒绝策略需要先手动放行，再使用 `--skip-host-firewall`。
+- 原生 nftables 自定义表/链无法安全推断时仍需人工放行；也可以在确认完成后使用 `--skip-host-firewall`。
 - SELinux enforcing 系统需要提前配置 `ssh_port_t`。
 - 使用 systemd `ssh.socket` 监听的系统需要先人工处理 socket 端口。
 - 修改 SSH 端口不能代替公钥认证、强密码和登录防护。

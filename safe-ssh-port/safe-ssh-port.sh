@@ -22,6 +22,7 @@ STATE_SERVICE_MODE=
 STATE_SERVICE_NAME=
 STATE_FIREWALL_MANAGER=none
 STATE_FIREWALL_RULE_ADDED=no
+STATE_FIREWALL_IPTABLES_FAMILIES=
 STATE_MAIN_PASSWORD_CHANGED=no
 ORIGINAL_ARGS=()
 
@@ -55,15 +56,17 @@ usage() {
 
 流程：
   1. 先在云厂商安全组/防火墙中放行新端口。
-  2. 备份配置，只写入新端口，并验证 SSH 配置和认证设置。
-  3. reload 后确认新端口监听、旧端口关闭，然后自动提交。
-  4. 任一检查失败时自动恢复原配置；成功后不保留回滚状态。
+  2. 自动在启用中的 UFW、firewalld 或 restrictive iptables 放行新端口。
+  3. 备份配置，只写入新端口，并验证 SSH 配置和认证设置。
+  4. reload 后确认新端口监听、旧端口关闭，然后自动提交。
+  5. 任一检查失败时自动恢复原配置并清理本次新增的防火墙规则。
 
 不带参数运行时显示功能菜单，可选择修改端口、从备份恢复或查看状态。
 interactive 会检测主配置中的
 PasswordAuthentication no，用 y/n 询问是否改为 yes。除非明确选择 y，
 否则脚本不会修改认证配置。
 脚本不会删除 /etc/ssh/sshd_config.d 中的云厂商配置。
+iptables 规则会在已有 netfilter-persistent 时自动保存；未安装时会明确警告。
 EOF
 }
 
@@ -544,31 +547,36 @@ restore_selected_snapshot() {
 
 RESTORE_ADDED_FIREWALL_PORTS=()
 RESTORE_ADDED_FIREWALL_MANAGERS=()
+RESTORE_ADDED_FIREWALL_FAMILIES=()
 
 open_restore_firewall_ports() {
     local port
     RESTORE_ADDED_FIREWALL_PORTS=()
     RESTORE_ADDED_FIREWALL_MANAGERS=()
+    RESTORE_ADDED_FIREWALL_FAMILIES=()
     for port in "$@"; do
         open_host_firewall "$port" no
         if [[ $STATE_FIREWALL_RULE_ADDED == yes ]]; then
             RESTORE_ADDED_FIREWALL_PORTS+=("$port")
             RESTORE_ADDED_FIREWALL_MANAGERS+=("$STATE_FIREWALL_MANAGER")
+            RESTORE_ADDED_FIREWALL_FAMILIES+=("$STATE_FIREWALL_IPTABLES_FAMILIES")
         fi
     done
 }
 
 close_restore_firewall_ports() {
-    local index=0 port manager
+    local index=0 port manager families
     while ((index < ${#RESTORE_ADDED_FIREWALL_PORTS[@]})); do
         port=${RESTORE_ADDED_FIREWALL_PORTS[$index]}
         manager=${RESTORE_ADDED_FIREWALL_MANAGERS[$index]}
+        families=${RESTORE_ADDED_FIREWALL_FAMILIES[$index]}
         case $manager in
             ufw) ufw --force delete allow "${port}/tcp" >/dev/null || return 1 ;;
             firewalld)
                 firewall-cmd --permanent --remove-port="${port}/tcp" >/dev/null || return 1
                 firewall-cmd --reload >/dev/null || return 1
                 ;;
+            iptables) delete_iptables_allow_rules "$port" "$families" || return 1 ;;
         esac
         ((index += 1))
     done
@@ -697,6 +705,7 @@ write_state() {
         printf 'service_name=%s\n' "$STATE_SERVICE_NAME"
         printf 'firewall_manager=%s\n' "$STATE_FIREWALL_MANAGER"
         printf 'firewall_rule_added=%s\n' "$STATE_FIREWALL_RULE_ADDED"
+        printf 'firewall_iptables_families=%s\n' "$STATE_FIREWALL_IPTABLES_FAMILIES"
         printf 'main_password_changed=%s\n' "$STATE_MAIN_PASSWORD_CHANGED"
     } > "$temporary"
     chmod 600 "$temporary"
@@ -708,6 +717,7 @@ load_state() {
     [[ -f $STATE_FILE ]] || die '没有进行中的端口迁移。'
     local key value version=
     STATE_MAIN_PASSWORD_CHANGED=no
+    STATE_FIREWALL_IPTABLES_FAMILIES=
     while IFS='=' read -r key value; do
         case $key in
             version) version=$value ;;
@@ -719,6 +729,7 @@ load_state() {
             service_name) STATE_SERVICE_NAME=$value ;;
             firewall_manager) STATE_FIREWALL_MANAGER=$value ;;
             firewall_rule_added) STATE_FIREWALL_RULE_ADDED=$value ;;
+            firewall_iptables_families) STATE_FIREWALL_IPTABLES_FAMILIES=$value ;;
             main_password_changed) STATE_MAIN_PASSWORD_CHANGED=$value ;;
         esac
     done < "$STATE_FILE"
@@ -729,8 +740,12 @@ load_state() {
     [[ $STATE_BACKUP_DIR == "$BACKUP_ROOT/"* && -d $STATE_BACKUP_DIR ]] || die '状态文件中的备份目录无效。'
     [[ $STATE_SERVICE_MODE == systemctl || $STATE_SERVICE_MODE == service ]] || die '状态文件中的服务模式无效。'
     [[ $STATE_SERVICE_NAME == ssh || $STATE_SERVICE_NAME == sshd ]] || die '状态文件中的服务名无效。'
-    [[ $STATE_FIREWALL_MANAGER == none || $STATE_FIREWALL_MANAGER == ufw || $STATE_FIREWALL_MANAGER == firewalld ]] || die '状态文件中的防火墙类型无效。'
+    [[ $STATE_FIREWALL_MANAGER == none || $STATE_FIREWALL_MANAGER == ufw || $STATE_FIREWALL_MANAGER == firewalld || $STATE_FIREWALL_MANAGER == iptables ]] || die '状态文件中的防火墙类型无效。'
     [[ $STATE_FIREWALL_RULE_ADDED == yes || $STATE_FIREWALL_RULE_ADDED == no ]] || die '状态文件中的防火墙状态无效。'
+    [[ -z $STATE_FIREWALL_IPTABLES_FAMILIES || $STATE_FIREWALL_IPTABLES_FAMILIES =~ ^(iptables|ip6tables)([[:space:]]+(iptables|ip6tables))*$ ]] || die '状态文件中的 iptables 协议族无效。'
+    if [[ $STATE_FIREWALL_MANAGER == iptables && $STATE_FIREWALL_RULE_ADDED == yes ]]; then
+        [[ -n $STATE_FIREWALL_IPTABLES_FAMILIES ]] || die '状态文件缺少脚本添加的 iptables 协议族。'
+    fi
     [[ $STATE_MAIN_PASSWORD_CHANGED == yes || $STATE_MAIN_PASSWORD_CHANGED == no ]] || die '状态文件中的密码配置状态无效。'
 }
 
@@ -743,10 +758,71 @@ confirm_cloud_firewall() {
     [[ $answer == OPEN ]] || die '未确认云防火墙规则，操作已取消。'
 }
 
+iptables_input_is_restrictive() {
+    local firewall_command=$1 rules
+    rules=$("$firewall_command" -S INPUT 2>/dev/null) || return 1
+    grep -Eq '^-P INPUT (DROP|REJECT)$' <<< "$rules"
+}
+
+persist_iptables_rules() {
+    local warn_if_missing=${1:-yes}
+    if command -v netfilter-persistent >/dev/null 2>&1; then
+        if netfilter-persistent save >/dev/null; then
+            log 'iptables/ip6tables 规则已通过 netfilter-persistent 保存。'
+        else
+            warn '端口已在当前防火墙放行，但 netfilter-persistent 保存失败；重启后规则可能失效。'
+        fi
+        return 0
+    fi
+    if [[ $warn_if_missing == yes ]]; then
+        warn '端口已在当前 iptables/ip6tables 防火墙放行，但未检测到 netfilter-persistent；重启后规则可能失效。'
+    fi
+}
+
+delete_iptables_allow_rules() {
+    local port=$1 families=$2 firewall_command
+    for firewall_command in $families; do
+        command -v "$firewall_command" >/dev/null 2>&1 || continue
+        if "$firewall_command" -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null; then
+            "$firewall_command" -D INPUT -p tcp --dport "$port" -j ACCEPT || return 1
+        fi
+    done
+    [[ -z $families ]] || persist_iptables_rules no
+}
+
+open_iptables_firewall() {
+    local port=$1 firewall_command restrictive=no added=no added_families=
+    for firewall_command in iptables ip6tables; do
+        command -v "$firewall_command" >/dev/null 2>&1 || continue
+        iptables_input_is_restrictive "$firewall_command" || continue
+        restrictive=yes
+        if "$firewall_command" -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null; then
+            log "${firewall_command} 已放行 ${port}/TCP。"
+            continue
+        fi
+        if ! "$firewall_command" -A INPUT -p tcp --dport "$port" -j ACCEPT; then
+            delete_iptables_allow_rules "$port" "$added_families" || true
+            die "无法通过 ${firewall_command} 放行 ${port}/TCP。"
+        fi
+        added=yes
+        added_families="${added_families:+$added_families }$firewall_command"
+        log "已通过 ${firewall_command} 放行 ${port}/TCP。"
+    done
+    [[ $restrictive == yes ]] || return 1
+    STATE_FIREWALL_MANAGER=iptables
+    STATE_FIREWALL_IPTABLES_FAMILIES=$added_families
+    if [[ $added == yes ]]; then
+        STATE_FIREWALL_RULE_ADDED=yes
+        persist_iptables_rules yes
+    fi
+}
+
 open_host_firewall() {
     local port=$1 skip=$2
+    validate_port "$port" || die '防火墙端口必须是 1 到 65535 之间的整数。'
     STATE_FIREWALL_MANAGER=none
     STATE_FIREWALL_RULE_ADDED=no
+    STATE_FIREWALL_IPTABLES_FAMILIES=
 
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
         STATE_FIREWALL_MANAGER=ufw
@@ -776,16 +852,15 @@ open_host_firewall() {
         return 0
     fi
 
-    if command -v iptables >/dev/null 2>&1 &&
-       iptables -S INPUT 2>/dev/null | grep -Eq '^-P INPUT (DROP|REJECT)$'; then
-        die '检测到自定义 iptables 默认拒绝策略；请先手动放行新端口，再使用 --skip-host-firewall。'
+    if open_iptables_firewall "$port"; then
+        return 0
     fi
     if command -v nft >/dev/null 2>&1 &&
        nft list ruleset 2>/dev/null | grep -Eq 'hook input[^;]*;[^}]*policy (drop|reject)'; then
         die '检测到自定义 nftables 默认拒绝策略；请先手动放行新端口，再使用 --skip-host-firewall。'
     fi
 
-    log '未检测到启用中的 UFW/firewalld；未修改主机防火墙。'
+    log '未检测到启用中的 UFW、firewalld 或 restrictive iptables；未修改主机防火墙。'
 }
 
 close_staged_firewall_rule() {
@@ -795,6 +870,9 @@ close_staged_firewall_rule() {
         firewalld)
             firewall-cmd --permanent --remove-port="${STATE_NEW_PORT}/tcp" >/dev/null
             firewall-cmd --reload >/dev/null
+            ;;
+        iptables)
+            delete_iptables_allow_rules "$STATE_NEW_PORT" "$STATE_FIREWALL_IPTABLES_FAMILIES"
             ;;
     esac
 }
