@@ -166,7 +166,7 @@ auth_fingerprint_without_password() {
 
 effective_password_setting() {
     "$SSHD_BIN" -T 2>/dev/null |
-        awk '$1 == "passwordauthentication" { print $2; exit }'
+        awk '$1 == "passwordauthentication" && !found { print $2; found=1 }'
 }
 
 main_password_setting() {
