@@ -44,7 +44,9 @@ usage() {
 
 用法：
   $PROGRAM
+  $PROGRAM menu
   $PROGRAM interactive
+  $PROGRAM restore
   $PROGRAM install
   $PROGRAM install-shortcut
   sudo $PROGRAM switch <新端口> [--cloud-firewall-ready] [--skip-host-firewall]
@@ -57,7 +59,8 @@ usage() {
   3. reload 后确认新端口监听、旧端口关闭，然后自动提交。
   4. 任一检查失败时自动恢复原配置；成功后不保留回滚状态。
 
-不带参数运行时默认进入 interactive。interactive 会检测主配置中的
+不带参数运行时显示功能菜单，可选择修改端口、从备份恢复或查看状态。
+interactive 会检测主配置中的
 PasswordAuthentication no，用 y/n 询问是否改为 yes。除非明确选择 y，
 否则脚本不会修改认证配置。
 脚本不会删除 /etc/ssh/sshd_config.d 中的云厂商配置。
@@ -113,7 +116,7 @@ install_tool() {
     confirm_install_target "$source_file" "$ALLENTOOL_PATH" '快捷命令'
     install_copy "$source_file" "$INSTALL_PATH" '正式命令'
     install_copy "$source_file" "$ALLENTOOL_PATH" '快捷命令'
-    log '安装完成，以后直接输入 allentool 即可进入交互模式。'
+    log '安装完成，以后直接输入 allentool 即可打开功能菜单。'
 }
 
 install_shortcut() {
@@ -124,7 +127,7 @@ install_shortcut() {
     confirm_install_target "$source_file" "$ALLENTOOL_PATH" '快捷命令'
     install_copy "$source_file" "$ALLENTOOL_PATH" '快捷命令'
 
-    log '以后直接输入 allentool 即可进入交互模式。'
+    log '以后直接输入 allentool 即可打开功能菜单。'
 }
 
 require_commands() {
@@ -297,10 +300,17 @@ reject_unsupported_config() {
 }
 
 make_backup() {
-    local include_main=${1:-no} timestamp
+    local include_main=${1:-no} include_all=${2:-no} timestamp candidate counter=0
     timestamp=$(date -u +%Y%m%dT%H%M%SZ)
-    STATE_BACKUP_DIR=$BACKUP_ROOT/$timestamp
-    mkdir -p "$STATE_BACKUP_DIR/dropins"
+    mkdir -p "$STATE_DIR" "$BACKUP_ROOT"
+    candidate=$BACKUP_ROOT/$timestamp
+    while [[ -e $candidate || -L $candidate ]]; do
+        ((counter += 1))
+        printf -v candidate '%s/%s-%02d' "$BACKUP_ROOT" "$timestamp" "$counter"
+    done
+    mkdir "$candidate"
+    STATE_BACKUP_DIR=$candidate
+    mkdir "$STATE_BACKUP_DIR/dropins"
     chmod 700 "$STATE_DIR" "$BACKUP_ROOT" "$STATE_BACKUP_DIR" "$STATE_BACKUP_DIR/dropins"
     cp -a "$SSHD_CONFIG" "$STATE_BACKUP_DIR/sshd_config"
 
@@ -308,7 +318,8 @@ make_backup() {
     : > "$STATE_BACKUP_DIR/modified-files"
     chmod 600 "$STATE_BACKUP_DIR/modified-files"
     for file in "${CONFIG_FILES[@]}"; do
-        if grep -Eq '^[[:space:]]*Port[[:space:]]+[0-9]+([[:space:]]*(#.*)?)?$' "$file" ||
+        if [[ $include_all == yes ]] ||
+           grep -Eq '^[[:space:]]*Port[[:space:]]+[0-9]+([[:space:]]*(#.*)?)?$' "$file" ||
            [[ $include_main == yes && $file == "$SSHD_CONFIG" ]]; then
             if [[ $file != "$SSHD_CONFIG" ]]; then
                 cp -a "$file" "$STATE_BACKUP_DIR/dropins/${file##*/}"
@@ -404,6 +415,271 @@ restore_config_files() {
     else
         rm -f "$MANAGED_CONFIG"
     fi
+}
+
+backup_source_for_target() {
+    local backup_dir=$1 target=$2
+    if [[ $target == "$SSHD_CONFIG" ]]; then
+        printf '%s/sshd_config\n' "$backup_dir"
+    else
+        printf '%s/dropins/%s\n' "$backup_dir" "${target##*/}"
+    fi
+}
+
+valid_backup_target() {
+    local target=$1 relative
+    [[ $target == "$SSHD_CONFIG" ]] && return 0
+    [[ $target == "$SSHD_DROPIN_DIR/"* ]] || return 1
+    relative=${target#"$SSHD_DROPIN_DIR"/}
+    [[ -n $relative && $relative != */* && $relative == *.conf ]]
+}
+
+validate_backup_dir() {
+    local backup_dir=$1 backup_name target source seen=$'\n'
+    [[ -d $backup_dir && ! -L $backup_dir ]] || return 1
+    [[ ${backup_dir%/*} == "$BACKUP_ROOT" ]] || return 1
+    backup_name=${backup_dir##*/}
+    [[ $backup_name =~ ^[0-9]{8}T[0-9]{6}Z(-[0-9]{2,})?$ ]] || return 1
+    [[ -f $backup_dir/sshd_config && ! -L $backup_dir/sshd_config ]] || return 1
+    [[ -f $backup_dir/modified-files && ! -L $backup_dir/modified-files ]] || return 1
+    [[ -d $backup_dir/dropins && ! -L $backup_dir/dropins ]] || return 1
+
+    while IFS= read -r target; do
+        [[ -n $target ]] || continue
+        valid_backup_target "$target" || return 1
+        [[ $seen != *$'\n'"$target"$'\n'* ]] || return 1
+        seen+="$target"$'\n'
+        source=$(backup_source_for_target "$backup_dir" "$target")
+        [[ -f $source && ! -L $source ]] || return 1
+    done < "$backup_dir/modified-files"
+}
+
+backup_declared_ports() {
+    local backup_dir=$1 target source
+    {
+        awk '
+            /^[[:space:]]*Port[[:space:]]+[0-9]+([[:space:]]*(#.*)?)?$/ {
+                print $2
+            }
+        ' "$backup_dir/sshd_config"
+        while IFS= read -r target; do
+            [[ -n $target && $target != "$SSHD_CONFIG" ]] || continue
+            source=$(backup_source_for_target "$backup_dir" "$target")
+            awk '
+                /^[[:space:]]*Port[[:space:]]+[0-9]+([[:space:]]*(#.*)?)?$/ {
+                    print $2
+                }
+            ' "$source"
+        done < "$backup_dir/modified-files"
+    } | sort -nu | awk 'NF { found=1; print } END { if (!found) print 22 }'
+}
+
+BACKUP_CHOICES=()
+SELECTED_BACKUP_DIR=
+
+list_backups() {
+    BACKUP_CHOICES=()
+    [[ -d $BACKUP_ROOT ]] || return 1
+    local backup_dir ports
+    while IFS= read -r backup_dir; do
+        [[ -n $backup_dir ]] || continue
+        if ! validate_backup_dir "$backup_dir"; then
+            warn "已忽略格式无效的备份: $backup_dir"
+            continue
+        fi
+        BACKUP_CHOICES+=("$backup_dir")
+    done < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -print | sort -r)
+    ((${#BACKUP_CHOICES[@]} > 0)) || return 1
+
+    printf '可用 SSH 配置备份（最新在前）：\n'
+    local index
+    for index in "${!BACKUP_CHOICES[@]}"; do
+        backup_dir=${BACKUP_CHOICES[$index]}
+        ports=$(backup_declared_ports "$backup_dir")
+        ports=${ports//$'\n'/,}
+        printf '  %d. %s（端口: %s）\n' "$((index + 1))" "${backup_dir##*/}" "$ports"
+    done
+}
+
+select_backup() {
+    list_backups || die "没有找到可用备份：$BACKUP_ROOT"
+    local answer index
+    while true; do
+        printf '请选择要恢复的备份编号（输入 q 退出）: '
+        read -r answer
+        [[ $answer == q || $answer == Q ]] && return 1
+        if [[ $answer =~ ^[0-9]+$ ]]; then
+            index=$((10#$answer - 1))
+            if ((index >= 0 && index < ${#BACKUP_CHOICES[@]})); then
+                SELECTED_BACKUP_DIR=${BACKUP_CHOICES[$index]}
+                return 0
+            fi
+        fi
+        printf '编号无效，请重新输入。\n'
+    done
+}
+
+RESTORE_CREATED_FILES=()
+
+restore_selected_snapshot() {
+    local backup_dir=$1 target source
+    validate_backup_dir "$backup_dir" || return 1
+    RESTORE_CREATED_FILES=()
+
+    cp -a "$backup_dir/sshd_config" "$SSHD_CONFIG" || return 1
+    while IFS= read -r target; do
+        [[ -n $target && $target != "$SSHD_CONFIG" ]] || continue
+        source=$(backup_source_for_target "$backup_dir" "$target")
+        if [[ ! -e $target && ! -L $target ]]; then
+            RESTORE_CREATED_FILES+=("$target")
+        fi
+        [[ ! -L $target ]] || return 1
+        cp -a "$source" "$target" || return 1
+    done < "$backup_dir/modified-files"
+
+    if ! grep -Fxq "$MANAGED_CONFIG" "$backup_dir/modified-files"; then
+        rm -f "$MANAGED_CONFIG"
+    fi
+}
+
+RESTORE_ADDED_FIREWALL_PORTS=()
+RESTORE_ADDED_FIREWALL_MANAGERS=()
+
+open_restore_firewall_ports() {
+    local port
+    RESTORE_ADDED_FIREWALL_PORTS=()
+    RESTORE_ADDED_FIREWALL_MANAGERS=()
+    for port in "$@"; do
+        open_host_firewall "$port" no
+        if [[ $STATE_FIREWALL_RULE_ADDED == yes ]]; then
+            RESTORE_ADDED_FIREWALL_PORTS+=("$port")
+            RESTORE_ADDED_FIREWALL_MANAGERS+=("$STATE_FIREWALL_MANAGER")
+        fi
+    done
+}
+
+close_restore_firewall_ports() {
+    local index=0 port manager
+    while ((index < ${#RESTORE_ADDED_FIREWALL_PORTS[@]})); do
+        port=${RESTORE_ADDED_FIREWALL_PORTS[$index]}
+        manager=${RESTORE_ADDED_FIREWALL_MANAGERS[$index]}
+        case $manager in
+            ufw) ufw --force delete allow "${port}/tcp" >/dev/null || return 1 ;;
+            firewalld)
+                firewall-cmd --permanent --remove-port="${port}/tcp" >/dev/null || return 1
+                firewall-cmd --reload >/dev/null || return 1
+                ;;
+        esac
+        ((index += 1))
+    done
+}
+
+restore_after_restore_failure() {
+    local reason=$1 emergency_backup=$2 old_ports=$3 created recovered=yes port
+    warn "${reason}，正在恢复操作前的配置。"
+    for created in "${RESTORE_CREATED_FILES[@]-}"; do
+        [[ -n $created ]] || continue
+        valid_backup_target "$created" && rm -f "$created"
+    done
+    STATE_BACKUP_DIR=$emergency_backup
+    if ! restore_config_files; then
+        warn '无法从紧急备份恢复配置文件。'
+        recovered=no
+    elif ! "$SSHD_BIN" -t 2>/dev/null; then
+        warn '紧急备份恢复后未通过 sshd -t。'
+        recovered=no
+    elif ! reload_ssh; then
+        warn '紧急备份恢复后 SSH reload 失败。'
+        recovered=no
+    else
+        for port in $old_ports; do
+            if ! wait_for_port "$port"; then
+                warn "紧急恢复后原端口 $port 未监听。"
+                recovered=no
+            fi
+        done
+    fi
+    close_restore_firewall_ports || warn '无法清理由恢复操作新增的主机防火墙规则。'
+    rm -f "$STATE_FILE"
+    if [[ $recovered == yes ]]; then
+        die "${reason}；已自动恢复操作前配置。紧急备份保留在 $emergency_backup"
+    fi
+    die "${reason}；自动恢复不完整，请通过云控制台检查。紧急备份位于 $emergency_backup"
+}
+
+restore_backup_interactive() {
+    [[ ! -e $STATE_FILE ]] || die '存在未结束的端口切换状态，请先从菜单执行端口修改以自动处理。'
+    if ! select_backup; then
+        log '恢复操作已取消。'
+        return 0
+    fi
+
+    local selected_backup=$SELECTED_BACKUP_DIR expected_ports expected_display
+    local emergency_backup actual_ports old_ports port
+    local -a expected_port_array old_port_array
+    validate_backup_dir "$selected_backup" || die '所选备份无效，拒绝恢复。'
+    expected_ports=$(backup_declared_ports "$selected_backup")
+    expected_display=${expected_ports//$'\n'/, }
+    printf '将恢复备份：%s\n' "$selected_backup"
+    printf '预计恢复 SSH 端口：%s\n' "$expected_display"
+    warn '恢复也会还原该备份中的 SSH 认证设置；请保持当前 SSH 会话。'
+    prompt_yes_no "是否已在云厂商安全组/防火墙放行 ${expected_display}/TCP？" || {
+        log '恢复操作已取消。'
+        return 0
+    }
+    prompt_yes_no '确认开始恢复这份备份？' || {
+        log '恢复操作已取消。'
+        return 0
+    }
+
+    "$SSHD_BIN" -t || die '当前 SSH 配置本身无法通过 sshd -t，拒绝恢复。'
+    detect_service
+    collect_config_files
+    reject_unsupported_config
+    old_ports=$(effective_ports)
+    [[ -n $old_ports ]] || die '无法读取当前有效 SSH 端口。'
+    old_port_array=()
+    while IFS= read -r port; do
+        [[ -n $port ]] && old_port_array+=("$port")
+    done <<< "$old_ports"
+    expected_port_array=()
+    while IFS= read -r port; do
+        [[ -n $port ]] && expected_port_array+=("$port")
+    done <<< "$expected_ports"
+
+    make_backup yes yes
+    emergency_backup=$STATE_BACKUP_DIR
+    open_restore_firewall_ports "${expected_port_array[@]}"
+    comment_active_ports
+    if ! restore_selected_snapshot "$selected_backup"; then
+        restore_after_restore_failure '无法完整应用所选备份' "$emergency_backup" "$old_ports"
+    fi
+    if ! "$SSHD_BIN" -t; then
+        restore_after_restore_failure '恢复后的 SSH 配置未通过 sshd -t' "$emergency_backup" "$old_ports"
+    fi
+    actual_ports=$(effective_ports)
+    if [[ $actual_ports != "$expected_ports" ]]; then
+        restore_after_restore_failure "恢复后的有效端口与备份不一致（实际: ${actual_ports//$'\n'/, }）" "$emergency_backup" "$old_ports"
+    fi
+    if ! reload_ssh; then
+        restore_after_restore_failure '恢复配置后 SSH reload 失败' "$emergency_backup" "$old_ports"
+    fi
+    for port in "${expected_port_array[@]}"; do
+        if ! wait_for_port "$port"; then
+            restore_after_restore_failure "恢复后 SSH 未监听端口 $port" "$emergency_backup" "$old_ports"
+        fi
+    done
+    for port in "${old_port_array[@]}"; do
+        if ! port_in_list "$port" "${expected_port_array[@]}" && ! wait_for_port_closed "$port"; then
+            restore_after_restore_failure "恢复后原端口 $port 仍在监听" "$emergency_backup" "$old_ports"
+        fi
+    done
+
+    rm -f "$STATE_FILE"
+    log "恢复成功：SSH 当前端口为 ${expected_display}。"
+    printf '当前实际生效认证设置：\n'
+    "$SSHD_BIN" -T 2>/dev/null | grep -E '^(passwordauthentication|permitrootlogin|kbdinteractiveauthentication|pubkeyauthentication|usepam) '
+    log "恢复前配置的紧急备份保留在：$emergency_backup"
 }
 
 write_state() {
@@ -779,9 +1055,29 @@ show_status() {
     done
 }
 
+menu_mode() {
+    local choice
+    printf '\nallentool VPS 工具\n'
+    printf '  1. 修改 SSH 端口\n'
+    printf '  2. 从备份恢复 SSH 设置\n'
+    printf '  3. 查看 SSH 状态\n'
+    printf '  4. 退出\n'
+    while true; do
+        printf '请选择 [1-4]: '
+        read -r choice
+        case $choice in
+            1) interactive_mode; return 0 ;;
+            2) restore_backup_interactive; return 0 ;;
+            3) show_status; return 0 ;;
+            4|q|Q) log '已退出。'; return 0 ;;
+            *) printf '选项无效，请输入 1、2、3 或 4。\n' ;;
+        esac
+    done
+}
+
 main() {
     ORIGINAL_ARGS=("$@")
-    local action=${1:-interactive}
+    local action=${1:-menu}
     (($# == 0)) || shift
 
     case $action in
@@ -789,11 +1085,23 @@ main() {
             usage
             return 0
             ;;
+        menu)
+            require_root
+            require_commands
+            (($# == 0)) || die 'menu 不接受额外参数。'
+            menu_mode
+            ;;
         interactive)
             require_root
             require_commands
             (($# == 0)) || die 'interactive 不接受额外参数。'
             interactive_mode
+            ;;
+        restore)
+            require_root
+            require_commands
+            (($# == 0)) || die 'restore 不接受额外参数。'
+            restore_backup_interactive
             ;;
         install)
             require_root

@@ -20,15 +20,20 @@ curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/safe-ssh-
 这是可直接复制的一整行命令，安装过程中不会进入 `less` 查看器。
 
 首次安装会同时创建正式命令 `safe-ssh-port` 和快捷命令 `allentool`。
-开始修改 SSH 端口时直接运行：
+打开工具菜单：
 
 ```bash
 allentool
 ```
 
+菜单可以修改 SSH 端口、从历史备份恢复 SSH 设置或查看状态。修改端口时，
 按照提示选择是否将主配置中的 `PasswordAuthentication no` 改为 `yes`、
 输入新端口，并确认云厂商安全组已经放行该端口。脚本会直接切换并自动提交，
-最终只监听新端口，不提供双端口模式，也不保留一键回滚状态。
+最终只监听新端口，不提供双端口模式。
+
+每次修改产生的备份会保留在 `/var/lib/safe-ssh-port/backups/`。需要恢复时运行
+`allentool` 并选择“从备份恢复 SSH 设置”；脚本会列出备份时间及其中的端口。
+恢复前还会保存当前配置，恢复失败则自动还原。
 
 保持当前 SSH 会话。切换完成后另开一个终端测试新端口：
 
