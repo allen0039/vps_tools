@@ -35,9 +35,10 @@ allentool
 restrictive iptables/ip6tables，脚本会自动在主机防火墙放行新端口。
 Debian/Ubuntu 缺少持久化工具时还会自动安装 `iptables-persistent` 并保存规则。
 
-防火墙菜单支持查看状态、按 TCP/UDP 开放或关闭端口、保护并修复 SSH 放行规则、
-仅保留 SSH 入站、保留 SSH 与当前非回环监听端口、安装持久化工具，以及恢复
-iptables 规则备份。原生自定义 nftables 只做状态展示，不会猜测表和链。
+防火墙菜单会直接显示明确放行和明确关闭的 TCP/UDP 端口，并支持保护及修复 SSH
+规则、仅保留 SSH 入站、保留 SSH 与当前非回环监听端口，以及安装持久化工具。
+防火墙规则直接修改，不再产生按时间命名的快照备份。原生自定义 nftables 只做
+状态展示，不会猜测表和链。
 云厂商安全组仍需在服务商控制台单独管理。
 
 每次修改产生的备份会保留在 `/var/lib/safe-ssh-port/backups/`。需要恢复时运行

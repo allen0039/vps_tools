@@ -16,7 +16,7 @@
 - 成功后自动提交，不保留迁移或一键回滚状态
 - 可从交互菜单选择历史备份恢复端口和认证设置
 - 恢复前自动备份当前配置，恢复失败时自动还原
-- 防火墙 raw iptables 变更前保存完整 IPv4/IPv6 快照，失败自动恢复
+- 防火墙菜单实时汇总明确放行和明确关闭的 TCP/UDP 单端口规则
 
 ## 安装
 
@@ -123,7 +123,8 @@ sudo safe-ssh-port switch 21919 --cloud-firewall-ready --enable-main-password
 修改或恢复 SSH 端口时，脚本会自动处理：
 
 - UFW：添加 `<端口>/tcp` 规则。
-- firewalld：添加永久 TCP 端口规则并 reload。
+- firewalld：开放时添加永久端口规则；指定关闭时添加可在菜单中显示的永久 drop
+  rich rule，然后 reload。
 - iptables/ip6tables：当 `INPUT` 默认策略为 `DROP/REJECT` 时，追加精确的
   `TCP/SSH端口 ACCEPT` 规则，使其在默认拒绝策略前生效；已有规则顺序保持不变。
   `iptables-nft` 后端同样适用。
@@ -145,16 +146,18 @@ sudo safe-ssh-port switch 21919 --cloud-firewall-ready --enable-main-password
 运行 `allentool` 选择 `4. 防火墙管理`，菜单提供：
 
 ```text
-1. 查看防火墙与持久化状态
-2. 开放指定端口
-3. 关闭指定端口
-4. 重新检测并放行当前 SSH 端口
-5. 关闭所有宿主机入站，仅保留 SSH
-6. 关闭所有宿主机入站，保留 SSH 和当前公网监听端口
+1. 开放指定端口        2. 关闭指定端口
+3. 修复 SSH 放行       4. 查看详细状态
+5. 仅保留 SSH 入站
+6. 保留 SSH 和当前公网监听端口
 7. 安装/修复防火墙持久化
-8. 恢复防火墙备份
-0. 返回
+0. 返回上一级菜单
 ```
+
+菜单上方会显示防火墙后端、SSH 保护端口、IPv4/IPv6 默认入站策略、入站保护模式，
+以及当前能够明确解析的“放行”和“关闭”单端口规则。这里显示的是防火墙规则，
+不等同于程序是否正在监听；若默认策略为 `ACCEPT`，没有匹配到规则的其他端口也会
+被默认允许，无法逐个列出。第 4 项会显示非回环监听端口和 iptables 原始规则。
 
 开放或关闭指定端口时，可以选择 `TCP`、`UDP` 或 `TCP + UDP`。通常服务端口应按
 实际协议开放，默认推荐 TCP；只有确认应用同时使用两种协议时才选择同时开放。
@@ -168,23 +171,19 @@ sudo safe-ssh-port switch 21919 --cloud-firewall-ready --enable-main-password
 “仅保留 SSH”与“保留 SSH 和当前公网监听端口”是 iptables/iptables-nft 的高级
 功能。第二种模式只保留绑定到非回环地址的 TCP/UDP 监听端口，不会把
 `127.0.0.1` 或 `::1` 上的数据库等服务公开。应用前会展示完整保留列表并要求
-`y/n` 确认。脚本使用独立的 `ALLENTOOL_INPUT` 链，不会执行 `iptables -F INPUT`
-或删除 Docker、Fail2ban、云厂商及用户已有规则；链中会保留已建立连接、回环流量
-和 ICMP/ICMPv6，然后拒绝其他宿主机 `INPUT` 流量。
+`y/n` 确认。界面把这一状态称为“入站保护模式”。内部使用独立的
+`ALLENTOOL_INPUT` 子链，让 `INPUT` 流量先经过保留清单，不会执行
+`iptables -F INPUT` 或删除 Docker、Fail2ban、云厂商及用户已有规则；子链中会
+保留已建立连接、回环流量和 ICMP/ICMPv6，然后拒绝其他宿主机 `INPUT` 流量。
 
 Docker 发布端口通常经过 `FORWARD`/`DOCKER-USER`，不属于宿主机 `INPUT`，因此
 不会自动出现在上述保留列表中，也不受 `ALLENTOOL_INPUT` 链直接控制。若要限制
 Docker 端口，应单独管理 Docker/`DOCKER-USER` 规则。
 
-raw iptables 的端口变更和入站收紧都会先保存完整规则到：
-
-```text
-/var/lib/safe-ssh-port/firewall-backups/
-```
-
-恢复备份前会先验证 IPv4/IPv6 文件，再保存一份当前规则作为紧急快照。若恢复过程
-失败，脚本会自动重放紧急快照。此备份/恢复功能不适用于 UFW、firewalld 或原生
-自定义 nftables；这些后端分别使用自己的原生命令或仅做只读展示。
+防火墙端口和入站保护修改会直接生效，并通过持久化工具保存，不再创建
+`/var/lib/safe-ssh-port/firewall-backups/` 时间戳快照，也不提供防火墙备份恢复菜单。
+升级脚本不会自动删除旧版本已经产生的历史防火墙备份。SSH 配置修改仍会保留独立
+备份，因为它用于 SSH 配置校验失败时自动恢复，和防火墙快照不是一回事。
 
 ## 查看状态
 
