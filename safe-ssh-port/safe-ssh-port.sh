@@ -100,7 +100,7 @@ confirm_install_target() {
             return 0
         fi
         [[ -t 0 ]] || die "目标已存在；请在交互终端中确认是否覆盖: $target"
-        prompt_yes_no "${target} 已存在，是否用当前版本覆盖？" || die '安装已取消。'
+        prompt_yes_no "${target} 已存在，是否用当前版本覆盖（推荐）？" yes || die '安装已取消。'
     fi
 }
 
@@ -188,14 +188,21 @@ main_password_setting() {
 }
 
 prompt_yes_no() {
-    local prompt=$1 answer
+    local prompt=$1 default=${2:-no} answer suffix
+    [[ $default == yes || $default == no ]] || die "无效的默认选项：$default"
+    if [[ $default == yes ]]; then suffix='[Y/n]'; else suffix='[y/N]'; fi
     while true; do
-        printf '%s [y/n]: ' "$prompt"
-        read -r answer
+        printf '%s %s: ' "$prompt" "$suffix"
+        if ! IFS= read -r answer; then
+            return 1
+        fi
         case $answer in
             y|Y) return 0 ;;
             n|N) return 1 ;;
-            *) printf '请输入 y 或 n。\n' ;;
+            '')
+                if [[ $default == yes ]]; then return 0; else return 1; fi
+                ;;
+            *) printf '请输入 y、n，或直接按回车使用默认选项。\n' ;;
         esac
     done
 }
@@ -650,11 +657,11 @@ restore_backup_interactive() {
     printf '将恢复备份：%s\n' "$selected_backup"
     printf '预计恢复 SSH 端口：%s\n' "$expected_display"
     warn '恢复也会还原该备份中的 SSH 认证设置；请保持当前 SSH 会话。'
-    prompt_yes_no "是否已在云厂商安全组/防火墙放行 ${expected_display}/TCP？" || {
+    prompt_yes_no "是否已在云厂商安全组/防火墙放行 ${expected_display}/TCP？" no || {
         log '恢复操作已取消。'
         return 0
     }
-    prompt_yes_no '确认开始恢复这份备份？' || {
+    prompt_yes_no '确认开始恢复这份备份？' no || {
         log '恢复操作已取消。'
         return 0
     }
@@ -992,10 +999,10 @@ prompt_firewall_protocols() {
     SELECTED_PROTOCOLS=
     printf '请选择协议：\n  1. TCP（推荐）\n  2. UDP\n  3. TCP + UDP\n  0. 取消\n'
     while true; do
-        printf '请选择 [0-3]: '
+        printf '请选择 [0-3，默认 1]: '
         read -r choice
         case $choice in
-            1) SELECTED_PROTOCOLS=tcp; return 0 ;;
+            ''|1) SELECTED_PROTOCOLS=tcp; return 0 ;;
             2) SELECTED_PROTOCOLS=udp; return 0 ;;
             3) SELECTED_PROTOCOLS='tcp udp'; return 0 ;;
             0|q|Q) return 1 ;;
@@ -1132,7 +1139,7 @@ firewall_restore_interactive() {
         log '没有选择可用的防火墙备份。'
         return 0
     fi
-    prompt_yes_no "确认恢复 ${SELECTED_FIREWALL_BACKUP##*/}？" || return 0
+    prompt_yes_no "确认恢复 ${SELECTED_FIREWALL_BACKUP##*/}？" no || return 0
     test_firewall_backup_rules "$SELECTED_FIREWALL_BACKUP" || {
         warn '所选防火墙备份无法通过恢复预检，未修改当前规则。'
         return 0
@@ -1265,7 +1272,7 @@ firewall_close_interactive() {
     fi
     while read -r protocol listener; do
         if [[ $listener == "$SELECTED_FIREWALL_PORT" && $SELECTED_PROTOCOLS == *"$protocol"* ]]; then
-            prompt_yes_no "端口 ${listener}/${protocol} 当前正在公网监听，仍要关闭吗？" || return 0
+            prompt_yes_no "端口 ${listener}/${protocol} 当前正在公网监听，仍要关闭吗？" no || return 0
         fi
     done < <(public_listeners)
     firewall_apply_port close "$SELECTED_FIREWALL_PORT" "$SELECTED_PROTOCOLS"
@@ -1333,9 +1340,9 @@ show_firewall_status() {
             else
                 printf '持久化工具: 未安装\n'
                 if [[ $offer_install == yes ]]; then
-                    printf '  1. 安装 iptables-persistent 并保存规则\n  0. 返回\n请选择 [0-1]: '
+                    printf '  1. 安装 iptables-persistent 并保存规则（推荐）\n  0. 返回\n请选择 [0-1，默认 1]: '
                     read -r answer
-                    [[ $answer == 1 ]] && repair_firewall_persistence
+                    [[ -z $answer || $answer == 1 ]] && repair_firewall_persistence
                 fi
             fi
             ;;
@@ -1390,7 +1397,7 @@ firewall_lockdown_interactive() {
     printf '即将保留的宿主机入站端口：\n'
     printf '%s\n' "$allowlist" | awk '{printf "  %s/%s\n", $2, $1}'
     warn '其他宿主机 INPUT 流量将被 allentool 管理链拒绝；会保留 ICMP/ICMPv6，Docker 转发端口不属于 INPUT。'
-    prompt_yes_no '确认应用此收紧规则？' || return 0
+    prompt_yes_no '确认应用此收紧规则？' no || return 0
     if ! make_firewall_backup; then
         warn '无法创建收紧前防火墙备份，已取消操作。'
         return 0
@@ -1564,7 +1571,7 @@ interactive_mode() {
     printf '主配置 PasswordAuthentication: %s\n' "${main_setting:-未显式设置}"
     printf '当前实际生效 PasswordAuthentication: %s\n' "${effective_setting:-未知}"
     if [[ $main_setting == no ]]; then
-        if prompt_yes_no '检测到主配置为 PasswordAuthentication no，是否改为 yes？'; then
+        if prompt_yes_no '检测到主配置为 PasswordAuthentication no，是否改为 yes（需要密码登录时推荐）？' yes; then
             enable_main_password=yes
         else
             warn '选择了 n；主配置将保持 no。端口迁移不会删除 cloud-init 配置。'
@@ -1598,7 +1605,7 @@ interactive_mode() {
         break
     done
 
-    if ! prompt_yes_no "是否已在云厂商安全组/防火墙放行 ${new_port}/TCP？"; then
+    if ! prompt_yes_no "是否已在云厂商安全组/防火墙放行 ${new_port}/TCP？" no; then
         die '请先开放云防火墙端口后再运行脚本。'
     fi
 

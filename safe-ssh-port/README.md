@@ -49,6 +49,11 @@ allentool
 sudo safe-ssh-port install-shortcut
 ```
 
+交互提示会把推荐项设为默认值：`[Y/n]` 表示直接回车选择“是”，`[y/N]` 表示
+直接回车选择“否”。覆盖安装、需要密码登录时修复 `PasswordAuthentication` 等
+推荐操作默认“是”；恢复、关闭监听端口和收紧防火墙等高风险操作默认“否”。
+防火墙协议选择直接回车则使用推荐的 TCP。
+
 ## allentool 功能菜单
 
 运行：
