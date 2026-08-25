@@ -2369,20 +2369,23 @@ show_status() {
 
 menu_mode() {
     local choice
-    printf '\nallentool VPS 工具\n'
-    printf '  1. 修改 SSH 端口\n'
-    printf '  2. 从备份恢复 SSH 设置\n'
-    printf '  3. 查看 SSH 状态\n'
-    printf '  4. 防火墙管理\n'
-    printf '  5. 退出\n'
     while true; do
+        printf '\nallentool VPS 工具\n'
+        printf '  1. 修改 SSH 端口\n'
+        printf '  2. 从备份恢复 SSH 设置\n'
+        printf '  3. 查看 SSH 状态\n'
+        printf '  4. 防火墙管理\n'
+        printf '  5. 退出\n'
         printf '请选择 [1-5]: '
-        read -r choice
+        if ! read -r choice; then
+            log '输入已结束，脚本退出。'
+            return 0
+        fi
         case $choice in
             1) interactive_mode; return 0 ;;
             2) restore_backup_interactive; return 0 ;;
             3) show_status; return 0 ;;
-            4) firewall_menu; return 0 ;;
+            4) firewall_menu ;;
             5|q|Q) log '已退出。'; return 0 ;;
             *) printf '选项无效，请输入 1、2、3、4 或 5。\n' ;;
         esac
