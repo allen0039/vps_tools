@@ -57,7 +57,7 @@ usage() {
 流程：
   1. 先在云厂商安全组/防火墙中放行新端口。
   2. stage 同时保留旧端口和新端口，并验证 SSH 配置及监听。
-  3. interactive 可选择立即 finalize，自动关闭旧 SSH 监听。
+  3. interactive 可选择立即 finalize + commit，自动关闭旧 SSH 监听。
   4. 也可保留双端口，使用第二个终端验证后再 finalize。
 
 不带参数运行时默认进入 interactive。interactive 会根据迁移状态引导
@@ -701,12 +701,12 @@ interactive_mode() {
 
     stage_port "$new_port" yes no "$enable_main_password" "$direct_switch"
     if [[ $direct_switch == yes ]]; then
-        finalize_port yes
+        complete_quick_switch
     fi
 }
 
 finalize_port() {
-    local verified=$1 answer auth_before auth_after
+    local verified=$1 suppress_followup=${2:-no} answer auth_before auth_after
     load_state
     [[ $STATE_STATUS == staged ]] || die "当前状态是 ${STATE_STATUS}，不能 finalize。"
 
@@ -736,9 +736,15 @@ finalize_port() {
     STATE_STATUS=finalized
     write_state
     log "完成：SSH 现在仅监听端口 ${STATE_NEW_PORT}。"
+    [[ $suppress_followup == yes ]] && return 0
     log "备份和 rollback 状态仍保留；确认稳定后可保留，或自行归档 ${STATE_BACKUP_DIR}。"
     log "再次确认稳定后运行：sudo $PROGRAM interactive"
     log "也可以运行：sudo $PROGRAM commit"
+}
+
+complete_quick_switch() {
+    finalize_port yes yes
+    commit_port
 }
 
 commit_port() {
