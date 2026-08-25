@@ -855,6 +855,12 @@ main() {
     esac
 }
 
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+script_source=${BASH_SOURCE[0]}
+script_invoked=$0
+if [[ $script_invoked != */* ]]; then
+    script_invoked=$(command -v -- "$script_invoked" 2>/dev/null || true)
+fi
+if [[ $script_source == "$0" ]] ||
+   [[ -n $script_invoked && -e $script_invoked && $script_source -ef $script_invoked ]]; then
     main "$@"
 fi
