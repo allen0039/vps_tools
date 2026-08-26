@@ -62,6 +62,45 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(third["summary"]["event_count"], 4)
             self.assertEqual(third["runtime"]["new_event_count"], 0)
 
+    def test_allowlist_filters_subscription_report_but_retains_normalized_events(self):
+        with tempfile.TemporaryDirectory() as value:
+            directory = Path(value)
+            subscription_log = directory / "subscriptions.jsonl"
+            rows = []
+            for user, suffix in (("alice", 1), ("alice", 2), ("bob", 3), ("bob", 4)):
+                rows.append(
+                    json.dumps(
+                        {
+                            "timestamp": f"2026-08-26T01:0{suffix}:00Z",
+                            "subscription_id": user,
+                            "source_ip": f"198.51.100.{suffix}",
+                        }
+                    )
+                )
+            subscription_log.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            config = directory / "config.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "auth_logs": [],
+                        "subscription_logs": [str(subscription_log)],
+                        "state_dir": str(directory / "state"),
+                        "report_dir": str(directory / "reports"),
+                        "subscription_monitoring": {"mode": "allowlist", "users": ["alice"]},
+                        "rules": {"thresholds": {"subscription_ip_count": 2}},
+                        "telegram": {"enabled": False},
+                        "openai_review": {"enabled": False},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report = run_cycle(str(config))
+            self.assertEqual(report["summary"]["event_count"], 2)
+            self.assertEqual({item["user"] for item in report["findings"]}, {"alice"})
+            retained = (directory / "state" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(retained), 4)
+            self.assertEqual(report["runtime"]["subscription_monitoring"]["configured_user_count"], 1)
+
     def test_falco_event_parser(self):
         raw = {
             "time": "2026-08-26T02:00:00Z",

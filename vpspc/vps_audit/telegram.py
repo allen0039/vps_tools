@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import socket
 import urllib.error
-import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -97,18 +96,58 @@ def build_alert_message(
     return rendered[:3900]
 
 
-def send_message(token: str, chat_id: str, text: str, timeout: int = 20) -> Dict[str, Any]:
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "disable_web_page_preview": "true"}).encode("utf-8")
-    request = urllib.request.Request(url, data=payload, method="POST")
+def api_request(token: str, method: str, payload: Dict[str, Any], timeout: int = 20) -> Dict[str, Any]:
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             result = json.load(response)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Telegram API error {exc.code}: {detail}") from exc
+        raise RuntimeError(f"Telegram API error {exc.code}: {detail[:500]}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Telegram connection failed: {exc.reason}") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError("Telegram returned an invalid response")
     if not result.get("ok"):
         raise RuntimeError("Telegram rejected the message: " + json.dumps(result, ensure_ascii=False))
     return result
+
+
+def send_message(
+    token: str,
+    chat_id: str,
+    text: str,
+    timeout: int = 20,
+    reply_markup: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    return api_request(token, "sendMessage", payload, timeout)
+
+
+def get_updates(token: str, offset: int | None, timeout: int = 30) -> List[Dict[str, Any]]:
+    payload: Dict[str, Any] = {
+        "timeout": timeout,
+        "allowed_updates": ["message", "callback_query"],
+    }
+    if offset is not None:
+        payload["offset"] = offset
+    result = api_request(token, "getUpdates", payload, timeout + 10)
+    updates = result.get("result", [])
+    if not isinstance(updates, list):
+        raise RuntimeError("Telegram getUpdates returned an invalid result")
+    return [item for item in updates if isinstance(item, dict)]
+
+
+def answer_callback_query(token: str, callback_query_id: str, text: str = "") -> None:
+    payload: Dict[str, Any] = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text[:180]
+    api_request(token, "answerCallbackQuery", payload)

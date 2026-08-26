@@ -14,6 +14,11 @@
   "report_dir": "/var/lib/vps-audit/reports",
   "scan_interval_minutes": 5,
   "retention_days": 7,
+  "subscription_monitoring": {
+    "enabled": true,
+    "mode": "allowlist",
+    "users": ["personal-plan-001", "personal-plan-002"]
+  },
   "rules": {
     "thresholds": {
       "subscription_window_minutes": 15,
@@ -31,7 +36,10 @@
     "chat_id": "123456789",
     "minimum_severity": "high",
     "cooldown_hours": 6,
-    "include_source_ip": false
+    "include_source_ip": false,
+    "bot_management_enabled": true,
+    "admin_user_ids": [123456789],
+    "poll_timeout_seconds": 30
   },
   "openai_review": {
     "enabled": false,

@@ -16,7 +16,7 @@ from .config import DEFAULT_CONFIG
 from .falco_parser import parse_falco_event
 from .geoip import GeoIPEnricher
 from .io import read_events
-from .models import parse_timestamp
+from .models import Event, parse_timestamp
 from .miaomiaowux_parser import parse_miaomiaowux_line
 from .report import render_markdown
 from .ssh_parser import parse_auth_log, parse_sshd_message
@@ -40,6 +40,11 @@ DEFAULT_RUNTIME_CONFIG: Dict[str, Any] = {
     "scan_interval_minutes": 5,
     "retention_days": 7,
     "initial_scan_bytes": 2_000_000,
+    "subscription_monitoring": {
+        "enabled": True,
+        "mode": "all",
+        "users": [],
+    },
     "rules": DEFAULT_CONFIG,
     "geoip": {
         "city_db": "",
@@ -55,6 +60,9 @@ DEFAULT_RUNTIME_CONFIG: Dict[str, Any] = {
         "cooldown_hours": 6,
         "include_source_ip": False,
         "max_findings": 8,
+        "bot_management_enabled": False,
+        "admin_user_ids": [],
+        "poll_timeout_seconds": 30,
     },
     "openai_review": {
         "enabled": False,
@@ -74,16 +82,87 @@ def _merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def load_runtime_config(path: str) -> Dict[str, Any]:
-    with Path(path).open("r", encoding="utf-8") as handle:
-        raw = json.load(handle)
+def normalize_runtime_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("runtime config root must be a JSON object")
     config = _merge(DEFAULT_RUNTIME_CONFIG, raw)
     severity = config["telegram"]["minimum_severity"]
     if severity not in SEVERITY_ORDER:
         raise ValueError(f"invalid telegram.minimum_severity: {severity}")
+    monitoring = config["subscription_monitoring"]
+    if not isinstance(monitoring, dict):
+        raise ValueError("subscription_monitoring must be an object")
+    if monitoring.get("mode") not in {"all", "allowlist"}:
+        raise ValueError("subscription_monitoring.mode must be all or allowlist")
+    if not isinstance(monitoring.get("enabled"), bool):
+        raise ValueError("subscription_monitoring.enabled must be boolean")
+    users = monitoring.get("users")
+    if not isinstance(users, list):
+        raise ValueError("subscription_monitoring.users must be an array")
+    normalized_users: List[str] = []
+    for value in users:
+        user = str(value).strip()
+        if not user or len(user) > 128 or any(ord(char) < 32 for char in user):
+            raise ValueError("subscription user identifiers must contain 1 to 128 printable characters")
+        if user not in normalized_users:
+            normalized_users.append(user)
+    if len(normalized_users) > 500:
+        raise ValueError("subscription_monitoring.users supports at most 500 users")
+    monitoring["users"] = normalized_users
+    telegram = config["telegram"]
+    if not isinstance(telegram.get("enabled"), bool):
+        raise ValueError("telegram.enabled must be boolean")
+    if not isinstance(telegram.get("bot_management_enabled"), bool):
+        raise ValueError("telegram.bot_management_enabled must be boolean")
+    admin_ids = telegram.get("admin_user_ids")
+    if not isinstance(admin_ids, list):
+        raise ValueError("telegram.admin_user_ids must be an array")
+    try:
+        if any(isinstance(value, bool) for value in admin_ids):
+            raise ValueError
+        telegram["admin_user_ids"] = list(dict.fromkeys(int(value) for value in admin_ids))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("telegram.admin_user_ids must contain numeric Telegram user IDs") from exc
+    if len(telegram["admin_user_ids"]) > 32:
+        raise ValueError("telegram.admin_user_ids supports at most 32 administrators")
+    if any(value <= 0 for value in telegram["admin_user_ids"]):
+        raise ValueError("telegram.admin_user_ids must contain positive Telegram user IDs")
+    if telegram.get("bot_management_enabled"):
+        if not telegram.get("enabled"):
+            raise ValueError("Telegram management requires telegram.enabled")
+        chat_id = str(telegram.get("chat_id", "")).strip()
+        if not chat_id:
+            raise ValueError("Telegram management requires telegram.chat_id")
+        if not chat_id.lstrip("-").isdigit():
+            raise ValueError("telegram.chat_id must be numeric")
+        if not telegram["admin_user_ids"]:
+            raise ValueError("Telegram management requires at least one administrator user ID")
+    numeric_ranges = {
+        "retention_days": (1.0, 365.0),
+        "scan_interval_minutes": (1.0, 1440.0),
+        "telegram.cooldown_hours": (0.0, 8760.0),
+        "telegram.max_findings": (1.0, 50.0),
+        "telegram.poll_timeout_seconds": (5.0, 50.0),
+    }
+    for key, (minimum, maximum) in numeric_ranges.items():
+        if "." in key:
+            section, child = key.split(".", 1)
+            value = config[section][child]
+        else:
+            value = config[key]
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} must be numeric") from exc
+        if not minimum <= number <= maximum:
+            raise ValueError(f"{key} must be between {minimum:g} and {maximum:g}")
     return config
+
+
+def load_runtime_config(path: str) -> Dict[str, Any]:
+    with Path(path).open("r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+    return normalize_runtime_config(raw)
 
 
 def _atomic_json(path: Path, value: object, mode: int = 0o600) -> None:
@@ -297,6 +376,20 @@ def _merge_events(existing: Iterable[Dict[str, Any]], new: Iterable[Dict[str, An
     return sorted(unique.values(), key=lambda item: parse_timestamp(str(item["timestamp"])))
 
 
+def _filter_monitored_events(events: Iterable[Event], config: Dict[str, Any]) -> List[Event]:
+    monitoring = config["subscription_monitoring"]
+    if not monitoring.get("enabled"):
+        return [event for event in events if event.event_type != "subscription_access"]
+    if monitoring.get("mode") == "all":
+        return list(events)
+    allowed = set(monitoring.get("users", []))
+    return [
+        event
+        for event in events
+        if event.event_type != "subscription_access" or event.user in allowed
+    ]
+
+
 def _write_events(path: Path, events: Iterable[Dict[str, Any]]) -> None:
     rendered = "".join(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n" for event in events)
     _atomic_text(path, rendered)
@@ -389,12 +482,18 @@ def run_cycle(config_path: str) -> Dict[str, Any]:
         cutoff = now - timedelta(days=float(config["retention_days"]))
         events = _merge_events(_load_retained(events_path, cutoff), new_events)
         _write_events(events_path, events)
-        report = analyze(read_events([str(events_path)]), config["rules"])
+        analyzed_events = _filter_monitored_events(read_events([str(events_path)]), config)
+        report = analyze(analyzed_events, config["rules"])
         report["runtime"] = {
             "generated_at": now.isoformat().replace("+00:00", "Z"),
             "new_event_count": len(new_events),
             "parse_error_count": parse_errors,
             "retention_days": config["retention_days"],
+            "subscription_monitoring": {
+                "enabled": bool(config["subscription_monitoring"].get("enabled")),
+                "mode": config["subscription_monitoring"].get("mode"),
+                "configured_user_count": len(config["subscription_monitoring"].get("users", [])),
+            },
         }
         candidates = _notification_candidates(report, state, config, now)
         ai_result = None
@@ -462,6 +561,8 @@ def health(config_path: str) -> Dict[str, Any]:
         "config": config_path,
         "state_dir": config["state_dir"],
         "telegram_enabled": bool(config["telegram"].get("enabled")),
+        "telegram_management_enabled": bool(config["telegram"].get("bot_management_enabled")),
+        "subscription_monitoring": config["subscription_monitoring"],
         "openai_review_enabled": bool(config["openai_review"].get("enabled")),
         "last_run": state.get("last_run"),
         "last_summary": state.get("last_summary"),

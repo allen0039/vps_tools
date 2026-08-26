@@ -240,6 +240,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             service = (systemd_dir / "vps-audit.service").read_text(encoding="utf-8")
             timer = (systemd_dir / "vps-audit.timer").read_text(encoding="utf-8")
+            bot_service = (systemd_dir / "vps-audit-bot.service").read_text(encoding="utf-8")
             self.assertIn(
                 "ReadWritePaths=/data/vps-audit /data/vps-audit/reports",
                 service,
@@ -249,7 +250,25 @@ class InstallerTests(unittest.TestCase):
             self.assertNotIn("@SUPPLEMENTARY_GROUPS@", service)
             self.assertNotIn("@CAPABILITY_BOUNDING_SET@", service)
             self.assertNotIn("@INTERVAL@", timer)
+            self.assertIn("ReadWritePaths=/etc/vps-audit /data/vps-audit", bot_service)
+            self.assertNotIn("@STATE_DIR@", bot_service)
             self.assertNotIn("enable", systemctl_log.read_text(encoding="utf-8"))
+
+    def test_cli_shortcut_is_removed_only_when_managed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            shortcut = Path(temporary) / "bin" / "vpspc"
+            completed = run_bash(
+                f'CLI_SHORTCUT="{shortcut}"\ninstall_cli_shortcut\nremove_cli_shortcut'
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(shortcut.exists())
+
+            shortcut.parent.mkdir(parents=True, exist_ok=True)
+            shortcut.write_text("#!/bin/sh\necho unrelated\n", encoding="utf-8")
+            completed = run_bash(f'CLI_SHORTCUT="{shortcut}"\nremove_cli_shortcut')
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(shortcut.is_file())
+            self.assertIn("unrelated", shortcut.read_text(encoding="utf-8"))
 
     def test_systemd_unit_adds_only_required_log_read_group(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
@@ -372,6 +391,11 @@ class InstallerTests(unittest.TestCase):
                         "state_dir": str(state_dir),
                         "report_dir": str(report_dir),
                         "retention_days": 21,
+                        "subscription_monitoring": {
+                            "enabled": True,
+                            "mode": "allowlist",
+                            "users": ["alice", "bob"],
+                        },
                         "geoip": {"city_db": "/nonexistent", "asn_db": "/nonexistent"},
                     }
                 ),
@@ -387,6 +411,8 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(written["state_dir"], str(state_dir))
             self.assertEqual(written["report_dir"], str(report_dir))
             self.assertEqual(written["retention_days"], 21)
+            self.assertEqual(written["subscription_monitoring"]["mode"], "allowlist")
+            self.assertEqual(written["subscription_monitoring"]["users"], ["alice", "bob"])
             self.assertTrue((state_dir / ".vps-audit-managed").is_file())
             self.assertTrue((report_dir / ".vps-audit-managed").is_file())
 
@@ -663,10 +689,12 @@ class InstallerTests(unittest.TestCase):
             token = config_dir / "telegram.token"
             service = systemd_dir / "vps-audit.service"
             timer = systemd_dir / "vps-audit.timer"
+            bot_service = systemd_dir / "vps-audit-bot.service"
             config.write_text('{"retention_days": 7}\n', encoding="utf-8")
             token.write_text("old-token\n", encoding="utf-8")
             service.write_text("old-service\n", encoding="utf-8")
             timer.write_text("old-timer\n", encoding="utf-8")
+            bot_service.write_text("old-bot-service\n", encoding="utf-8")
 
             mock_bin = root / "bin"
             mock_bin.mkdir()
@@ -689,6 +717,7 @@ class InstallerTests(unittest.TestCase):
             (config_dir / "openai.key").write_text("new-key\n", encoding="utf-8")
             service.write_text("new-service\n", encoding="utf-8")
             timer.write_text("new-timer\n", encoding="utf-8")
+            bot_service.write_text("new-bot-service\n", encoding="utf-8")
             completed = run_bash(variables + "rollback_settings_app", env=env)
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(config.read_text(encoding="utf-8"), '{"retention_days": 7}\n')
@@ -696,6 +725,7 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse((config_dir / "openai.key").exists())
             self.assertEqual(service.read_text(encoding="utf-8"), "old-service\n")
             self.assertEqual(timer.read_text(encoding="utf-8"), "old-timer\n")
+            self.assertEqual(bot_service.read_text(encoding="utf-8"), "old-bot-service\n")
 
     def test_purge_deletes_only_marked_configured_directories(self):
         with tempfile.TemporaryDirectory() as temporary:

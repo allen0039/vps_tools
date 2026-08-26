@@ -9,6 +9,8 @@ SYSTEMD_DIR="/etc/systemd/system"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 DATA_MARKER=".vps-audit-managed"
 SOURCE_MARKER=".vpspc-source-managed"
+CLI_SHORTCUT="/usr/local/bin/vpspc"
+CLI_SHORTCUT_MARKER="managed-by=vpspc"
 FALCO_MANAGED_DIR="$CONFIG_DIR/managed"
 FALCO_RULE_FILE="/etc/falco/rules.d/vps-audit-rules.yaml"
 FALCO_OVERRIDE_DIR="$SYSTEMD_DIR/falco-modern-bpf.service.d"
@@ -116,6 +118,30 @@ try:
         print(value[0] if value else sys.argv[3], end="")
     else:
         print(value, end="")
+except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+    print(sys.argv[3], end="")
+PY
+}
+
+existing_config_list() {
+  local dotted_key="$1"
+  local fallback="${2:-}"
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    printf '%s' "$fallback"
+    return
+  fi
+  python3 - "$CONFIG_FILE" "$dotted_key" "$fallback" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        value = json.load(handle)
+    for key in sys.argv[2].split("."):
+        value = value[key]
+    if not isinstance(value, list):
+        raise TypeError
+    print(",".join(str(item) for item in value), end="")
 except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
     print(sys.argv[3], end="")
 PY
@@ -476,6 +502,11 @@ copy_application() {
   install -d -m 0755 "$INSTALL_ROOT"
   cp -a "$SCRIPT_DIR/vps_audit" "$INSTALL_ROOT/"
   cp -a "$SCRIPT_DIR/pyproject.toml" "$SCRIPT_DIR/setup.py" "$INSTALL_ROOT/"
+  rm -rf -- "$INSTALL_ROOT/manager"
+  install -d -m 0755 "$INSTALL_ROOT/manager"
+  cp -a "$SCRIPT_DIR/vps_audit" "$SCRIPT_DIR/deploy" "$INSTALL_ROOT/manager/"
+  cp -a "$SCRIPT_DIR/install.sh" "$SCRIPT_DIR/pyproject.toml" "$SCRIPT_DIR/setup.py" "$INSTALL_ROOT/manager/"
+  chmod 0755 "$INSTALL_ROOT/manager/install.sh"
   if ! python3 -m venv "$INSTALL_ROOT/venv"; then
     if command -v apt-get >/dev/null 2>&1; then
       apt-get update
@@ -487,6 +518,32 @@ copy_application() {
   fi
   install -m 0755 "$SCRIPT_DIR/deploy/bin/vps-audit" "$INSTALL_ROOT/venv/bin/vps-audit"
   install -m 0755 "$SCRIPT_DIR/deploy/bin/vps-audit-runner" "$INSTALL_ROOT/venv/bin/vps-audit-runner"
+  install -m 0755 "$SCRIPT_DIR/deploy/bin/vps-audit-bot" "$INSTALL_ROOT/venv/bin/vps-audit-bot"
+  install -m 0755 "$SCRIPT_DIR/deploy/bin/vpspc" "$INSTALL_ROOT/venv/bin/vpspc"
+}
+
+install_cli_shortcut() {
+  check_cli_shortcut_available
+  install -d -m 0755 "$(dirname -- "$CLI_SHORTCUT")"
+  install -m 0755 "$SCRIPT_DIR/deploy/bin/vpspc" "$CLI_SHORTCUT"
+}
+
+check_cli_shortcut_available() {
+  if [[ -e "$CLI_SHORTCUT" || -L "$CLI_SHORTCUT" ]]; then
+    if [[ -L "$CLI_SHORTCUT" || ! -f "$CLI_SHORTCUT" ]] \
+      || ! grep -Fxq "# $CLI_SHORTCUT_MARKER" "$CLI_SHORTCUT"; then
+      die "快捷命令已存在且不属于 vpspc，拒绝覆盖: $CLI_SHORTCUT"
+    fi
+  fi
+}
+
+remove_cli_shortcut() {
+  if [[ ! -L "$CLI_SHORTCUT" && -f "$CLI_SHORTCUT" ]] \
+    && grep -Fxq "# $CLI_SHORTCUT_MARKER" "$CLI_SHORTCUT"; then
+    rm -f -- "$CLI_SHORTCUT"
+  elif [[ -e "$CLI_SHORTCUT" || -L "$CLI_SHORTCUT" ]]; then
+    echo "安全保留不属于 vpspc 的快捷命令: $CLI_SHORTCUT" >&2
+  fi
 }
 
 falco_is_installed() {
@@ -818,6 +875,7 @@ create_settings_snapshot() {
   [[ -f "$CONFIG_DIR/openai.key" ]] && install -m 0600 "$CONFIG_DIR/openai.key" "$staging/openai.key"
   [[ -f "$SYSTEMD_DIR/vps-audit.service" ]] && install -m 0644 "$SYSTEMD_DIR/vps-audit.service" "$staging/vps-audit.service"
   [[ -f "$SYSTEMD_DIR/vps-audit.timer" ]] && install -m 0644 "$SYSTEMD_DIR/vps-audit.timer" "$staging/vps-audit.timer"
+  [[ -f "$SYSTEMD_DIR/vps-audit-bot.service" ]] && install -m 0644 "$SYSTEMD_DIR/vps-audit-bot.service" "$staging/vps-audit-bot.service"
   falco_component_is_managed package && : > "$staging/falco-managed-before"
   chmod 0600 "$staging"/* 2>/dev/null || true
   rm -rf -- "$snapshot"
@@ -834,7 +892,7 @@ rollback_settings_app() {
     uninstall_managed_falco || die "回滚新增 Falco 组件失败"
   fi
 
-  systemctl stop vps-audit.timer vps-audit.service >/dev/null 2>&1 || true
+  systemctl stop vps-audit-bot.service vps-audit.timer vps-audit.service >/dev/null 2>&1 || true
   install -d -m 0700 "$CONFIG_DIR"
   install -m 0600 "$snapshot/config.json" "$CONFIG_FILE"
   if [[ -f "$snapshot/telegram.token" ]]; then
@@ -857,6 +915,11 @@ rollback_settings_app() {
   else
     rm -f -- "$SYSTEMD_DIR/vps-audit.timer"
   fi
+  if [[ -f "$snapshot/vps-audit-bot.service" ]]; then
+    install -m 0644 "$snapshot/vps-audit-bot.service" "$SYSTEMD_DIR/vps-audit-bot.service"
+  else
+    rm -f -- "$SYSTEMD_DIR/vps-audit-bot.service"
+  fi
   systemctl daemon-reload
   if [[ -f "$SYSTEMD_DIR/vps-audit.timer" ]]; then
     systemctl enable --now vps-audit.timer
@@ -865,6 +928,7 @@ rollback_settings_app() {
       die "配置文件已恢复，但首次巡查失败，请检查日志"
     fi
   fi
+  configure_bot_service
   echo "已恢复上一次配置、密钥引用和 systemd 单元；审计事件数据未删除。"
 }
 
@@ -875,6 +939,8 @@ write_runtime_config() {
   local journal_enabled telegram_enabled telegram_chat min_severity cooldown include_ip
   local ai_enabled ai_model city_db asn_db install_geoip geoip_selection tab
   local sub_window sub_ip_count sub_region_count sub_city_count sub_asn_count travel_distance travel_speed
+  local monitor_mode monitor_users
+  local telegram_bot_enabled telegram_admin_ids telegram_admin_default
   local falco_install_requested falco_skipped
 
   auth_default="$(existing_config_value auth_logs "$(detect_auth_log)")"
@@ -990,6 +1056,15 @@ write_runtime_config() {
   [[ "$miaomiaowux_timezone" =~ ^[+-][0-9]{2}:[0-9]{2}$ ]] || die "mmwx.log 时区格式应为 +00:00"
 
   echo
+  echo "配置多个订阅用户监测"
+  monitor_mode="$(ask "订阅监测模式 all=全部日志用户 / allowlist=仅重点名单" "$(existing_config_value subscription_monitoring.mode all)")"
+  case "$monitor_mode" in all|allowlist) ;; *) die "订阅监测模式只能是 all 或 allowlist" ;; esac
+  monitor_users="$(ask "重点用户名或订阅 ID（多个用英文逗号分隔，可留空）" "$(existing_config_list subscription_monitoring.users "")")"
+  if [[ "$monitor_mode" == "allowlist" && -z "${monitor_users//[[:space:],]/}" ]]; then
+    echo "提示: 当前重点名单为空，保存后不会产生订阅用户告警；可稍后输入 vpspc 或通过 Telegram 添加。" >&2
+  fi
+
+  echo
   echo "配置个人订阅异地使用预警阈值"
   sub_window="$(ask "活跃 IP 统计窗口（分钟）" "$(existing_config_value rules.thresholds.subscription_window_minutes 15)")"
   sub_ip_count="$(ask "同订阅多少个不同 IP 时告警" "$(existing_config_value rules.thresholds.subscription_ip_count 10)")"
@@ -1008,6 +1083,8 @@ write_runtime_config() {
   min_severity="high"
   cooldown="6"
   include_ip="false"
+  telegram_bot_enabled="false"
+  telegram_admin_ids=""
   if ask_yes_no "启用 Telegram Bot 推送" "$(existing_config_value telegram.enabled no)"; then
     telegram_enabled="true"
     local telegram_token telegram_token_default
@@ -1023,6 +1100,18 @@ write_runtime_config() {
     [[ "$cooldown" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "冷却时间必须是非负数字"
     if ask_yes_no "推送中显示完整来源 IP（默认只显示前两段）" "$(existing_config_value telegram.include_source_ip no)"; then
       include_ip="true"
+    fi
+    echo "Telegram 双向管理可以查看状态、维护多个订阅用户、修改检测阈值并立即巡查。"
+    echo "它没有封禁能力；所有写操作还会校验发送者的 Telegram 用户 ID。"
+    if ask_yes_no "启用 Telegram 双向交互管理" "$(existing_config_value telegram.bot_management_enabled no)"; then
+      telegram_bot_enabled="true"
+      telegram_admin_default="$(existing_config_list telegram.admin_user_ids "")"
+      if [[ -z "$telegram_admin_default" && "$telegram_chat" =~ ^[0-9]+$ ]]; then
+        telegram_admin_default="$telegram_chat"
+      fi
+      telegram_admin_ids="$(ask "允许管理的 Telegram 用户 ID（多个用英文逗号分隔；群组 ID 不能代替用户 ID）" "$telegram_admin_default")"
+      telegram_admin_ids="${telegram_admin_ids//[[:space:]]/}"
+      [[ "$telegram_admin_ids" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "管理员 Telegram 用户 ID 必须是一个或多个正整数"
     fi
     install -d -m 0700 "$CONFIG_DIR"
     if [[ "$telegram_token" != "KEEP" ]]; then
@@ -1078,13 +1167,16 @@ write_runtime_config() {
   STATE_PATH="$state_dir" REPORT_PATH="$report_dir" RETENTION="$retention" INTERVAL_VALUE="$interval" \
   TELEGRAM_ENABLED="$telegram_enabled" TELEGRAM_CHAT="$telegram_chat" \
   MIN_SEVERITY="$min_severity" COOLDOWN="$cooldown" INCLUDE_IP="$include_ip" \
+  TELEGRAM_BOT_ENABLED="$telegram_bot_enabled" TELEGRAM_ADMIN_IDS="$telegram_admin_ids" \
   AI_ENABLED="$ai_enabled" AI_MODEL="$ai_model" CITY_DB="$city_db" ASN_DB="$asn_db" \
+  MONITOR_MODE="$monitor_mode" MONITOR_USERS="$monitor_users" \
   SUB_WINDOW="$sub_window" SUB_IP_COUNT="$sub_ip_count" SUB_REGION_COUNT="$sub_region_count" \
   SUB_CITY_COUNT="$sub_city_count" SUB_ASN_COUNT="$sub_asn_count" TRAVEL_DISTANCE="$travel_distance" TRAVEL_SPEED="$travel_speed" \
   python3 - "$CONFIG_FILE" <<'PY'
 import json
 import os
 import sys
+from pathlib import Path
 
 config = {
     "auth_logs": [os.environ["AUTH_LOG"]] if os.environ["AUTH_LOG"] else [],
@@ -1102,6 +1194,13 @@ config = {
     "report_dir": os.environ["REPORT_PATH"],
     "retention_days": int(os.environ["RETENTION"]),
     "scan_interval_minutes": int(os.environ["INTERVAL_VALUE"]),
+    "subscription_monitoring": {
+        "enabled": True,
+        "mode": os.environ["MONITOR_MODE"],
+        "users": [
+            item.strip() for item in os.environ["MONITOR_USERS"].split(",") if item.strip()
+        ],
+    },
     "rules": {
         "thresholds": {
             "subscription_window_minutes": int(os.environ["SUB_WINDOW"]),
@@ -1122,6 +1221,11 @@ config = {
         "cooldown_hours": float(os.environ["COOLDOWN"]),
         "include_source_ip": os.environ["INCLUDE_IP"] == "true",
         "max_findings": 8,
+        "bot_management_enabled": os.environ["TELEGRAM_BOT_ENABLED"] == "true",
+        "admin_user_ids": [
+            int(item) for item in os.environ["TELEGRAM_ADMIN_IDS"].split(",") if item
+        ],
+        "poll_timeout_seconds": 30,
     },
     "openai_review": {
         "enabled": os.environ["AI_ENABLED"] == "true",
@@ -1129,9 +1233,15 @@ config = {
         "model": os.environ["AI_MODEL"],
     },
 }
-with open(sys.argv[1], "w", encoding="utf-8") as handle:
+path = Path(sys.argv[1])
+temporary = path.with_name(path.name + f".tmp.{os.getpid()}")
+with temporary.open("w", encoding="utf-8") as handle:
     json.dump(config, handle, ensure_ascii=False, indent=2)
     handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.chmod(temporary, 0o600)
+os.replace(temporary, path)
 PY
   chmod 0600 "$CONFIG_FILE"
 
@@ -1173,7 +1283,27 @@ PY
   chmod 0644 "$SYSTEMD_DIR/vps-audit.service"
   sed "s/@INTERVAL@/$interval/g" "$SCRIPT_DIR/deploy/systemd/vps-audit.timer" > "$SYSTEMD_DIR/vps-audit.timer"
   chmod 0644 "$SYSTEMD_DIR/vps-audit.timer"
+  STATE_PATH="$state_dir" BOT_TEMPLATE="$SCRIPT_DIR/deploy/systemd/vps-audit-bot.service" \
+  BOT_OUTPUT="$SYSTEMD_DIR/vps-audit-bot.service" python3 <<'PY'
+import os
+from pathlib import Path
+
+template = Path(os.environ["BOT_TEMPLATE"]).read_text(encoding="utf-8")
+template = template.replace("@STATE_DIR@", os.environ["STATE_PATH"])
+Path(os.environ["BOT_OUTPUT"]).write_text(template, encoding="utf-8")
+PY
+  chmod 0644 "$SYSTEMD_DIR/vps-audit-bot.service"
   systemctl daemon-reload
+}
+
+configure_bot_service() {
+  if [[ -f "$CONFIG_FILE" && "$(existing_config_value telegram.bot_management_enabled no)" == "yes" \
+    && -f "$SYSTEMD_DIR/vps-audit-bot.service" ]]; then
+    systemctl enable vps-audit-bot.service
+    systemctl restart vps-audit-bot.service
+  else
+    systemctl disable --now vps-audit-bot.service >/dev/null 2>&1 || true
+  fi
 }
 
 run_initial_audit_and_enable_timer() {
@@ -1188,20 +1318,24 @@ run_initial_audit_and_enable_timer() {
 
 install_app() {
   need_root
+  check_cli_shortcut_available
   install_os_packages
   copy_application
   create_settings_snapshot
-  systemctl stop vps-audit.timer >/dev/null 2>&1 || true
+  systemctl stop vps-audit-bot.service vps-audit.timer >/dev/null 2>&1 || true
   INTERVAL="5"
   write_runtime_config
   install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR"
   run_initial_audit_and_enable_timer
+  install_cli_shortcut
+  configure_bot_service
   if [[ "$(existing_config_value telegram.enabled no)" == "yes" ]] && ask_yes_no "发送 Telegram 测试消息" "yes"; then
     "$INSTALL_ROOT/venv/bin/vps-audit-runner" --config "$CONFIG_FILE" test-telegram
   fi
   echo
   echo "安装完成。"
   echo "状态: sudo bash install.sh status"
+  echo "交互管理: sudo vpspc（root 登录可直接输入 vpspc）"
   echo "审计数据: $CONFIGURED_STATE_DIR（保留 $(existing_config_value retention_days 7) 天）"
   echo "报告: $CONFIGURED_REPORT_DIR/latest.md"
   echo "日志: journalctl -u vps-audit.service"
@@ -1209,19 +1343,25 @@ install_app() {
 
 configure_app() {
   need_root
+  check_cli_shortcut_available
   [[ -x "$INSTALL_ROOT/venv/bin/vps-audit-runner" ]] || die "尚未安装"
   create_settings_snapshot
-  systemctl stop vps-audit.timer >/dev/null 2>&1 || true
+  systemctl stop vps-audit-bot.service vps-audit.timer >/dev/null 2>&1 || true
   INTERVAL="5"
   write_runtime_config
   install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR"
   run_initial_audit_and_enable_timer
+  install_cli_shortcut
+  configure_bot_service
   echo "配置已更新。"
 }
 
 status_app() {
   need_root
   systemctl status vps-audit.timer --no-pager || true
+  if [[ "$(existing_config_value telegram.bot_management_enabled no)" == "yes" ]]; then
+    systemctl status vps-audit-bot.service --no-pager || true
+  fi
   echo
   if [[ -x "$INSTALL_ROOT/venv/bin/vps-audit-runner" && -f "$CONFIG_FILE" ]]; then
     "$INSTALL_ROOT/venv/bin/vps-audit-runner" --config "$CONFIG_FILE" health
@@ -1253,10 +1393,11 @@ uninstall_app() {
     systemctl stop falco-modern-bpf.service >/dev/null 2>&1 || true
     echo "已停止本工具管理的 Falco；配置保留，重新安装 vpspc 后可恢复。"
   fi
-  systemctl disable --now vps-audit.timer >/dev/null 2>&1 || true
+  systemctl disable --now vps-audit-bot.service vps-audit.timer >/dev/null 2>&1 || true
   systemctl stop vps-audit.service >/dev/null 2>&1 || true
-  rm -f "$SYSTEMD_DIR/vps-audit.service" "$SYSTEMD_DIR/vps-audit.timer"
+  rm -f "$SYSTEMD_DIR/vps-audit.service" "$SYSTEMD_DIR/vps-audit.timer" "$SYSTEMD_DIR/vps-audit-bot.service"
   systemctl daemon-reload
+  remove_cli_shortcut
   rm -rf "$INSTALL_ROOT"
   if [[ "${1:-}" == "--purge" ]]; then
     local deleted=()

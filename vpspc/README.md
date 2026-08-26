@@ -25,6 +25,14 @@ sudo /opt/vps-audit-src/install.sh rollback
 sudo /opt/vps-audit-src/install.sh uninstall
 ```
 
+安装成功后还会创建快捷管理命令。root 登录可直接输入 `vpspc`，普通 sudo 用户使用 `sudo vpspc`：
+
+```bash
+sudo vpspc
+```
+
+菜单可以查看状态、立即巡查、维护多个订阅用户、修改全部检测阈值和 Telegram 推送参数，也可进入完整重新配置、回滚及卸载流程。快捷文件带有 vpspc 管理标记；卸载时只删除标记仍匹配的文件，不覆盖或清理同名第三方命令。
+
 彻底删除一键安装器创建的程序、配置、审计数据、源码和可选 Falco 组件：
 
 ```bash
@@ -51,6 +59,8 @@ sudo ./install.sh install
 - 审计数据目录、报告目录、数据保留时间、扫描间隔和可选 Falco JSON 日志；
 - 检测 Falco；未安装时解释用途并询问是否使用 modern eBPF 自动安装；
 - Telegram Bot Token、Chat ID、最低推送等级和冷却时间；
+- “全部日志用户”或“仅重点名单”模式，以及多个用户名/订阅 ID；
+- 可选 Telegram 双向管理和一个或多个管理员 Telegram 用户 ID；
 - 自动检测常见位置的本地 MaxMind City/ASN 数据库；未检测到时可选择从官方安装，默认跳过；
 - 可选 OpenAI 复核、API Key 和明确的模型 ID。
 
@@ -60,6 +70,7 @@ sudo ./install.sh install
 sudo ./install.sh status
 sudo ./install.sh configure
 sudo ./install.sh rollback
+sudo vpspc
 sudo systemctl start vps-audit.service
 sudo journalctl -u vps-audit.service -f
 sudo less /var/lib/vps-audit/reports/latest.md
@@ -79,7 +90,7 @@ sudo ./install.sh destroy
 
 每次重新安装或执行 `configure` 前会保存一份 root-only 的“上一次配置”快照，包括运行配置、Telegram/OpenAI 密钥文件以及 systemd 单元。`rollback` 恢复这些设置但不删除审计事件；若本次配置新增了由 vpspc 管理的 Falco，回滚也会撤销该 Falco 安装。快照只用于配置回滚，不负责降级程序源码版本。
 
-运行架构如下：SSH/Falco 日志由增量采集器读取并保存在本机，规则引擎每隔几分钟生成报告。只有首次出现或超过冷却时间的告警才会触发可选 AI 复核和 Telegram 推送。Telegram 采用出站 Bot API，不需要给 VPS 开放入站端口。
+运行架构如下：SSH/Falco 日志由增量采集器读取并保存在本机，规则引擎每隔几分钟生成报告。只有首次出现或超过冷却时间的告警才会触发可选 AI 复核和 Telegram 推送。Telegram 采用出站 Bot API，不需要给 VPS 开放入站端口。启用双向管理时会额外运行 `vps-audit-bot.service` 长轮询服务；它与巡查 timer 相互独立，Bot 暂时离线不会中断本地巡查。
 
 所有 systemd 任务均使用 root 读取安全日志，并启用只读系统目录、私有临时目录和最小可写路径。安装器会根据已配置日志的实际权限，仅补充读取所需的日志组（例如 Ubuntu 的 `adm`；启用 journald 时为 `systemd-journal`）。capability 集默认为空；只有遇到 `0600` 且属于应用用户的日志时，才保留只读的 `CAP_DAC_READ_SEARCH`，不会授予写入、改属主或其他管理 capability。首次巡查成功后才启用定时器，失败时不会留下周期性重试任务。Token/API Key 位于 `/etc/vps-audit/`；状态和报告默认位于 `/var/lib/vps-audit/`，也可使用安装时指定的目录，权限均为 root-only。
 
@@ -88,9 +99,21 @@ sudo ./install.sh destroy
 1. 在 Telegram 联系 `@BotFather`，使用 `/newbot` 创建 Bot 并取得 Token。
 2. 私聊 Bot 发送一条消息；如果推送到群组，把 Bot 加入群组并在群里发一条消息。
 3. 通过 Telegram `getUpdates` 查看对应 `chat.id`，群组 ID 通常为负数。
-4. 把 Token 和 Chat ID 输入安装器，并让安装器发送测试消息。
+4. 同一条 update 中的 `from.id` 是管理员 Telegram 用户 ID；它和群组 `chat.id` 不是同一个值。
+5. 把 Token、Chat ID 和允许管理的一个或多个用户 ID 输入安装器，并让安装器发送测试消息。
 
 Telegram 默认只展示 IP 前两段、地理位置、ASN、规则和建议，不包含命令行。完整 IP 只能在安装时明确开启；完整证据始终保存在 VPS 本地报告中。
+
+启用双向管理后，可在指定私聊或群组中发送 `/menu` 或 `/vpspc` 打开按钮菜单。支持：
+
+- 查看健康状态、最近巡查和告警数量；
+- 在“全部日志用户”和“仅重点名单”之间切换；
+- 添加、删除多个用户名或订阅 ID，暂停或恢复订阅监测；
+- 查看并修改 SSH、登录失败、不可能旅行、Falco 行为和订阅共享的全部规则阈值；
+- 修改最低推送等级、冷却时间和完整 IP 显示；
+- 立即执行一次巡查。
+
+Bot 同时校验配置的 Chat ID 和消息发送者 `from.id`。即使 Bot 位于群组，未列入 `admin_user_ids` 的成员也不能查看名单或修改配置。配置通过 root-only 文件锁和原子替换保存；Bot 没有封禁、踢下线、iptables 或妙妙屋 X 管理接口能力。Falco 安装、日志路径、Token 和管理员授权等高权限部署项仍只能通过 VPS 本机的完整重新配置完成。
 
 ## 妙妙屋 X 个人订阅接入
 
@@ -105,6 +128,20 @@ Telegram 默认只展示 IP 前两段、地理位置、ASN、规则和建议，�
 - Telegram 最低等级以及同类告警冷却时间。
 
 系统完全不包含封禁、踢下线或调用妙妙屋 X 管理接口的代码，只读取日志、写本地报告并发送预警。
+
+默认 `all` 模式会监测日志里出现的每一个订阅用户，并不是只支持一个账号。需要只关注部分订阅时，可切换到 `allowlist` 并添加任意多个稳定标识。名单过滤只影响订阅访问告警；SSH 和 Falco 系统行为巡查仍覆盖服务器上的用户。规范化事件继续按保存期限保留，因此切回 `all` 时无需等待所有订阅重新访问。
+
+对应配置结构为：
+
+```json
+"subscription_monitoring": {
+  "enabled": true,
+  "mode": "all",
+  "users": []
+}
+```
+
+`mode` 为 `allowlist` 时，`users` 可包含多个用户名、订阅 ID 或用户 ID；空名单的含义是暂不对任何订阅用户产生告警，而不是隐式选择某一个用户。
 
 妙妙屋 X 或旁路适配器需要把每次有效订阅访问追加为一行 JSON，至少包含时间、稳定的订阅标识和客户端来源 IP：
 
