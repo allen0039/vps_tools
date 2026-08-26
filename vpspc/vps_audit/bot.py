@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -18,7 +19,17 @@ from .settings import (
     set_telegram_option,
     set_threshold,
 )
-from .telegram import answer_callback_query, get_updates, send_message
+from .telegram import (
+    TelegramTransientError,
+    answer_callback_query,
+    edit_message_text,
+    get_updates,
+    send_message,
+)
+
+
+DISCOVERY_PAGE_SIZE = 8
+_DISCOVERY_CACHE: Dict[str, Any] = {}
 
 
 def _button(text: str, data: str) -> Dict[str, str]:
@@ -37,6 +48,7 @@ def _users_keyboard() -> Dict[str, Any]:
     return {"inline_keyboard": [
         [_button("监测全部用户", "mode:all"), _button("仅重点名单", "mode:allowlist")],
         [_button("启用/暂停订阅监测", "toggle:subscription_enabled")],
+        [_button("🔎 从日志发现并点选", "discover:0")],
         [_button("➕ 添加用户", "prompt:adduser"), _button("➖ 删除用户", "prompt:deluser")],
         [_button("⬅️ 主菜单", "menu:main")],
     ]}
@@ -73,6 +85,82 @@ def _monitoring_text(config: Dict[str, Any]) -> str:
             break
         lines.append(line)
     return header + "\n".join(lines)
+
+
+def _discovered_users(config: Dict[str, Any]) -> List[str]:
+    path = Path(config["state_dir"]) / "events.jsonl"
+    try:
+        stat = path.stat()
+    except OSError:
+        return []
+    cache_key = f"{path}:{stat.st_mtime_ns}:{stat.st_size}"
+    if _DISCOVERY_CACHE.get("key") == cache_key:
+        return list(_DISCOVERY_CACHE.get("users", []))
+    latest: Dict[str, str] = {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    event = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(event, dict) or event.get("event_type") != "subscription_access":
+                    continue
+                user = str(event.get("user", "")).strip()
+                if not user or len(user) > 128 or any(ord(char) < 32 for char in user):
+                    continue
+                timestamp = str(event.get("timestamp", ""))
+                if timestamp >= latest.get(user, ""):
+                    latest[user] = timestamp
+    except OSError:
+        return []
+    users = sorted(latest, key=lambda user: (latest[user], user), reverse=True)
+    _DISCOVERY_CACHE.clear()
+    _DISCOVERY_CACHE.update({"key": cache_key, "users": users})
+    return users
+
+
+def _user_token(user: str) -> str:
+    return hashlib.sha256(user.encode("utf-8")).hexdigest()[:24]
+
+
+def _safe_button_label(user: str, selected: bool) -> str:
+    clean = "".join(char if ord(char) >= 32 else "?" for char in user)
+    if len(clean) > 42:
+        clean = clean[:39] + "..."
+    return ("✅ " if selected else "➕ ") + clean
+
+
+def _discovery_view(config: Dict[str, Any], page: int) -> Tuple[str, Dict[str, Any]]:
+    users = _discovered_users(config)
+    if not users:
+        return (
+            "尚未从本地日志发现订阅用户。完成一次订阅访问和巡查后再试。",
+            {"inline_keyboard": [[_button("⬅️ 用户管理", "menu:users")]]},
+        )
+    page_count = max(1, (len(users) + DISCOVERY_PAGE_SIZE - 1) // DISCOVERY_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+    start = page * DISCOVERY_PAGE_SIZE
+    selected = set(config["subscription_monitoring"]["users"])
+    rows: List[List[Dict[str, str]]] = []
+    for user in users[start : start + DISCOVERY_PAGE_SIZE]:
+        action = "remove" if user in selected else "add"
+        rows.append([_button(_safe_button_label(user, user in selected), f"discover:{action}:{_user_token(user)}:{page}")])
+    navigation: List[Dict[str, str]] = []
+    if page > 0:
+        navigation.append(_button("⬅️ 上一页", f"discover:{page - 1}"))
+    if page + 1 < page_count:
+        navigation.append(_button("下一页 ➡️", f"discover:{page + 1}"))
+    if navigation:
+        rows.append(navigation)
+    rows.append([_button("⬅️ 用户管理", "menu:users")])
+    mode_note = "当前 all 模式仍监测全部用户；勾选项会保存为重点名单。" if config["subscription_monitoring"]["mode"] == "all" else "当前仅监测已勾选的重点用户。"
+    return (
+        f"从本地日志发现 {len(users)} 个订阅用户（第 {page + 1}/{page_count} 页）。\n"
+        "点击可连续加入或移出重点名单。\n"
+        f"{mode_note}",
+        {"inline_keyboard": rows},
+    )
 
 
 def _threshold_text(config: Dict[str, Any]) -> str:
@@ -115,6 +203,7 @@ def _help_text() -> str:
         "/menu 或 /vpspc - 打开菜单\n"
         "/status - 查看状态\n"
         "/users - 查看监测名单\n"
+        "/discover - 从本地日志点选用户\n"
         "/mode all|allowlist - 全部用户或重点名单\n"
         "/monitor on|off - 启用或暂停订阅监测\n"
         "/adduser <用户名或订阅ID>\n"
@@ -126,17 +215,18 @@ def _help_text() -> str:
     )
 
 
-def _update_context(update: Dict[str, Any]) -> Tuple[Dict[str, Any], int, str, str | None]:
+def _update_context(update: Dict[str, Any]) -> Tuple[Dict[str, Any], int, str, str | None, int | None]:
     callback = update.get("callback_query")
     if isinstance(callback, dict):
         message = callback.get("message") or {}
         sender = callback.get("from") or {}
         chat = message.get("chat") or {}
-        return chat, int(sender.get("id", 0)), str(callback.get("data", "")), str(callback.get("id", ""))
+        message_id = message.get("message_id")
+        return chat, int(sender.get("id", 0)), str(callback.get("data", "")), str(callback.get("id", "")), int(message_id) if message_id is not None else None
     message = update.get("message") or {}
     sender = message.get("from") or {}
     chat = message.get("chat") or {}
-    return chat, int(sender.get("id", 0)), str(message.get("text", "")).strip(), None
+    return chat, int(sender.get("id", 0)), str(message.get("text", "")).strip(), None, None
 
 
 def _authorized(config: Dict[str, Any], chat: Dict[str, Any], sender_id: int) -> bool:
@@ -156,6 +246,20 @@ def _run_audit(config_path: str) -> str:
         detail = (completed.stderr or completed.stdout).strip()
         raise RuntimeError("首次巡查失败" + (f"：{detail[:300]}" if detail else "，请查看 systemd 日志"))
     return "巡查已完成。\n\n" + _status_text(config_path)
+
+
+def _answer_callback_safely(token: str, callback_id: str, text: str = "") -> None:
+    try:
+        answer_callback_query(token, callback_id, text)
+    except RuntimeError as exc:
+        print(f"vps-audit-bot: callback acknowledgement failed: {exc}", file=sys.stderr)
+
+
+def _send_error_safely(token: str, chat_id: str, text: str) -> None:
+    try:
+        send_message(token, chat_id, text)
+    except RuntimeError as exc:
+        print(f"vps-audit-bot: unable to send operation error: {exc}", file=sys.stderr)
 
 
 def _apply_pending(config_path: str, pending: Dict[str, Any], sender_id: int, text: str) -> str | None:
@@ -179,7 +283,7 @@ def _apply_pending(config_path: str, pending: Dict[str, Any], sender_id: int, te
 
 
 def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any]) -> Tuple[str, Dict[str, Any] | None]:
-    if not value.startswith("/") and not value.startswith(("menu:", "mode:", "prompt:", "toggle:")):
+    if not value.startswith("/") and not value.startswith(("menu:", "mode:", "prompt:", "toggle:", "discover:")):
         result = _apply_pending(config_path, pending, sender_id, value)
         if result:
             return result, _main_keyboard()
@@ -192,6 +296,8 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
         return _status_text(config_path), _main_keyboard()
     if command in {"/users", "menu:users"}:
         return _monitoring_text(config), _users_keyboard()
+    if command == "/discover":
+        return _discovery_view(config, 0)
     if command in {"/thresholds", "menu:thresholds"}:
         return _threshold_text(config), _threshold_keyboard()
     if command == "menu:telegram":
@@ -244,6 +350,28 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
             config_path, not config["subscription_monitoring"]["enabled"]
         )
         return "订阅监测开关已更新。\n\n" + _monitoring_text(config), _users_keyboard()
+    if command.startswith("discover:"):
+        parts = command.split(":")
+        if len(parts) == 2:
+            try:
+                page = int(parts[1])
+            except ValueError as exc:
+                raise ValueError("无效的发现用户页码") from exc
+            return _discovery_view(config, page)
+        if len(parts) == 4 and parts[1] in {"add", "remove"}:
+            action, token = parts[1], parts[2]
+            try:
+                page = int(parts[3])
+            except ValueError as exc:
+                raise ValueError("无效的发现用户页码") from exc
+            matches = [user for user in _discovered_users(config) if _user_token(user) == token]
+            if len(matches) != 1:
+                raise ValueError("候选用户已变化，请重新打开发现用户列表")
+            if action == "add":
+                config = add_monitored_user(config_path, matches[0])
+            else:
+                config = remove_monitored_user(config_path, matches[0])
+            return _discovery_view(config, page)
     return "无法识别该操作。\n\n" + _help_text(), _main_keyboard()
 
 
@@ -265,32 +393,43 @@ def run_bot(config_path: str, once: bool = False) -> None:
         pending = {}
         state["pending"] = pending
     offset = state.get("offset")
+    retry_delay = 1.0
     while True:
         config = load_runtime_config(config_path)
         telegram = config["telegram"]
-        updates = get_updates(token, offset, int(telegram["poll_timeout_seconds"]))
+        try:
+            updates = get_updates(token, offset, int(telegram["poll_timeout_seconds"]))
+            retry_delay = 1.0
+        except TelegramTransientError as exc:
+            print(f"vps-audit-bot: temporary Telegram polling error; retrying in {retry_delay:g}s: {exc}", file=sys.stderr)
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 30.0)
+            continue
         for update in updates:
             update_id = int(update.get("update_id", 0))
             offset = max(int(offset or 0), update_id + 1)
             state["offset"] = offset
             _atomic_json(state_path, state)
-            chat, sender_id, value, callback_id = _update_context(update)
+            chat, sender_id, value, callback_id, message_id = _update_context(update)
             if not _authorized(config, chat, sender_id):
                 if callback_id:
-                    answer_callback_query(token, callback_id, "无权操作")
+                    _answer_callback_safely(token, callback_id, "无权操作")
                 elif str(chat.get("id", "")) == str(telegram.get("chat_id", "")):
-                    send_message(token, str(chat.get("id")), "该 Telegram 用户未被授权管理 VPSPC。")
+                    _send_error_safely(token, str(chat.get("id")), "该 Telegram 用户未被授权管理 VPSPC。")
                 _atomic_json(state_path, state)
                 continue
             try:
                 response, keyboard = _handle(config_path, sender_id, value, pending)
                 if callback_id:
-                    answer_callback_query(token, callback_id)
-                send_message(token, str(chat["id"]), response, reply_markup=keyboard)
+                    _answer_callback_safely(token, callback_id)
+                if callback_id and message_id is not None:
+                    edit_message_text(token, str(chat["id"]), message_id, response, reply_markup=keyboard)
+                else:
+                    send_message(token, str(chat["id"]), response, reply_markup=keyboard)
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
                 if callback_id:
-                    answer_callback_query(token, callback_id, "操作失败")
-                send_message(token, str(chat["id"]), f"操作失败：{str(exc)[:500]}")
+                    _answer_callback_safely(token, callback_id, "操作失败")
+                _send_error_safely(token, str(chat["id"]), f"操作失败：{str(exc)[:500]}")
             _atomic_json(state_path, state)
         if once:
             return

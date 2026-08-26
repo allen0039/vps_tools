@@ -2,13 +2,17 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from vps_audit.bot import _authorized, _handle
+from vps_audit.bot import _DISCOVERY_CACHE, _authorized, _handle, _update_context, run_bot
 from vps_audit.runtime import load_runtime_config
+from vps_audit.telegram import TelegramTransientError
 
 
 class BotTests(unittest.TestCase):
     def _config(self, root: Path) -> Path:
+        token_file = root / "telegram.token"
+        token_file.write_text("test-token\n", encoding="utf-8")
         path = root / "config.json"
         path.write_text(
             json.dumps(
@@ -17,6 +21,7 @@ class BotTests(unittest.TestCase):
                     "report_dir": str(root / "reports"),
                     "telegram": {
                         "enabled": True,
+                        "token_file": str(token_file),
                         "chat_id": "-100500",
                         "bot_management_enabled": True,
                         "admin_user_ids": [12345],
@@ -58,6 +63,68 @@ class BotTests(unittest.TestCase):
             _handle(str(path), 12345, "carol", pending)
             self.assertNotIn("12345", pending)
             self.assertEqual(load_runtime_config(str(path))["subscription_monitoring"]["users"], ["carol"])
+
+    def test_discovered_users_are_paginated_and_can_be_toggled(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = self._config(root)
+            state = root / "state"
+            state.mkdir()
+            events = []
+            for index in range(18):
+                events.append(
+                    json.dumps(
+                        {
+                            "timestamp": f"2026-08-27T00:{index:02d}:00Z",
+                            "event_type": "subscription_access",
+                            "user": f"user-{index:02d}",
+                            "source_ip": "198.51.100.1",
+                        }
+                    )
+                )
+            (state / "events.jsonl").write_text("\n".join(events) + "\n", encoding="utf-8")
+            _DISCOVERY_CACHE.clear()
+            response, keyboard = _handle(str(path), 12345, "discover:0", {})
+            self.assertIn("发现 18 个", response)
+            callbacks = [button["callback_data"] for row in keyboard["inline_keyboard"] for button in row]
+            self.assertIn("discover:1", callbacks)
+            add_callback = next(value for value in callbacks if value.startswith("discover:add:"))
+            response, keyboard = _handle(str(path), 12345, add_callback, {})
+            self.assertIn("第 1/3 页", response)
+            selected = load_runtime_config(str(path))["subscription_monitoring"]["users"]
+            self.assertEqual(len(selected), 1)
+            callbacks = [button["callback_data"] for row in keyboard["inline_keyboard"] for button in row]
+            remove_callback = next(value for value in callbacks if value.startswith("discover:remove:"))
+            _handle(str(path), 12345, remove_callback, {})
+            self.assertEqual(load_runtime_config(str(path))["subscription_monitoring"]["users"], [])
+
+    def test_polling_timeout_retries_without_exiting_service(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._config(Path(temporary))
+            with patch(
+                "vps_audit.bot.get_updates",
+                side_effect=[TelegramTransientError("timeout"), []],
+            ) as get_updates_mock, patch("vps_audit.bot.time.sleep") as sleep_mock:
+                run_bot(str(path), once=True)
+            self.assertEqual(get_updates_mock.call_count, 2)
+            sleep_mock.assert_called_once_with(1.0)
+
+    def test_callback_context_includes_message_id_for_in_place_updates(self):
+        chat, sender_id, value, callback_id, message_id = _update_context(
+            {
+                "callback_query": {
+                    "id": "callback-1",
+                    "from": {"id": 12345},
+                    "data": "discover:0",
+                    "message": {"message_id": 77, "chat": {"id": -100500}},
+                }
+            }
+        )
+        self.assertEqual(chat["id"], -100500)
+        self.assertEqual(sender_id, 12345)
+        self.assertEqual(value, "discover:0")
+        self.assertEqual(callback_id, "callback-1")
+        self.assertEqual(message_id, 77)
 
 
 if __name__ == "__main__":

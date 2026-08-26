@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from vps_audit.telegram import get_updates, send_message
+from vps_audit.telegram import TelegramTransientError, edit_message_text, get_updates, send_message
 
 
 class FakeResponse:
@@ -45,6 +45,26 @@ class TelegramApiTests(unittest.TestCase):
         self.assertEqual(payload["offset"], 40)
         self.assertEqual(payload["timeout"], 12)
         self.assertEqual(payload["allowed_updates"], ["message", "callback_query"])
+
+    def test_network_timeout_is_classified_as_transient(self):
+        with patch(
+            "vps_audit.telegram.urllib.request.urlopen", side_effect=TimeoutError("timed out")
+        ):
+            with self.assertRaises(TelegramTransientError):
+                get_updates("secret-token", None, timeout=5)
+
+    def test_edit_message_posts_message_id_and_keyboard(self):
+        keyboard = {"inline_keyboard": [[{"text": "下一页", "callback_data": "discover:1"}]]}
+        with patch(
+            "vps_audit.telegram.urllib.request.urlopen",
+            return_value=FakeResponse({"ok": True, "result": {"message_id": 77}}),
+        ) as urlopen:
+            edit_message_text("secret-token", "-100123", 77, "updated", reply_markup=keyboard)
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["chat_id"], "-100123")
+        self.assertEqual(payload["message_id"], 77)
+        self.assertEqual(payload["reply_markup"], keyboard)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,10 @@ from typing import Any, Dict, Iterable, List
 SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 
 
+class TelegramTransientError(RuntimeError):
+    """A temporary network or server failure that is safe to retry."""
+
+
 def _mask_address(value: str) -> str:
     if "." in value:
         parts = value.split(".")
@@ -105,9 +109,12 @@ def api_request(token: str, method: str, payload: Dict[str, Any], timeout: int =
             result = json.load(response)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
+        if exc.code == 429 or exc.code >= 500:
+            raise TelegramTransientError(f"Telegram temporary API error {exc.code}") from exc
         raise RuntimeError(f"Telegram API error {exc.code}: {detail[:500]}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Telegram connection failed: {exc.reason}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise TelegramTransientError(f"Telegram connection temporarily failed: {reason}") from exc
     if not isinstance(result, dict):
         raise RuntimeError("Telegram returned an invalid response")
     if not result.get("ok"):
@@ -151,3 +158,21 @@ def answer_callback_query(token: str, callback_query_id: str, text: str = "") ->
     if text:
         payload["text"] = text[:180]
     api_request(token, "answerCallbackQuery", payload)
+
+
+def edit_message_text(
+    token: str,
+    chat_id: str,
+    message_id: int,
+    text: str,
+    reply_markup: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    return api_request(token, "editMessageText", payload)

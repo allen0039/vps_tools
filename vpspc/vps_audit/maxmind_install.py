@@ -45,7 +45,7 @@ def _download_archive(
     )
     request = urllib.request.Request(
         f"{DOWNLOAD_URL}?{query}",
-        headers={"User-Agent": "vps-user-audit/0.4.0"},
+        headers={"User-Agent": "vps-user-audit/0.4.1"},
     )
     try:
         with opener(request, timeout=120) as response, destination.open("xb") as output:
