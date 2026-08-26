@@ -93,6 +93,7 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertTrue(marker.is_file(), completed.stdout + completed.stderr)
+            self.assertTrue((destination / ".vpspc-source-managed").is_file())
 
     def test_storage_path_validation_accepts_scoped_absolute_path(self):
         completed = run_bash('validate_storage_path "/data/vps-audit" "测试目录"')
@@ -203,6 +204,313 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue((state_dir / ".vps-audit-managed").is_file())
             self.assertTrue((report_dir / ".vps-audit-managed").is_file())
 
+    def test_managed_falco_install_and_uninstall_are_scoped(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mock_bin = root / "bin"
+            mock_bin.mkdir()
+            apt_log = root / "apt.log"
+            (mock_bin / "apt-get").write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$*" >> "$MOCK_APT_LOG"\nexit 0\n',
+                encoding="utf-8",
+            )
+            (mock_bin / "systemctl").write_text(
+                '#!/bin/sh\n'
+                'if [ "${1:-}" = "is-enabled" ]; then echo disabled; exit 1; fi\n'
+                'if [ "${1:-}" = "is-active" ]; then exit 0; fi\n'
+                'exit 0\n',
+                encoding="utf-8",
+            )
+            (mock_bin / "falco").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            for executable in mock_bin.iterdir():
+                executable.chmod(0o755)
+
+            config_dir = root / "config"
+            managed_dir = config_dir / "managed"
+            rule = root / "etc-falco" / "rules.d" / "vps-audit-rules.yaml"
+            override_dir = root / "systemd" / "falco-modern-bpf.service.d"
+            override = override_dir / "vps-audit.conf"
+            log_dir = root / "logs"
+            log_file = log_dir / "falco-events.json"
+            logrotate = root / "logrotate" / "vps-audit-falco"
+            repo_list = root / "repo" / "falcosecurity.list"
+            repo_key = root / "repo" / "falco.gpg"
+            repo_list.parent.mkdir()
+            repo_list.write_text("pre-existing repository\n", encoding="utf-8")
+            repo_key.write_text("pre-existing key\n", encoding="utf-8")
+            unrelated = root / "unrelated-service.conf"
+            unrelated.write_text("preserve", encoding="utf-8")
+
+            env = dict(os.environ)
+            env["PATH"] = f"{mock_bin}:{env['PATH']}"
+            env["MOCK_APT_LOG"] = str(apt_log)
+            variables = (
+                f'CONFIG_DIR="{config_dir}"\n'
+                f'FALCO_MANAGED_DIR="{managed_dir}"\n'
+                f'FALCO_RULE_FILE="{rule}"\n'
+                f'FALCO_OVERRIDE_DIR="{override_dir}"\n'
+                f'FALCO_OVERRIDE_FILE="{override}"\n'
+                f'FALCO_LOG_DIR="{log_dir}"\n'
+                f'FALCO_LOG_FILE="{log_file}"\n'
+                f'FALCO_LOGROTATE_FILE="{logrotate}"\n'
+                f'FALCO_REPO_LIST="{repo_list}"\n'
+                f'FALCO_REPO_KEY="{repo_key}"\n'
+            )
+            completed = run_bash(variables + "install_managed_falco 9", env=env)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(rule.is_file())
+            override_text = override.read_text(encoding="utf-8")
+            self.assertIn("engine.kind=modern_ebpf", override_text)
+            self.assertIn("rules[0].disable.rule=*", override_text)
+            self.assertIn("rules[1].enable.tag=vps_audit", override_text)
+            self.assertIn("rotate 9", logrotate.read_text(encoding="utf-8"))
+            self.assertEqual(stat.S_IMODE(log_file.stat().st_mode), 0o600)
+            self.assertTrue((managed_dir / "package").is_file())
+
+            completed = run_bash(variables + "uninstall_managed_falco", env=env)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(rule.exists())
+            self.assertFalse(override.exists())
+            self.assertFalse(logrotate.exists())
+            self.assertFalse(log_dir.exists())
+            self.assertFalse(managed_dir.exists())
+            self.assertEqual(repo_list.read_text(encoding="utf-8"), "pre-existing repository\n")
+            self.assertEqual(repo_key.read_text(encoding="utf-8"), "pre-existing key\n")
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "preserve")
+            self.assertIn("purge -y falco", apt_log.read_text(encoding="utf-8"))
+
+    def test_falco_failure_rolls_back_managed_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mock_bin = root / "bin"
+            mock_bin.mkdir()
+            apt_log = root / "apt.log"
+            (mock_bin / "apt-get").write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$*" >> "$MOCK_APT_LOG"\nexit 0\n',
+                encoding="utf-8",
+            )
+            (mock_bin / "systemctl").write_text(
+                '#!/bin/sh\n'
+                'if [ "${1:-}" = "is-enabled" ]; then echo disabled; exit 1; fi\n'
+                'if [ "${1:-}" = "is-active" ]; then exit 1; fi\n'
+                'exit 0\n',
+                encoding="utf-8",
+            )
+            (mock_bin / "falco").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (mock_bin / "sleep").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            for executable in mock_bin.iterdir():
+                executable.chmod(0o755)
+
+            config_dir = root / "config"
+            managed_dir = config_dir / "managed"
+            rule = root / "etc-falco" / "rules.d" / "vps-audit-rules.yaml"
+            override_dir = root / "systemd" / "falco-modern-bpf.service.d"
+            log_dir = root / "logs"
+            repo_dir = root / "repo"
+            repo_dir.mkdir()
+            repo_list = repo_dir / "falcosecurity.list"
+            repo_key = repo_dir / "falco.gpg"
+            repo_list.write_text("preserve repo\n", encoding="utf-8")
+            repo_key.write_text("preserve key\n", encoding="utf-8")
+            env = dict(os.environ)
+            env["PATH"] = f"{mock_bin}:{env['PATH']}"
+            env["MOCK_APT_LOG"] = str(apt_log)
+            variables = (
+                f'CONFIG_DIR="{config_dir}"\n'
+                f'FALCO_MANAGED_DIR="{managed_dir}"\n'
+                f'FALCO_RULE_FILE="{rule}"\n'
+                f'FALCO_OVERRIDE_DIR="{override_dir}"\n'
+                f'FALCO_OVERRIDE_FILE="{override_dir / "vps-audit.conf"}"\n'
+                f'FALCO_LOG_DIR="{log_dir}"\n'
+                f'FALCO_LOG_FILE="{log_dir / "falco-events.json"}"\n'
+                f'FALCO_LOGROTATE_FILE="{root / "vps-audit-falco.logrotate"}"\n'
+                f'FALCO_REPO_LIST="{repo_list}"\n'
+                f'FALCO_REPO_KEY="{repo_key}"\n'
+            )
+            completed = run_bash(
+                variables
+                + "if install_managed_falco 7; then exit 9; else rollback_falco_install; fi",
+                env=env,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(rule.exists())
+            self.assertFalse(override_dir.exists())
+            self.assertFalse(log_dir.exists())
+            self.assertFalse(managed_dir.exists())
+            self.assertEqual(repo_list.read_text(encoding="utf-8"), "preserve repo\n")
+            self.assertEqual(repo_key.read_text(encoding="utf-8"), "preserve key\n")
+            self.assertIn("purge -y falco", apt_log.read_text(encoding="utf-8"))
+
+    def test_falco_uninstall_preserves_package_when_external_config_exists(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mock_bin = root / "bin"
+            mock_bin.mkdir()
+            apt_log = root / "apt.log"
+            (mock_bin / "apt-get").write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$*" >> "$MOCK_APT_LOG"\nexit 0\n',
+                encoding="utf-8",
+            )
+            (mock_bin / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            for executable in mock_bin.iterdir():
+                executable.chmod(0o755)
+
+            config_dir = root / "config"
+            managed_dir = config_dir / "managed"
+            managed_dir.mkdir(parents=True)
+            for component in (
+                "package",
+                "repository",
+                "repository-key",
+                "falcoctl-mask",
+                "rule",
+                "service-override",
+                "logrotate",
+                "log-directory",
+            ):
+                (managed_dir / component).write_text("managed\n", encoding="utf-8")
+            (managed_dir / "baseline.sha256").write_text("", encoding="utf-8")
+
+            falco_etc = root / "etc-falco"
+            rule = falco_etc / "rules.d" / "vps-audit-rules.yaml"
+            rule.parent.mkdir(parents=True)
+            rule.write_text("managed rule\n", encoding="utf-8")
+            external_rule = rule.parent / "external-service.yaml"
+            external_rule.write_text("external rule\n", encoding="utf-8")
+            override_dir = root / "systemd" / "falco-modern-bpf.service.d"
+            override_dir.mkdir(parents=True)
+            override = override_dir / "vps-audit.conf"
+            override.write_text("managed override\n", encoding="utf-8")
+            log_dir = root / "logs"
+            log_dir.mkdir()
+            (log_dir / ".vps-audit-falco-managed").write_text("", encoding="utf-8")
+            log_file = log_dir / "falco-events.json"
+            log_file.write_text("", encoding="utf-8")
+            logrotate = root / "vps-audit-falco.logrotate"
+            logrotate.write_text("managed\n", encoding="utf-8")
+            repo_list = root / "falcosecurity.list"
+            repo_key = root / "falco.gpg"
+            repo_list.write_text("repository\n", encoding="utf-8")
+            repo_key.write_text("key\n", encoding="utf-8")
+
+            env = dict(os.environ)
+            env["PATH"] = f"{mock_bin}:{env['PATH']}"
+            env["MOCK_APT_LOG"] = str(apt_log)
+            completed = run_bash(
+                f'CONFIG_DIR="{config_dir}"\n'
+                f'FALCO_MANAGED_DIR="{managed_dir}"\n'
+                f'FALCO_ETC_DIR="{falco_etc}"\n'
+                f'FALCOCTL_ETC_DIR="{root / "etc-falcoctl"}"\n'
+                f'FALCO_RULE_FILE="{rule}"\n'
+                f'FALCO_OVERRIDE_DIR="{override_dir}"\n'
+                f'FALCO_OVERRIDE_FILE="{override}"\n'
+                f'FALCO_LOG_DIR="{log_dir}"\n'
+                f'FALCO_LOG_FILE="{log_file}"\n'
+                f'FALCO_LOGROTATE_FILE="{logrotate}"\n'
+                f'FALCO_REPO_LIST="{repo_list}"\n'
+                f'FALCO_REPO_KEY="{repo_key}"\n'
+                "uninstall_managed_falco",
+                env=env,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(external_rule.is_file())
+            self.assertFalse(rule.exists())
+            self.assertFalse(override.exists())
+            self.assertTrue(repo_list.is_file())
+            self.assertTrue(repo_key.is_file())
+            self.assertFalse(managed_dir.exists())
+            self.assertFalse(apt_log.exists(), "shared Falco package must not be purged")
+
+    def test_destroy_removes_managed_source_but_preserves_unrelated_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "vps-audit-src"
+            config_dir = root / "config"
+            install_root = root / "application"
+            systemd_dir = root / "systemd"
+            state_dir = root / "state"
+            report_dir = state_dir / "reports"
+            for directory in (source, config_dir, install_root, systemd_dir, state_dir, report_dir):
+                directory.mkdir(exist_ok=True)
+            (source / ".vpspc-source-managed").write_text("managed\n", encoding="utf-8")
+            (state_dir / ".vps-audit-managed").write_text("", encoding="utf-8")
+            (report_dir / ".vps-audit-managed").write_text("", encoding="utf-8")
+            config = config_dir / "config.json"
+            config.write_text(
+                json.dumps({"state_dir": str(state_dir), "report_dir": str(report_dir)}),
+                encoding="utf-8",
+            )
+            unrelated = root / "other-service.data"
+            unrelated.write_text("preserve", encoding="utf-8")
+            mock_bin = root / "bin"
+            mock_bin.mkdir()
+            (mock_bin / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (mock_bin / "systemctl").chmod(0o755)
+            env = dict(os.environ)
+            env["PATH"] = f"{mock_bin}:{env['PATH']}"
+            completed = run_bash(
+                "need_root() { :; }\n"
+                f'SCRIPT_DIR="{source}"\n'
+                f'INSTALL_ROOT="{install_root}"\n'
+                f'CONFIG_DIR="{config_dir}"\n'
+                f'CONFIG_FILE="{config}"\n'
+                f'SYSTEMD_DIR="{systemd_dir}"\n'
+                f'FALCO_MANAGED_DIR="{config_dir / "managed"}"\n'
+                "destroy_app",
+                env=env,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(source.exists())
+            self.assertFalse(config_dir.exists())
+            self.assertFalse(install_root.exists())
+            self.assertFalse(state_dir.exists())
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "preserve")
+
+    def test_settings_snapshot_restores_config_secrets_and_systemd_units(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_dir = root / "config"
+            systemd_dir = root / "systemd"
+            config_dir.mkdir()
+            systemd_dir.mkdir()
+            config = config_dir / "config.json"
+            token = config_dir / "telegram.token"
+            service = systemd_dir / "vps-audit.service"
+            timer = systemd_dir / "vps-audit.timer"
+            config.write_text('{"retention_days": 7}\n', encoding="utf-8")
+            token.write_text("old-token\n", encoding="utf-8")
+            service.write_text("old-service\n", encoding="utf-8")
+            timer.write_text("old-timer\n", encoding="utf-8")
+
+            mock_bin = root / "bin"
+            mock_bin.mkdir()
+            (mock_bin / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (mock_bin / "systemctl").chmod(0o755)
+            env = dict(os.environ)
+            env["PATH"] = f"{mock_bin}:{env['PATH']}"
+            variables = (
+                "need_root() { :; }\n"
+                f'CONFIG_DIR="{config_dir}"\n'
+                f'CONFIG_FILE="{config}"\n'
+                f'SYSTEMD_DIR="{systemd_dir}"\n'
+                f'FALCO_MANAGED_DIR="{config_dir / "managed"}"\n'
+            )
+            completed = run_bash(variables + "create_settings_snapshot", env=env)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+            config.write_text('{"retention_days": 30}\n', encoding="utf-8")
+            token.write_text("new-token\n", encoding="utf-8")
+            (config_dir / "openai.key").write_text("new-key\n", encoding="utf-8")
+            service.write_text("new-service\n", encoding="utf-8")
+            timer.write_text("new-timer\n", encoding="utf-8")
+            completed = run_bash(variables + "rollback_settings_app", env=env)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(config.read_text(encoding="utf-8"), '{"retention_days": 7}\n')
+            self.assertEqual(token.read_text(encoding="utf-8"), "old-token\n")
+            self.assertFalse((config_dir / "openai.key").exists())
+            self.assertEqual(service.read_text(encoding="utf-8"), "old-service\n")
+            self.assertEqual(timer.read_text(encoding="utf-8"), "old-timer\n")
+
     def test_purge_deletes_only_marked_configured_directories(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -237,6 +545,7 @@ class InstallerTests(unittest.TestCase):
                 f'CONFIG_DIR="{config_dir}"\n'
                 f'CONFIG_FILE="{config}"\n'
                 f'SYSTEMD_DIR="{systemd_dir}"\n'
+                f'FALCO_MANAGED_DIR="{config_dir / "managed"}"\n'
                 "uninstall_app --purge",
                 env=env,
             )

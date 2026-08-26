@@ -18,7 +18,14 @@
 curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh
 ```
 
-当前提供 GitHub 拉取部署方式，Docker 部署将在后续版本增加。完整功能、数据目录、保留时间、Telegram 和妙妙屋 X 日志接入说明请查看 [vpspc 文档](vpspc/README.md)。
+当前提供 GitHub 拉取部署方式，Docker 部署将在后续版本增加。安装器会检测 Falco，未安装时解释用途并询问是否自动安装；选择跳过不影响 SSH 和订阅多 IP 审计。完整功能、数据目录、保留时间、Telegram 和妙妙屋 X 日志接入说明请查看 [vpspc 文档](vpspc/README.md)。
+
+恢复上一次配置或彻底删除 vpspc：
+
+```bash
+sudo /opt/vps-audit-src/install.sh rollback
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh destroy
+```
 
 ## safe-ssh-port 快速使用
 

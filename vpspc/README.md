@@ -21,8 +21,17 @@ sudo VPSPC_REF='提交SHA或标签' bash /tmp/vpspc-install.sh
 ```bash
 sudo /opt/vps-audit-src/install.sh status
 sudo /opt/vps-audit-src/install.sh configure
+sudo /opt/vps-audit-src/install.sh rollback
 sudo /opt/vps-audit-src/install.sh uninstall
 ```
+
+彻底删除一键安装器创建的程序、配置、审计数据、源码和可选 Falco 组件：
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh destroy
+```
+
+`destroy` 只删除带有 vpspc 管理标记的路径。若 Falco 在安装后出现其他规则或配置修改，会将它视为共享服务：只删除 vpspc 规则、输出和日志，保留 Falco 软件包与官方仓库，避免影响其他使用方。
 
 Docker 部署方式尚未提供，后续会作为第二种独立部署方式加入；当前版本不会自动安装 Docker。
 
@@ -39,6 +48,7 @@ sudo ./install.sh install
 
 - SSH 日志来源和时区；找不到 `auth.log/secure` 时自动使用 journald 游标；
 - 审计数据目录、报告目录、数据保留时间、扫描间隔和可选 Falco JSON 日志；
+- 检测 Falco；未安装时解释用途并询问是否使用 modern eBPF 自动安装；
 - Telegram Bot Token、Chat ID、最低推送等级和冷却时间；
 - 可选的本地 MaxMind City/ASN 数据库；
 - 可选 OpenAI 复核、API Key 和明确的模型 ID。
@@ -48,6 +58,7 @@ sudo ./install.sh install
 ```bash
 sudo ./install.sh status
 sudo ./install.sh configure
+sudo ./install.sh rollback
 sudo systemctl start vps-audit.service
 sudo journalctl -u vps-audit.service -f
 sudo less /var/lib/vps-audit/reports/latest.md
@@ -62,7 +73,10 @@ sudo less /var/lib/vps-audit/reports/latest.md
 ```bash
 sudo ./install.sh uninstall
 sudo ./install.sh uninstall --purge
+sudo ./install.sh destroy
 ```
+
+每次重新安装或执行 `configure` 前会保存一份 root-only 的“上一次配置”快照，包括运行配置、Telegram/OpenAI 密钥文件以及 systemd 单元。`rollback` 恢复这些设置但不删除审计事件；若本次配置新增了由 vpspc 管理的 Falco，回滚也会撤销该 Falco 安装。快照只用于配置回滚，不负责降级程序源码版本。
 
 运行架构如下：SSH/Falco 日志由增量采集器读取并保存在本机，规则引擎每隔几分钟生成报告。只有首次出现或超过冷却时间的告警才会触发可选 AI 复核和 Telegram 推送。Telegram 采用出站 Bot API，不需要给 VPS 开放入站端口。
 
@@ -198,22 +212,20 @@ API 用法基于[官方 OpenAI Responses API 文档](https://developers.openai.c
 
 ## Falco 进程与网络审计
 
-项目提供 [Falco 规则](deploy/falco/vps-audit-rules.yaml)，记录普通 Linux 用户启动的进程，以及 Python、Node 和常见浏览器运行时的出站连接。规则刻意不抓取所有系统进程，以控制日志量。
+项目提供 [Falco 规则](deploy/falco/vps-audit-rules.yaml)，记录普通 Linux 用户启动的进程，以及 Python、Node 和常见浏览器运行时的出站连接。安装器会先检测 Falco；未检测到时说明用途并询问是否安装，默认选择 `no`，直接回车即可跳过。没有 Falco 时 SSH 和订阅多 IP 审计仍然完整可用。
 
-先按照你的发行版和内核安装 Falco，再确认当前 Falco 包如何加载附加规则与配置。常见安装方式是：
+自动安装当前支持使用 `apt` 的 Debian/Ubuntu，选择 modern eBPF，不编译内核模块。它会：
 
-```bash
-sudo install -m 0644 deploy/falco/vps-audit-rules.yaml \
-  /etc/falco/rules.d/vps-audit-rules.yaml
-```
+- 使用 Falco 官方签名仓库安装软件包；
+- 在写入前验证 vpspc 规则，只启用 `vps_audit` 标签的规则；
+- 将 JSON 写入 `/var/log/vps-audit/falco-events.json`，权限为 `0600`；
+- 按审计数据保留天数配置每日轮转；
+- 只采集和预警，不终止进程、不阻断网络、不修改妙妙屋 X；
+- 任一步骤失败时自动删除本次新增的软件包、仓库、规则、systemd 覆盖和日志。
 
-Falco 必须启用 JSON file output，并写入例如 `/var/log/falco/events.json`。项目提供 [输出配置示例](deploy/falco/vps-audit-output.yaml.example)，但不同 Falco 版本是否自动读取 `/etc/falco/config.d/` 并不一致，应用前应运行 `falco --list-plugins`、配置校验或查看你所用软件包的 systemd 启动参数。确认 Falco 正常写入后运行：
+若服务器已安装 Falco，安装器不会接管或覆盖它，只允许填写已有 JSON 日志路径。彻底卸载时也会根据安装前的配置指纹判断 Falco 是否已被其他用途修改；发现外部配置即保留共享 Falco，只移除 vpspc 专属文件。
 
-```bash
-sudo ./install.sh configure
-```
-
-然后把该 JSON 文件路径填入安装器。没有 Falco 时系统仍会审计 SSH 登录，但不会声称能证明用户正在运行批量注册程序。
+Falco 进程日志可能包含命令行敏感参数，因此只保存在 VPS 的 root-only 文件中，不会原样放入 Telegram。没有 Falco 时系统不会声称能证明用户正在运行批量注册程序。
 
 ## 本地 IP 情报
 

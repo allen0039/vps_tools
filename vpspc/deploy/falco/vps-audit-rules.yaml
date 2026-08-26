@@ -11,7 +11,7 @@
 - rule: VPS Audit User Outbound Connection
   desc: Record outbound connections from common automation runtimes and browsers
   condition: >
-    evt.type=connect and evt.dir=< and fd.type in (ipv4, ipv6)
+    evt.type=connect and fd.type in (ipv4, ipv6)
     and user.uid >= 1000 and user.uid != 65534
     and proc.name in (python, python3, node, chrome, chromium, firefox,
     chromedriver, geckodriver)

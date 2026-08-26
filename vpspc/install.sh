@@ -8,6 +8,22 @@ REPORT_DIR="$STATE_DIR/reports"
 SYSTEMD_DIR="/etc/systemd/system"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 DATA_MARKER=".vps-audit-managed"
+SOURCE_MARKER=".vpspc-source-managed"
+FALCO_MANAGED_DIR="$CONFIG_DIR/managed"
+FALCO_RULE_FILE="/etc/falco/rules.d/vps-audit-rules.yaml"
+FALCO_OVERRIDE_DIR="$SYSTEMD_DIR/falco-modern-bpf.service.d"
+FALCO_OVERRIDE_FILE="$FALCO_OVERRIDE_DIR/vps-audit.conf"
+FALCO_LOG_DIR="/var/log/vps-audit"
+FALCO_LOG_FILE="$FALCO_LOG_DIR/falco-events.json"
+FALCO_LOGROTATE_FILE="/etc/logrotate.d/vps-audit-falco"
+FALCO_REPO_LIST="/etc/apt/sources.list.d/falcosecurity.list"
+FALCO_REPO_KEY="/usr/share/keyrings/falco-archive-keyring.gpg"
+FALCO_REPO_URL="https://download.falco.org/packages/deb"
+FALCO_KEY_URL="https://falco.org/repo/falcosecurity-packages.asc"
+FALCO_ETC_DIR="/etc/falco"
+FALCOCTL_ETC_DIR="/etc/falcoctl"
+APT_LIST_CACHE_DIR="/var/lib/apt/lists"
+APT_ARCHIVE_CACHE_DIR="/var/cache/apt/archives"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 die() {
@@ -196,6 +212,385 @@ copy_application() {
   install -m 0755 "$SCRIPT_DIR/deploy/bin/vps-audit-runner" "$INSTALL_ROOT/venv/bin/vps-audit-runner"
 }
 
+falco_is_installed() {
+  command -v falco >/dev/null 2>&1 \
+    || { command -v dpkg-query >/dev/null 2>&1 \
+      && [[ "$(dpkg-query -W -f='${db:Status-Abbrev}' falco 2>/dev/null || true)" == "ii " ]]; }
+}
+
+falco_component_is_managed() {
+  [[ -f "$FALCO_MANAGED_DIR/$1" ]]
+}
+
+mark_falco_component() {
+  local component="$1"
+  install -d -m 0700 "$FALCO_MANAGED_DIR" || return 1
+  printf 'managed-by=vps-audit\n' > "$FALCO_MANAGED_DIR/$component" || return 1
+  chmod 0600 "$FALCO_MANAGED_DIR/$component" || return 1
+}
+
+falco_target_available() {
+  local path="$1"
+  local component="$2"
+  if [[ -e "$path" && ! -f "$FALCO_MANAGED_DIR/$component" ]]; then
+    echo "Falco 安装回滚保护：不会覆盖已有文件 $path" >&2
+    return 1
+  fi
+}
+
+write_falco_snapshot() {
+  local output="$1"
+  FALCO_SNAPSHOT_OUTPUT="$output" FALCO_SNAPSHOT_RULE="$FALCO_RULE_FILE" \
+  FALCO_SNAPSHOT_OVERRIDE="$FALCO_OVERRIDE_FILE" FALCO_SNAPSHOT_ROOTS="$FALCO_ETC_DIR:$FALCOCTL_ETC_DIR:$FALCO_OVERRIDE_DIR" \
+  python3 <<'PY'
+import hashlib
+import os
+from pathlib import Path
+
+excluded = {os.environ["FALCO_SNAPSHOT_RULE"], os.environ["FALCO_SNAPSHOT_OVERRIDE"]}
+files = []
+for raw_root in os.environ["FALCO_SNAPSHOT_ROOTS"].split(":"):
+    root = Path(raw_root)
+    if not root.is_dir():
+        continue
+    for path in root.rglob("*"):
+        if path.is_file() and str(path) not in excluded:
+            files.append(path)
+lines = []
+for path in sorted(files, key=lambda item: str(item)):
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    lines.append(f"{digest}  {path}\n")
+Path(os.environ["FALCO_SNAPSHOT_OUTPUT"]).write_text("".join(lines), encoding="utf-8")
+PY
+}
+
+falco_has_external_changes() {
+  local baseline="$FALCO_MANAGED_DIR/baseline.sha256"
+  local current="$FALCO_MANAGED_DIR/current.sha256"
+  [[ -f "$baseline" ]] || return 0
+  write_falco_snapshot "$current" || return 0
+  if cmp -s "$baseline" "$current"; then
+    rm -f -- "$current"
+    return 1
+  fi
+  rm -f -- "$current"
+  return 0
+}
+
+remove_managed_falco_files() {
+  local stop_service="${1:-yes}"
+  if [[ "$stop_service" == "yes" ]]; then
+    systemctl disable --now falco-modern-bpf.service >/dev/null 2>&1 || true
+  fi
+
+  if falco_component_is_managed service-override; then
+    rm -f -- "$FALCO_OVERRIDE_FILE"
+    rm -f -- "$FALCO_MANAGED_DIR/service-override"
+    rmdir "$FALCO_OVERRIDE_DIR" >/dev/null 2>&1 || true
+  fi
+  if falco_component_is_managed rule; then
+    rm -f -- "$FALCO_RULE_FILE"
+    rm -f -- "$FALCO_MANAGED_DIR/rule"
+  fi
+  if falco_component_is_managed logrotate; then
+    rm -f -- "$FALCO_LOGROTATE_FILE"
+    rm -f -- "$FALCO_MANAGED_DIR/logrotate"
+  fi
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  if [[ "$stop_service" != "yes" ]]; then
+    systemctl enable --now falco-modern-bpf.service >/dev/null 2>&1 || true
+    systemctl restart falco-modern-bpf.service >/dev/null 2>&1 || true
+  fi
+
+  if falco_component_is_managed log-directory; then
+    rm -f -- "$FALCO_LOG_FILE" "$FALCO_LOG_DIR/.vps-audit-falco-managed"
+    rm -f -- "$FALCO_MANAGED_DIR/log-directory"
+    rmdir "$FALCO_LOG_DIR" >/dev/null 2>&1 || true
+  fi
+}
+
+cleanup_falco_package_residue() {
+  rm -f -- "$FALCO_ETC_DIR/config.d/engine-kind-falcoctl.yaml"
+  FALCO_CLEANUP_BASELINE="$FALCO_MANAGED_DIR/baseline.sha256" \
+  FALCO_CLEANUP_ROOTS="$FALCO_ETC_DIR:$FALCOCTL_ETC_DIR" python3 <<'PY'
+import hashlib
+import os
+from pathlib import Path
+
+roots = [Path(value).resolve() for value in os.environ["FALCO_CLEANUP_ROOTS"].split(":")]
+baseline = Path(os.environ["FALCO_CLEANUP_BASELINE"])
+if baseline.is_file():
+    for line in baseline.read_text(encoding="utf-8").splitlines():
+        try:
+            expected, raw_path = line.split("  ", 1)
+        except ValueError:
+            continue
+        path = Path(raw_path)
+        try:
+            resolved = path.resolve()
+            allowed = any(resolved == root or root in resolved.parents for root in roots)
+            if allowed and path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == expected:
+                path.unlink()
+        except OSError:
+            pass
+for root in roots:
+    if not root.is_dir():
+        continue
+    for current, directories, _files in os.walk(root, topdown=False):
+        for directory in directories:
+            try:
+                (Path(current) / directory).rmdir()
+            except OSError:
+                pass
+    try:
+        root.rmdir()
+    except OSError:
+        pass
+PY
+  if [[ -d "$APT_LIST_CACHE_DIR" ]]; then
+    find "$APT_LIST_CACHE_DIR" -maxdepth 1 -type f -name 'download.falco.org_packages_deb_*' -delete 2>/dev/null || true
+  fi
+  if [[ -d "$APT_ARCHIVE_CACHE_DIR" ]]; then
+    find "$APT_ARCHIVE_CACHE_DIR" -maxdepth 1 -type f -name 'falco_*.deb' -delete 2>/dev/null || true
+  fi
+}
+
+rollback_falco_install() {
+  local rollback_failed="false"
+  echo "Falco 安装未完成，正在回滚本次创建的内容..." >&2
+  remove_managed_falco_files
+  if falco_component_is_managed package; then
+    if command -v apt-get >/dev/null 2>&1 \
+      && DEBIAN_FRONTEND=noninteractive apt-get purge -y falco >/dev/null 2>&1; then
+      cleanup_falco_package_residue
+      rm -f -- "$FALCO_MANAGED_DIR/package"
+    else
+      rollback_failed="true"
+      echo "Falco 软件包回滚失败，已保留归属标记以便重试。" >&2
+    fi
+  fi
+  if falco_component_is_managed falcoctl-mask; then
+    systemctl unmask falcoctl-artifact-follow.service >/dev/null 2>&1 || true
+    rm -f -- "$FALCO_MANAGED_DIR/falcoctl-mask"
+  fi
+  if falco_component_is_managed repository; then
+    rm -f -- "$FALCO_REPO_LIST" "$FALCO_MANAGED_DIR/repository"
+  fi
+  if falco_component_is_managed repository-key; then
+    rm -f -- "$FALCO_REPO_KEY" "$FALCO_MANAGED_DIR/repository-key"
+  fi
+  rm -f -- "$FALCO_MANAGED_DIR/current.sha256"
+  if [[ "$rollback_failed" == "false" ]]; then
+    rm -f -- "$FALCO_MANAGED_DIR/baseline.sha256"
+  fi
+  rmdir "$FALCO_MANAGED_DIR" >/dev/null 2>&1 || true
+  if [[ "$rollback_failed" == "true" ]]; then
+    return 1
+  fi
+  echo "Falco 回滚完成，其他服务和原有文件未改动。" >&2
+}
+
+install_managed_falco() {
+  local retention="$1"
+  local key_download key_binary falcoctl_state
+
+  command -v apt-get >/dev/null 2>&1 \
+    || { echo "Falco 自动安装当前支持 Debian/Ubuntu（apt）；本机将跳过。" >&2; return 1; }
+  command -v curl >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates || return 1
+  command -v gpg >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y gnupg || return 1
+
+  install -d -m 0700 "$CONFIG_DIR" "$FALCO_MANAGED_DIR" || return 1
+  falco_target_available "$FALCO_RULE_FILE" rule || return 1
+  falco_target_available "$FALCO_OVERRIDE_FILE" service-override || return 1
+  falco_target_available "$FALCO_LOGROTATE_FILE" logrotate || return 1
+
+  if [[ ! -e "$FALCO_REPO_KEY" ]]; then
+    mark_falco_component repository-key || return 1
+    key_download="$(mktemp /tmp/vps-audit-falco-key.XXXXXX)" || return 1
+    key_binary="${key_download}.gpg"
+    if ! curl --fail --location --silent --show-error --retry 3 "$FALCO_KEY_URL" -o "$key_download"; then
+      rm -f -- "$key_download" "$key_binary"
+      return 1
+    fi
+    if ! gpg --batch --yes --dearmor -o "$key_binary" "$key_download"; then
+      rm -f -- "$key_download" "$key_binary"
+      return 1
+    fi
+    install -m 0644 "$key_binary" "$FALCO_REPO_KEY" || return 1
+    rm -f -- "$key_download" "$key_binary"
+  fi
+  if [[ ! -e "$FALCO_REPO_LIST" ]]; then
+    mark_falco_component repository || return 1
+    printf 'deb [signed-by=%s] %s stable main\n' "$FALCO_REPO_KEY" "$FALCO_REPO_URL" > "$FALCO_REPO_LIST" || return 1
+    chmod 0644 "$FALCO_REPO_LIST" || return 1
+  fi
+
+  apt-get update || return 1
+  falcoctl_state="$(systemctl is-enabled falcoctl-artifact-follow.service 2>/dev/null || true)"
+  if [[ "$falcoctl_state" != "masked" ]]; then
+    mark_falco_component falcoctl-mask || return 1
+  fi
+  mark_falco_component package || return 1
+  FALCO_FRONTEND=noninteractive FALCO_DRIVER_CHOICE=modern_ebpf FALCOCTL_ENABLED=no \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y falco || return 1
+  falco_is_installed || return 1
+  write_falco_snapshot "$FALCO_MANAGED_DIR/baseline.sha256" || return 1
+  chmod 0600 "$FALCO_MANAGED_DIR/baseline.sha256" || return 1
+
+  install -d -m 0755 "$(dirname -- "$FALCO_RULE_FILE")" "$FALCO_OVERRIDE_DIR" || return 1
+  mark_falco_component rule || return 1
+  install -m 0644 "$SCRIPT_DIR/deploy/falco/vps-audit-rules.yaml" "$FALCO_RULE_FILE" || return 1
+  falco --validate "$FALCO_ETC_DIR/falco_rules.yaml" --validate "$FALCO_RULE_FILE" || return 1
+
+  mark_falco_component service-override || return 1
+  cat > "$FALCO_OVERRIDE_FILE" <<EOF
+[Service]
+ExecStart=
+ExecStart=/usr/bin/falco -o engine.kind=modern_ebpf -o json_output=true -o json_include_output_property=true -o file_output.enabled=true -o file_output.keep_alive=false -o file_output.filename=$FALCO_LOG_FILE -o rules[0].disable.rule=* -o rules[1].enable.tag=vps_audit
+EOF
+  chmod 0644 "$FALCO_OVERRIDE_FILE" || return 1
+
+  if [[ -d "$FALCO_LOG_DIR" && ! -f "$FALCO_LOG_DIR/.vps-audit-falco-managed" ]]; then
+    [[ -z "$(find "$FALCO_LOG_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null || true)" ]] \
+      || { echo "不会使用已有的非空日志目录 $FALCO_LOG_DIR" >&2; return 1; }
+  fi
+  mark_falco_component log-directory || return 1
+  install -d -m 0700 "$FALCO_LOG_DIR" || return 1
+  : > "$FALCO_LOG_DIR/.vps-audit-falco-managed" || return 1
+  chmod 0600 "$FALCO_LOG_DIR/.vps-audit-falco-managed" || return 1
+  : > "$FALCO_LOG_FILE" || return 1
+  chmod 0600 "$FALCO_LOG_FILE" || return 1
+
+  install -d -m 0755 "$(dirname -- "$FALCO_LOGROTATE_FILE")" || return 1
+  mark_falco_component logrotate || return 1
+  cat > "$FALCO_LOGROTATE_FILE" <<EOF
+$FALCO_LOG_FILE {
+    daily
+    rotate $retention
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 root root
+}
+EOF
+  chmod 0644 "$FALCO_LOGROTATE_FILE" || return 1
+
+  systemctl daemon-reload || return 1
+  systemctl enable --now falco-modern-bpf.service || return 1
+  systemctl restart falco-modern-bpf.service || return 1
+  local _
+  for _ in 1 2 3 4 5; do
+    systemctl is-active --quiet falco-modern-bpf.service && break
+    sleep 1
+  done
+  systemctl is-active --quiet falco-modern-bpf.service || return 1
+  echo "Falco 已安装并运行，仅记录 vpspc 规则，JSON 日志: $FALCO_LOG_FILE"
+}
+
+uninstall_managed_falco() {
+  [[ -d "$FALCO_MANAGED_DIR" ]] || return 0
+  echo "清理本工具管理的 Falco 组件..."
+  if falco_component_is_managed package && falco_has_external_changes; then
+    echo "检测到 Falco 安装后新增或修改的外部配置；为避免影响其他服务，将保留 Falco 软件包和官方仓库。"
+    remove_managed_falco_files no
+    if falco_component_is_managed falcoctl-mask; then
+      systemctl unmask falcoctl-artifact-follow.service >/dev/null 2>&1 || true
+    fi
+    rm -f -- "$FALCO_MANAGED_DIR/package" "$FALCO_MANAGED_DIR/falcoctl-mask"
+    rm -f -- "$FALCO_MANAGED_DIR/repository" "$FALCO_MANAGED_DIR/repository-key"
+    rm -f -- "$FALCO_MANAGED_DIR/baseline.sha256"
+    rmdir "$FALCO_MANAGED_DIR" >/dev/null 2>&1 || true
+    echo "vpspc 专属 Falco 规则、输出和日志已删除；共享 Falco 已恢复为默认启动方式。"
+    return 0
+  fi
+  remove_managed_falco_files
+  if falco_component_is_managed package; then
+    if ! command -v apt-get >/dev/null 2>&1 \
+      || ! DEBIAN_FRONTEND=noninteractive apt-get purge -y falco; then
+      echo "Falco 软件包卸载失败；已保留归属标记，请修复 apt 后重试。" >&2
+      return 1
+    fi
+    cleanup_falco_package_residue
+    rm -f -- "$FALCO_MANAGED_DIR/package"
+  fi
+  if falco_component_is_managed falcoctl-mask; then
+    systemctl unmask falcoctl-artifact-follow.service >/dev/null 2>&1 || true
+    rm -f -- "$FALCO_MANAGED_DIR/falcoctl-mask"
+  fi
+  if falco_component_is_managed repository; then
+    rm -f -- "$FALCO_REPO_LIST" "$FALCO_MANAGED_DIR/repository"
+  fi
+  if falco_component_is_managed repository-key; then
+    rm -f -- "$FALCO_REPO_KEY" "$FALCO_MANAGED_DIR/repository-key"
+  fi
+  rm -f -- "$FALCO_MANAGED_DIR/baseline.sha256"
+  rmdir "$FALCO_MANAGED_DIR" >/dev/null 2>&1 || true
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  echo "本工具创建的 Falco 组件已清理；预先存在的 Falco 和其他服务未改动。"
+}
+
+create_settings_snapshot() {
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  local rollback_root="$CONFIG_DIR/rollback"
+  local snapshot="$rollback_root/latest"
+  local staging="$rollback_root/.latest.new.$$"
+  install -d -m 0700 "$rollback_root" "$staging"
+  install -m 0600 "$CONFIG_FILE" "$staging/config.json"
+  [[ -f "$CONFIG_DIR/telegram.token" ]] && install -m 0600 "$CONFIG_DIR/telegram.token" "$staging/telegram.token"
+  [[ -f "$CONFIG_DIR/openai.key" ]] && install -m 0600 "$CONFIG_DIR/openai.key" "$staging/openai.key"
+  [[ -f "$SYSTEMD_DIR/vps-audit.service" ]] && install -m 0644 "$SYSTEMD_DIR/vps-audit.service" "$staging/vps-audit.service"
+  [[ -f "$SYSTEMD_DIR/vps-audit.timer" ]] && install -m 0644 "$SYSTEMD_DIR/vps-audit.timer" "$staging/vps-audit.timer"
+  falco_component_is_managed package && : > "$staging/falco-managed-before"
+  chmod 0600 "$staging"/* 2>/dev/null || true
+  rm -rf -- "$snapshot"
+  mv "$staging" "$snapshot"
+  echo "已保存上一次配置快照，可使用 install.sh rollback 恢复。"
+}
+
+rollback_settings_app() {
+  need_root
+  local snapshot="$CONFIG_DIR/rollback/latest"
+  [[ -f "$snapshot/config.json" ]] || die "没有可用的上一次配置快照"
+
+  if [[ ! -f "$snapshot/falco-managed-before" ]] && falco_component_is_managed package; then
+    uninstall_managed_falco || die "回滚新增 Falco 组件失败"
+  fi
+
+  systemctl stop vps-audit.timer vps-audit.service >/dev/null 2>&1 || true
+  install -d -m 0700 "$CONFIG_DIR"
+  install -m 0600 "$snapshot/config.json" "$CONFIG_FILE"
+  if [[ -f "$snapshot/telegram.token" ]]; then
+    install -m 0600 "$snapshot/telegram.token" "$CONFIG_DIR/telegram.token"
+  else
+    rm -f -- "$CONFIG_DIR/telegram.token"
+  fi
+  if [[ -f "$snapshot/openai.key" ]]; then
+    install -m 0600 "$snapshot/openai.key" "$CONFIG_DIR/openai.key"
+  else
+    rm -f -- "$CONFIG_DIR/openai.key"
+  fi
+  if [[ -f "$snapshot/vps-audit.service" ]]; then
+    install -m 0644 "$snapshot/vps-audit.service" "$SYSTEMD_DIR/vps-audit.service"
+  else
+    rm -f -- "$SYSTEMD_DIR/vps-audit.service"
+  fi
+  if [[ -f "$snapshot/vps-audit.timer" ]]; then
+    install -m 0644 "$snapshot/vps-audit.timer" "$SYSTEMD_DIR/vps-audit.timer"
+  else
+    rm -f -- "$SYSTEMD_DIR/vps-audit.timer"
+  fi
+  systemctl daemon-reload
+  if [[ -f "$SYSTEMD_DIR/vps-audit.timer" ]]; then
+    systemctl enable --now vps-audit.timer
+    if ! systemctl start vps-audit.service; then
+      journalctl -u vps-audit.service -n 30 --no-pager || true
+      die "配置文件已恢复，但首次巡查失败，请检查日志"
+    fi
+  fi
+  echo "已恢复上一次配置、密钥引用和 systemd 单元；审计事件数据未删除。"
+}
+
 write_runtime_config() {
   local auth_default timezone_default falco_default
   local auth_log auth_timezone falco_log subscription_log miaomiaowux_log miaomiaowux_timezone retention interval
@@ -203,11 +598,13 @@ write_runtime_config() {
   local journal_enabled telegram_enabled telegram_chat min_severity cooldown include_ip
   local ai_enabled ai_model city_db asn_db install_geoip
   local sub_window sub_ip_count sub_region_count sub_city_count sub_asn_count travel_distance travel_speed
+  local falco_install_requested falco_skipped
 
   auth_default="$(existing_config_value auth_logs "$(detect_auth_log)")"
   timezone_default="$(existing_config_value auth_timezone "$(date +%:z 2>/dev/null || echo +00:00)")"
   [[ "$timezone_default" =~ ^[+-][0-9]{2}:[0-9]{2}$ ]] || timezone_default="+00:00"
   falco_default=""
+  [[ -f "$FALCO_LOG_FILE" ]] && falco_default="$FALCO_LOG_FILE"
   [[ -f /var/log/falco/events.json ]] && falco_default="/var/log/falco/events.json"
   falco_default="$(existing_config_value falco_logs "$falco_default")"
   local subscription_default
@@ -224,10 +621,29 @@ write_runtime_config() {
   report_dir="$(ask "报告保存目录（直接回车使用默认值）" "$(existing_config_value report_dir "$state_dir/reports")")"
   report_dir="$(validate_storage_path "$report_dir" "报告保存目录")"
   retention="$(ask "事件保存天数（直接回车使用默认值）" "$(existing_config_value retention_days 7)")"
-  [[ "$retention" =~ ^[0-9]+$ ]] && (( retention >= 1 && retention <= 365 )) \
-    || die "保留天数应为 1 到 365 的整数"
+  if [[ ! "$retention" =~ ^[0-9]+$ ]] || (( retention < 1 || retention > 365 )); then
+    die "保留天数应为 1 到 365 的整数"
+  fi
   prepare_managed_directory "$state_dir" "审计数据保存目录"
   prepare_managed_directory "$report_dir" "报告保存目录"
+
+  falco_install_requested="false"
+  falco_skipped="false"
+  echo
+  echo "Falco 可选行为审计"
+  echo "Falco 使用 eBPF 观察普通 Linux 用户启动的进程和部分出站连接，"
+  echo "可为疑似 Python/Node/浏览器自动化、注册机和短时大量连接提供证据。"
+  echo "它只记录和预警，不会封禁、终止进程或修改妙妙屋 X。命令行日志可能包含敏感参数。"
+  if falco_is_installed; then
+    echo "已检测到 Falco；安装器不会覆盖或接管已有安装。"
+  elif ask_yes_no "未检测到 Falco，是否安装 vpspc 管理的 Falco（modern eBPF）" "no"; then
+    falco_install_requested="true"
+    falco_default="$FALCO_LOG_FILE"
+    echo "已选择安装；完成所有交互设置后自动安装，失败会回滚 Falco 组件。"
+  else
+    falco_skipped="true"
+    echo "已跳过 Falco；SSH 和订阅多 IP 审计仍可正常使用。"
+  fi
 
   echo
   echo "配置日志与巡查周期"
@@ -236,13 +652,21 @@ write_runtime_config() {
   [[ -n "$auth_log" ]] || journal_enabled="true"
   auth_timezone="$(ask "日志时区偏移" "$timezone_default")"
   interval="$(ask "巡查间隔（分钟）" "$(existing_config_value scan_interval_minutes 5)")"
-  falco_log="$(ask "Falco JSON 日志路径，留空则只审计登录" "$falco_default")"
+  if [[ "$falco_install_requested" == "true" ]]; then
+    falco_log="$FALCO_LOG_FILE"
+    echo "Falco JSON 日志路径 [$falco_log]"
+  elif [[ "$falco_skipped" == "true" ]]; then
+    falco_log=""
+  else
+    falco_log="$(ask "Falco JSON 日志路径，留空则不审计进程/网络行为" "$falco_default")"
+  fi
   subscription_log="$(ask "妙妙屋 X 订阅访问 JSONL 路径，留空则不采集" "$subscription_default")"
   miaomiaowux_log="$(ask "妙妙屋 X 原生 mmwx.log 路径，留空则不采集" "$miaomiaowux_default")"
   miaomiaowux_timezone="$(ask "mmwx.log 时区偏移" "$(existing_config_value miaomiaowux_timezone +00:00)")"
   [[ "$auth_timezone" =~ ^[+-][0-9]{2}:[0-9]{2}$ ]] || die "日志时区格式应为 +08:00"
-  [[ "$interval" =~ ^[0-9]+$ ]] && (( interval >= 1 && interval <= 1440 )) \
-    || die "巡查间隔应为 1 到 1440 的整数"
+  if [[ ! "$interval" =~ ^[0-9]+$ ]] || (( interval < 1 || interval > 1440 )); then
+    die "巡查间隔应为 1 到 1440 的整数"
+  fi
   if [[ -n "$auth_log" && ! -f "$auth_log" ]]; then
     echo "警告: $auth_log 当前不存在；服务会等待该日志出现。" >&2
   fi
@@ -333,6 +757,18 @@ write_runtime_config() {
     chmod 0600 "$CONFIG_DIR/openai.key"
   fi
 
+  if [[ "$install_geoip" == "true" ]]; then
+    "$INSTALL_ROOT/venv/bin/pip" install --disable-pip-version-check --no-cache-dir 'geoip2>=4,<6'
+  fi
+
+  if [[ "$falco_install_requested" == "true" ]]; then
+    if ! install_managed_falco "$retention"; then
+      rollback_falco_install || die "Falco 自动安装失败且软件包回滚未完成，请修复 apt 后运行 install.sh destroy"
+      falco_log=""
+      echo "警告: Falco 自动安装失败，已完整回滚；继续以登录和订阅审计模式安装。" >&2
+    fi
+  fi
+
   install -d -m 0700 "$CONFIG_DIR"
   AUTH_LOG="$auth_log" AUTH_TIMEZONE="$auth_timezone" JOURNAL_ENABLED="$journal_enabled" FALCO_LOG="$falco_log" SUBSCRIPTION_LOG="$subscription_log" \
   MIAOMIAOWUX_LOG="$miaomiaowux_log" MIAOMIAOWUX_TIMEZONE="$miaomiaowux_timezone" \
@@ -396,10 +832,6 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
 PY
   chmod 0600 "$CONFIG_FILE"
 
-  if [[ "$install_geoip" == "true" ]]; then
-    "$INSTALL_ROOT/venv/bin/pip" install --disable-pip-version-check --no-cache-dir 'geoip2>=4,<6'
-  fi
-
   INTERVAL="$interval"
   CONFIGURED_STATE_DIR="$state_dir"
   CONFIGURED_REPORT_DIR="$report_dir"
@@ -430,6 +862,7 @@ install_app() {
   need_root
   install_os_packages
   copy_application
+  create_settings_snapshot
   INTERVAL="5"
   write_runtime_config
   install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR"
@@ -453,6 +886,7 @@ install_app() {
 configure_app() {
   need_root
   [[ -x "$INSTALL_ROOT/venv/bin/vps-audit-runner" ]] || die "尚未安装"
+  create_settings_snapshot
   INTERVAL="5"
   write_runtime_config
   install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR"
@@ -467,6 +901,14 @@ status_app() {
   if [[ -x "$INSTALL_ROOT/venv/bin/vps-audit-runner" && -f "$CONFIG_FILE" ]]; then
     "$INSTALL_ROOT/venv/bin/vps-audit-runner" --config "$CONFIG_FILE" health
   fi
+  echo
+  if falco_is_installed; then
+    echo "Falco: 已安装"
+    systemctl is-active falco-modern-bpf.service 2>/dev/null || true
+    [[ -f "$FALCO_LOG_FILE" ]] && echo "Falco JSON: $FALCO_LOG_FILE"
+  else
+    echo "Falco: 未安装（可选，不影响 SSH/订阅审计）"
+  fi
 }
 
 uninstall_app() {
@@ -476,6 +918,15 @@ uninstall_app() {
   if [[ "${1:-}" == "--purge" && -f "$CONFIG_FILE" ]]; then
     purge_state_dir="$(validate_storage_path "$(existing_config_value state_dir "$STATE_DIR")" "已配置的审计数据目录")"
     purge_report_dir="$(validate_storage_path "$(existing_config_value report_dir "$REPORT_DIR")" "已配置的报告目录")"
+  elif [[ "${1:-}" == "--purge" ]]; then
+    [[ -f "$STATE_DIR/$DATA_MARKER" ]] && purge_state_dir="$STATE_DIR"
+    [[ -f "$REPORT_DIR/$DATA_MARKER" ]] && purge_report_dir="$REPORT_DIR"
+  fi
+  if [[ "${1:-}" == "--purge" ]]; then
+    uninstall_managed_falco || die "Falco 清理未完成；为便于重试，尚未删除 vpspc 配置"
+  elif falco_component_is_managed package; then
+    systemctl stop falco-modern-bpf.service >/dev/null 2>&1 || true
+    echo "已停止本工具管理的 Falco；配置保留，重新安装 vpspc 后可恢复。"
   fi
   systemctl disable --now vps-audit.timer >/dev/null 2>&1 || true
   systemctl stop vps-audit.service >/dev/null 2>&1 || true
@@ -506,14 +957,32 @@ uninstall_app() {
   fi
 }
 
+destroy_app() {
+  need_root
+  local managed_source=""
+  if [[ -f "$SCRIPT_DIR/$SOURCE_MARKER" ]]; then
+    managed_source="$(validate_storage_path "$SCRIPT_DIR" "远程安装源码目录")"
+  fi
+  uninstall_app --purge
+  if [[ -n "$managed_source" && -f "$managed_source/$SOURCE_MARKER" ]]; then
+    rm -rf -- "$managed_source"
+    echo "已删除远程安装源码目录: $managed_source"
+  else
+    echo "当前源码目录不是一键安装器管理的目录，已安全保留: $SCRIPT_DIR"
+  fi
+  echo "vpspc 创建的程序、配置、数据、日志和可选 Falco 组件已彻底清理。"
+}
+
 main() {
   case "${1:-install}" in
     install) install_app ;;
     configure) configure_app ;;
     status) status_app ;;
+    rollback) rollback_settings_app ;;
     uninstall) uninstall_app "${2:-}" ;;
+    destroy) destroy_app ;;
     *)
-      echo "用法: sudo bash install.sh [install|configure|status|uninstall [--purge]]"
+      echo "用法: sudo bash install.sh [install|configure|status|rollback|uninstall [--purge]|destroy]"
       exit 2
       ;;
   esac
