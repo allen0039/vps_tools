@@ -195,6 +195,83 @@ detect_auth_log() {
   fi
 }
 
+detect_service_read_access() {
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  python3 - "$CONFIG_FILE" <<'PY'
+import grp
+import json
+import os
+import stat
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    config = json.load(handle)
+
+paths = []
+for key in ("auth_logs", "falco_logs", "subscription_logs", "miaomiaowux_logs"):
+    value = config.get(key, [])
+    if isinstance(value, list):
+        paths.extend(item for item in value if isinstance(item, str))
+geoip = config.get("geoip", {})
+if isinstance(geoip, dict):
+    paths.extend(
+        value for value in (geoip.get("city_db"), geoip.get("asn_db"))
+        if isinstance(value, str)
+    )
+
+groups = set()
+needs_capability = [False]
+
+def group_name(gid):
+    try:
+        return grp.getgrgid(gid).gr_name
+    except KeyError:
+        return str(gid)
+
+def require_access(path, owner_bit, group_bit, other_bit):
+    try:
+        info = os.stat(path)
+    except OSError:
+        return
+    if info.st_uid == 0:
+        if not info.st_mode & owner_bit:
+            needs_capability[0] = True
+        return
+    if info.st_mode & other_bit:
+        return
+    if info.st_mode & group_bit:
+        if info.st_gid != 0:
+            groups.add(group_name(info.st_gid))
+        return
+    needs_capability[0] = True
+
+for configured in paths:
+    if not configured or not os.path.isabs(configured):
+        continue
+    resolved = os.path.realpath(configured)
+    current = os.path.dirname(resolved)
+    while current and current != "/":
+        require_access(current, stat.S_IXUSR, stat.S_IXGRP, stat.S_IXOTH)
+        current = os.path.dirname(current)
+    if os.path.exists(resolved):
+        require_access(resolved, stat.S_IRUSR, stat.S_IRGRP, stat.S_IROTH)
+
+journal = config.get("journal", {})
+if isinstance(journal, dict) and journal.get("enabled"):
+    try:
+        groups.add(grp.getgrnam("systemd-journal").gr_name)
+    except KeyError:
+        pass
+
+print(
+    " ".join(sorted(groups))
+    + "\t"
+    + ("yes" if needs_capability[0] else "no"),
+    end="",
+)
+PY
+}
+
 detect_host_timezone_offset() {
   local value
   value="$(date +%:z 2>/dev/null || true)"
@@ -996,20 +1073,45 @@ install_systemd_units() {
   local interval="$1"
   local state_dir="$2"
   local report_dir="$3"
+  local service_read_access supplementary_groups requires_dac_read_search
+  local supplementary_groups_directive capability_bounding_set_directive
+  service_read_access="$(detect_service_read_access)"
+  supplementary_groups="${service_read_access%%$'\t'*}"
+  requires_dac_read_search="${service_read_access#*$'\t'}"
+  supplementary_groups_directive=""
+  if [[ -n "$supplementary_groups" ]]; then
+    supplementary_groups_directive="SupplementaryGroups=$supplementary_groups"
+  fi
+  capability_bounding_set_directive="CapabilityBoundingSet="
+  if [[ "$requires_dac_read_search" == "yes" ]]; then
+    capability_bounding_set_directive="CapabilityBoundingSet=CAP_DAC_READ_SEARCH"
+  fi
   SERVICE_TEMPLATE="$SCRIPT_DIR/deploy/systemd/vps-audit.service" SERVICE_OUTPUT="$SYSTEMD_DIR/vps-audit.service" \
-  STATE_PATH="$state_dir" REPORT_PATH="$report_dir" python3 <<'PY'
+  STATE_PATH="$state_dir" REPORT_PATH="$report_dir" SUPPLEMENTARY_GROUPS_DIRECTIVE="$supplementary_groups_directive" \
+  CAPABILITY_BOUNDING_SET_DIRECTIVE="$capability_bounding_set_directive" python3 <<'PY'
 import os
 from pathlib import Path
 
 template = Path(os.environ["SERVICE_TEMPLATE"]).read_text(encoding="utf-8")
 template = template.replace("@STATE_DIR@", os.environ["STATE_PATH"])
 template = template.replace("@REPORT_DIR@", os.environ["REPORT_PATH"])
+template = template.replace("@SUPPLEMENTARY_GROUPS@", os.environ["SUPPLEMENTARY_GROUPS_DIRECTIVE"])
+template = template.replace("@CAPABILITY_BOUNDING_SET@", os.environ["CAPABILITY_BOUNDING_SET_DIRECTIVE"])
 Path(os.environ["SERVICE_OUTPUT"]).write_text(template, encoding="utf-8")
 PY
   chmod 0644 "$SYSTEMD_DIR/vps-audit.service"
   sed "s/@INTERVAL@/$interval/g" "$SCRIPT_DIR/deploy/systemd/vps-audit.timer" > "$SYSTEMD_DIR/vps-audit.timer"
   chmod 0644 "$SYSTEMD_DIR/vps-audit.timer"
   systemctl daemon-reload
+}
+
+run_initial_audit_and_enable_timer() {
+  echo
+  echo "执行首次巡查..."
+  if ! systemctl start vps-audit.service; then
+    journalctl -u vps-audit.service -n 30 --no-pager || true
+    die "首次巡查失败；定时器未启用，请检查以上日志"
+  fi
   systemctl enable --now vps-audit.timer
 }
 
@@ -1018,15 +1120,11 @@ install_app() {
   install_os_packages
   copy_application
   create_settings_snapshot
+  systemctl stop vps-audit.timer >/dev/null 2>&1 || true
   INTERVAL="5"
   write_runtime_config
   install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR"
-  echo
-  echo "执行首次巡查..."
-  if ! systemctl start vps-audit.service; then
-    journalctl -u vps-audit.service -n 30 --no-pager || true
-    die "首次巡查失败，请检查以上日志"
-  fi
+  run_initial_audit_and_enable_timer
   if [[ "$(existing_config_value telegram.enabled no)" == "yes" ]] && ask_yes_no "发送 Telegram 测试消息" "yes"; then
     "$INSTALL_ROOT/venv/bin/vps-audit-runner" --config "$CONFIG_FILE" test-telegram
   fi
@@ -1042,10 +1140,11 @@ configure_app() {
   need_root
   [[ -x "$INSTALL_ROOT/venv/bin/vps-audit-runner" ]] || die "尚未安装"
   create_settings_snapshot
+  systemctl stop vps-audit.timer >/dev/null 2>&1 || true
   INTERVAL="5"
   write_runtime_config
   install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR"
-  systemctl start vps-audit.service
+  run_initial_audit_and_enable_timer
   echo "配置已更新。"
 }
 

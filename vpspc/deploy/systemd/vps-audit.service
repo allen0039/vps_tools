@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=oneshot
 User=root
 Group=root
+@SUPPLEMENTARY_GROUPS@
 UMask=0077
 ExecStart=/opt/vps-audit/venv/bin/vps-audit-runner --config /etc/vps-audit/config.json run
 TimeoutStartSec=180
@@ -18,7 +19,7 @@ ProtectHome=yes
 ProtectSystem=strict
 ReadOnlyPaths=/etc/vps-audit /var/log
 ReadWritePaths=@STATE_DIR@ @REPORT_DIR@
-CapabilityBoundingSet=
+@CAPABILITY_BOUNDING_SET@
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

@@ -1,5 +1,7 @@
 import os
+import grp
 import json
+import pwd
 import stat
 import subprocess
 import tarfile
@@ -174,10 +176,15 @@ class InstallerTests(unittest.TestCase):
             systemd_dir.mkdir()
             mock_bin.mkdir()
             systemctl = mock_bin / "systemctl"
-            systemctl.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            systemctl_log = root / "systemctl.log"
+            systemctl.write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$*" >> "$MOCK_SYSTEMCTL_LOG"\nexit 0\n',
+                encoding="utf-8",
+            )
             systemctl.chmod(0o755)
             env = dict(os.environ)
             env["PATH"] = f"{mock_bin}:{env['PATH']}"
+            env["MOCK_SYSTEMCTL_LOG"] = str(systemctl_log)
             completed = run_bash(
                 f'SYSTEMD_DIR="{systemd_dir}"\n'
                 'install_systemd_units 7 "/data/vps-audit" "/data/vps-audit/reports"',
@@ -192,7 +199,117 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertNotIn("@STATE_DIR@", service)
             self.assertNotIn("@REPORT_DIR@", service)
+            self.assertNotIn("@SUPPLEMENTARY_GROUPS@", service)
+            self.assertNotIn("@CAPABILITY_BOUNDING_SET@", service)
             self.assertNotIn("@INTERVAL@", timer)
+            self.assertNotIn("enable", systemctl_log.read_text(encoding="utf-8"))
+
+    def test_systemd_unit_adds_only_required_log_read_group(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            root.chmod(0o755)
+            systemd_dir = root / "systemd"
+            mock_bin = root / "bin"
+            systemd_dir.mkdir()
+            mock_bin.mkdir()
+            (mock_bin / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (mock_bin / "systemctl").chmod(0o755)
+            auth_log = root / "auth.log"
+            auth_log.write_text("fixture\n", encoding="utf-8")
+            auth_log.chmod(0o640)
+            if os.geteuid() == 0:
+                account = next(item for item in pwd.getpwall() if 0 < item.pw_uid < 2**31)
+                group = next(item for item in grp.getgrall() if 0 < item.gr_gid < 2**31)
+                os.chown(auth_log, account.pw_uid, group.gr_gid)
+            else:
+                available_gid = next(
+                    (gid for gid in os.getgroups() if 0 < gid < 2**31),
+                    None,
+                )
+                if available_gid is None:
+                    self.skipTest("no non-root supplementary group available")
+                os.chown(auth_log, -1, available_gid)
+            expected_group = grp.getgrgid(auth_log.stat().st_gid).gr_name
+            config = root / "config.json"
+            config.write_text(json.dumps({"auth_logs": [str(auth_log)]}), encoding="utf-8")
+            env = dict(os.environ)
+            env["PATH"] = f"{mock_bin}:{env['PATH']}"
+            completed = run_bash(
+                f'SYSTEMD_DIR="{systemd_dir}"\n'
+                f'CONFIG_FILE="{config}"\n'
+                'install_systemd_units 5 "/data/vps-audit" "/data/vps-audit/reports"',
+                env=env,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            service = (systemd_dir / "vps-audit.service").read_text(encoding="utf-8")
+            self.assertIn(f"SupplementaryGroups={expected_group}", service)
+            self.assertIn("CapabilityBoundingSet=\n", service)
+
+    def test_systemd_unit_uses_read_only_capability_for_owner_only_app_log(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            systemd_dir = root / "systemd"
+            mock_bin = root / "bin"
+            systemd_dir.mkdir()
+            mock_bin.mkdir()
+            (mock_bin / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (mock_bin / "systemctl").chmod(0o755)
+            app_log = root / "mmwx.log"
+            app_log.write_text("fixture\n", encoding="utf-8")
+            app_log.chmod(0o600)
+            if os.geteuid() == 0:
+                account = next(item for item in pwd.getpwall() if 0 < item.pw_uid < 2**31)
+                group = next(item for item in grp.getgrall() if 0 < item.gr_gid < 2**31)
+                os.chown(app_log, account.pw_uid, group.gr_gid)
+            config = root / "config.json"
+            config.write_text(
+                json.dumps({"miaomiaowux_logs": [str(app_log)]}),
+                encoding="utf-8",
+            )
+            env = dict(os.environ)
+            env["PATH"] = f"{mock_bin}:{env['PATH']}"
+            completed = run_bash(
+                f'SYSTEMD_DIR="{systemd_dir}"\n'
+                f'CONFIG_FILE="{config}"\n'
+                'install_systemd_units 5 "/data/vps-audit" "/data/vps-audit/reports"',
+                env=env,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            service = (systemd_dir / "vps-audit.service").read_text(encoding="utf-8")
+            self.assertIn("CapabilityBoundingSet=CAP_DAC_READ_SEARCH", service)
+
+    def test_timer_is_enabled_only_after_initial_audit_succeeds(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mock_bin = root / "bin"
+            mock_bin.mkdir()
+            systemctl_log = root / "systemctl.log"
+            (mock_bin / "systemctl").write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$*" >> "$MOCK_SYSTEMCTL_LOG"\n'
+                'if [ "${FAIL_AUDIT:-0}" = "1" ] && [ "${1:-}" = "start" ]; then exit 1; fi\n'
+                'exit 0\n',
+                encoding="utf-8",
+            )
+            (mock_bin / "journalctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            for executable in mock_bin.iterdir():
+                executable.chmod(0o755)
+            env = dict(os.environ)
+            env["PATH"] = f"{mock_bin}:{env['PATH']}"
+            env["MOCK_SYSTEMCTL_LOG"] = str(systemctl_log)
+
+            completed = run_bash("run_initial_audit_and_enable_timer", env=env)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            calls = systemctl_log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(calls, ["start vps-audit.service", "enable --now vps-audit.timer"])
+
+            systemctl_log.write_text("", encoding="utf-8")
+            env["FAIL_AUDIT"] = "1"
+            completed = run_bash("run_initial_audit_and_enable_timer", env=env)
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertEqual(
+                systemctl_log.read_text(encoding="utf-8").splitlines(),
+                ["start vps-audit.service"],
+            )
 
     def test_noninteractive_configuration_keeps_custom_storage_defaults(self):
         with tempfile.TemporaryDirectory() as temporary:

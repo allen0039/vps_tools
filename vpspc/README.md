@@ -81,7 +81,7 @@ sudo ./install.sh destroy
 
 运行架构如下：SSH/Falco 日志由增量采集器读取并保存在本机，规则引擎每隔几分钟生成报告。只有首次出现或超过冷却时间的告警才会触发可选 AI 复核和 Telegram 推送。Telegram 采用出站 Bot API，不需要给 VPS 开放入站端口。
 
-所有 systemd 任务均使用 root 读取安全日志，但启用了只读系统目录、空 capability 集、私有临时目录和最小可写路径。Token/API Key 位于 `/etc/vps-audit/`；状态和报告默认位于 `/var/lib/vps-audit/`，也可使用安装时指定的目录，权限均为 root-only。
+所有 systemd 任务均使用 root 读取安全日志，并启用只读系统目录、私有临时目录和最小可写路径。安装器会根据已配置日志的实际权限，仅补充读取所需的日志组（例如 Ubuntu 的 `adm`；启用 journald 时为 `systemd-journal`）。capability 集默认为空；只有遇到 `0600` 且属于应用用户的日志时，才保留只读的 `CAP_DAC_READ_SEARCH`，不会授予写入、改属主或其他管理 capability。首次巡查成功后才启用定时器，失败时不会留下周期性重试任务。Token/API Key 位于 `/etc/vps-audit/`；状态和报告默认位于 `/var/lib/vps-audit/`，也可使用安装时指定的目录，权限均为 root-only。
 
 ## Telegram 准备
 

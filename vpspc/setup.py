@@ -3,7 +3,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="vps-user-audit",
-    version="0.3.0",
+    version="0.3.1",
     description="Evidence-first VPS user behavior audit",
     packages=find_packages(include=["vps_audit", "vps_audit.*"]),
     python_requires=">=3.9",
