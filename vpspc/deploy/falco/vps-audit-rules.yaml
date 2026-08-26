@@ -1,0 +1,23 @@
+- rule: VPS Audit User Process Start
+  desc: Record processes started by interactive Linux users for VPS account auditing
+  condition: spawned_process and user.uid >= 1000 and user.uid != 65534
+  output: >
+    VPS user process start
+    (user=%user.name uid=%user.uid evt_type=%evt.type pid=%proc.pid
+    executable=%proc.exepath command=%proc.cmdline parent=%proc.pexepath)
+  priority: NOTICE
+  tags: [vps_audit, process]
+
+- rule: VPS Audit User Outbound Connection
+  desc: Record outbound connections from common automation runtimes and browsers
+  condition: >
+    evt.type=connect and evt.dir=< and fd.type in (ipv4, ipv6)
+    and user.uid >= 1000 and user.uid != 65534
+    and proc.name in (python, python3, node, chrome, chromium, firefox,
+    chromedriver, geckodriver)
+  output: >
+    VPS user outbound connection
+    (user=%user.name uid=%user.uid evt_type=%evt.type pid=%proc.pid
+    executable=%proc.exepath remote_ip=%fd.rip remote_port=%fd.rport)
+  priority: NOTICE
+  tags: [vps_audit, network]

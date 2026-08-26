@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+.venv/
+out/
+audit-report.json
+audit-report.md
+deploy/*-test-config.json
+*.token
+*.key
+*.pem
+*.log
+!examples/*.log

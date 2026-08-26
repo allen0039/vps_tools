@@ -1,0 +1,7 @@
+# Recent Falco packages may load /etc/falco/config.d/*.yaml automatically.
+# Verify your package documentation before installing this drop-in.
+json_output: true
+file_output:
+  enabled: true
+  keep_alive: false
+  filename: /var/log/falco/events.json

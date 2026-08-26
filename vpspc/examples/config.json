@@ -1,0 +1,13 @@
+{
+  "thresholds": {
+    "multi_ip_count": 4,
+    "multi_asn_count": 3,
+    "failed_login_count": 8,
+    "network_burst_unique_destinations": 5
+  },
+  "trusted": {
+    "users": ["backup-service"],
+    "ips": ["203.0.113.10"],
+    "asns": [64500]
+  }
+}

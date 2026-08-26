@@ -1,0 +1,45 @@
+{
+  "auth_logs": ["/var/log/auth.log"],
+  "auth_timezone": "+08:00",
+  "journal": {
+    "enabled": false,
+    "units": ["ssh.service", "sshd.service"],
+    "initial_since_hours": 24
+  },
+  "falco_logs": ["/var/log/falco/events.json"],
+  "subscription_logs": ["/var/log/miaomiaowu/subscription-access.jsonl"],
+  "miaomiaowux_logs": ["/opt/1panel/docker/compose/miaomiaowux/data/logs/mmwx.log"],
+  "miaomiaowux_timezone": "+00:00",
+  "state_dir": "/var/lib/vps-audit",
+  "report_dir": "/var/lib/vps-audit/reports",
+  "scan_interval_minutes": 5,
+  "retention_days": 7,
+  "rules": {
+    "thresholds": {
+      "subscription_window_minutes": 15,
+      "subscription_ip_count": 10,
+      "subscription_region_count": 3,
+      "subscription_city_count": 5,
+      "subscription_asn_count": 4,
+      "impossible_travel_min_km": 500,
+      "impossible_travel_kmh": 900
+    }
+  },
+  "telegram": {
+    "enabled": true,
+    "token_file": "/etc/vps-audit/telegram.token",
+    "chat_id": "123456789",
+    "minimum_severity": "high",
+    "cooldown_hours": 6,
+    "include_source_ip": false
+  },
+  "openai_review": {
+    "enabled": false,
+    "api_key_file": "/etc/vps-audit/openai.key",
+    "model": ""
+  },
+  "geoip": {
+    "city_db": "/var/lib/GeoIP/GeoLite2-City.mmdb",
+    "asn_db": "/var/lib/GeoIP/GeoLite2-ASN.mmdb"
+  }
+}

@@ -8,6 +8,17 @@
 | --- | --- | --- |
 | `restart-mmw-agent` | 完整重启并验证 `mmw-agent.service`，显示 PID、内存和 TCP 连接变化 | [查看说明](restart-mmw-agent/README.md) |
 | `safe-ssh-port` | 安全切换 OpenSSH 单端口，并管理端口、IP 与国家黑白名单 | [查看说明](safe-ssh-port/README.md) |
+| `vpspc` | 审计 SSH、订阅访问及可选 Falco 行为，按规则向 Telegram 预警，不自动封禁 | [查看说明](vpspc/README.md) |
+
+## vpspc 快速使用
+
+下载并执行 systemd 交互安装器：
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh
+```
+
+当前提供 GitHub 拉取部署方式，Docker 部署将在后续版本增加。完整功能、数据目录、保留时间、Telegram 和妙妙屋 X 日志接入说明请查看 [vpspc 文档](vpspc/README.md)。
 
 ## safe-ssh-port 快速使用
 

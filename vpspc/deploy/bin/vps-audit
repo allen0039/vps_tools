@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+cd /opt/vps-audit
+exec /opt/vps-audit/venv/bin/python -m vps_audit.cli "$@"

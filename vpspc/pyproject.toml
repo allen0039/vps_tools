@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vps-user-audit"
+version = "0.1.0"
+description = "Evidence-first VPS user behavior audit"
+requires-python = ">=3.9"
+
+[project.optional-dependencies]
+geoip = ["geoip2>=4,<6"]
+
+[project.scripts]
+vps-audit = "vps_audit.cli:main"
+vps-audit-runner = "vps_audit.runtime:main"
+
+[tool.setuptools.packages.find]
+include = ["vps_audit*"]
