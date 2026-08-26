@@ -28,6 +28,53 @@ def run_bash(script: str, env=None) -> subprocess.CompletedProcess:
 
 
 class InstallerTests(unittest.TestCase):
+    def test_geoip_database_is_auto_detected_in_state_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            geoip = state / "geoip"
+            geoip.mkdir(parents=True)
+            city = geoip / "GeoLite2-City.mmdb"
+            city.write_bytes(b"fixture")
+            completed = run_bash(
+                f'detect_geoip_database GeoLite2-City.mmdb "" "{state}"'
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout, str(city))
+
+    def test_missing_geoip_decline_skips_without_path_prompt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            completed = run_bash(
+                'detect_geoip_database() { :; }\n'
+                'ask_yes_no() { return 1; }\n'
+                f'configure_geoip_databases "{state}"'
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout, "\t")
+            self.assertIn("已跳过 GeoIP 安装", completed.stderr)
+            self.assertNotIn("MMDB 路径", completed.stderr)
+
+    def test_missing_geoip_accept_installs_both_databases(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            destination = state / "geoip"
+            completed = run_bash(
+                'detect_geoip_database() { :; }\n'
+                'ask_yes_no() { return 0; }\n'
+                'install_maxmind_geoip_databases() {\n'
+                '  mkdir -p "$1"\n'
+                '  : > "$1/GeoLite2-City.mmdb"\n'
+                '  : > "$1/GeoLite2-ASN.mmdb"\n'
+                '}\n'
+                f'configure_geoip_databases "{state}"'
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                completed.stdout,
+                f"{destination / 'GeoLite2-City.mmdb'}\t{destination / 'GeoLite2-ASN.mmdb'}",
+            )
+            self.assertIn("已安装", completed.stderr)
+
     def test_mmwx_timezone_is_inferred_independently_from_host_timezone(self):
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / "mmwx.log"

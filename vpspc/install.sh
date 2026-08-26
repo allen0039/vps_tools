@@ -195,6 +195,82 @@ detect_auth_log() {
   fi
 }
 
+detect_geoip_database() {
+  local filename="$1"
+  local configured="${2:-}"
+  local state_dir="${3:-$STATE_DIR}"
+  local candidate root
+  for candidate in \
+    "$configured" \
+    "$state_dir/geoip/$filename" \
+    "/usr/share/GeoIP/$filename" \
+    "/usr/local/share/GeoIP/$filename" \
+    "/var/lib/GeoIP/$filename" \
+    "/opt/GeoIP/$filename"; do
+    if [[ -n "$candidate" && -f "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return
+    fi
+  done
+  for root in /usr/share/GeoIP /usr/local/share/GeoIP /var/lib/GeoIP /opt/GeoIP; do
+    [[ -d "$root" ]] || continue
+    candidate="$(find "$root" -maxdepth 3 -type f -name "$filename" -print -quit 2>/dev/null || true)"
+    if [[ -n "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return
+    fi
+  done
+}
+
+install_maxmind_geoip_databases() {
+  local destination="$1"
+  local license_key
+  license_key="$(ask_secret "MaxMind License Key（仅用于本次官方下载，不保存）" "")"
+  [[ -n "$license_key" ]] || die "自动安装 GeoLite2 需要 MaxMind License Key"
+  install -d -m 0700 "$destination"
+  if ! printf '%s' "$license_key" \
+    | python3 "$SCRIPT_DIR/vps_audit/maxmind_install.py" --destination "$destination" >&2; then
+    license_key=""
+    die "GeoLite2 自动安装失败；未修改已有数据库"
+  fi
+  license_key=""
+}
+
+configure_geoip_databases() {
+  local state_dir="$1"
+  local city_db asn_db configured_city configured_asn destination tab
+  configured_city="$(existing_config_value geoip.city_db "")"
+  configured_asn="$(existing_config_value geoip.asn_db "")"
+  city_db="$(detect_geoip_database GeoLite2-City.mmdb "$configured_city" "$state_dir")"
+  asn_db="$(detect_geoip_database GeoLite2-ASN.mmdb "$configured_asn" "$state_dir")"
+
+  echo >&2
+  echo "MaxMind GeoIP 地理位置数据库" >&2
+  if [[ -n "$city_db" ]]; then
+    echo "City 数据库：已自动检测 $city_db" >&2
+  fi
+  if [[ -n "$asn_db" ]]; then
+    echo "ASN 数据库：已自动检测 $asn_db" >&2
+  fi
+  if [[ -z "$city_db" || -z "$asn_db" ]]; then
+    echo "未检测到完整的 GeoLite2 City/ASN 数据库。它用于离线识别国家、省市、距离和运营商。" >&2
+    echo "自动安装需要先在 MaxMind 创建免费账号并生成 License Key。" >&2
+    if ask_yes_no "是否从 MaxMind 官方自动安装/补全 GeoLite2 数据库" "no"; then
+      destination="$state_dir/geoip"
+      install_maxmind_geoip_databases "$destination"
+      city_db="$destination/GeoLite2-City.mmdb"
+      asn_db="$destination/GeoLite2-ASN.mmdb"
+      echo "GeoLite2 City/ASN 已安装到 $destination" >&2
+    elif [[ -z "$city_db" && -z "$asn_db" ]]; then
+      echo "已跳过 GeoIP 安装；IP 数量预警仍可用，异地风险识别将缺少省市和 ASN 信息。" >&2
+    else
+      echo "已跳过 GeoIP 补全；继续使用已检测到的数据库。" >&2
+    fi
+  fi
+  tab="$(printf '\t')"
+  printf '%s%s%s' "$city_db" "$tab" "$asn_db"
+}
+
 detect_service_read_access() {
   [[ -f "$CONFIG_FILE" ]] || return 0
   python3 - "$CONFIG_FILE" <<'PY'
@@ -797,7 +873,7 @@ write_runtime_config() {
   local auth_log auth_timezone falco_log subscription_log miaomiaowux_log miaomiaowux_timezone retention interval
   local state_dir report_dir
   local journal_enabled telegram_enabled telegram_chat min_severity cooldown include_ip
-  local ai_enabled ai_model city_db asn_db install_geoip
+  local ai_enabled ai_model city_db asn_db install_geoip geoip_selection tab
   local sub_window sub_ip_count sub_region_count sub_city_count sub_asn_count travel_distance travel_speed
   local falco_install_requested falco_skipped
 
@@ -958,17 +1034,12 @@ write_runtime_config() {
   city_db=""
   asn_db=""
   install_geoip="false"
-  local detected_city detected_asn
-  detected_city="$(existing_config_value geoip.city_db /var/lib/GeoIP/GeoLite2-City.mmdb)"
-  detected_asn="$(existing_config_value geoip.asn_db /var/lib/GeoIP/GeoLite2-ASN.mmdb)"
-  [[ -f "$detected_city" ]] || detected_city=""
-  [[ -f "$detected_asn" ]] || detected_asn=""
-  if [[ -n "$detected_city" || -n "$detected_asn" ]] || ask_yes_no "配置本地 MaxMind GeoIP 数据库" "no"; then
-    city_db="$(ask "GeoLite2 City MMDB 路径，留空跳过" "$detected_city")"
-    asn_db="$(ask "GeoLite2 ASN MMDB 路径，留空跳过" "$detected_asn")"
-    if [[ -n "$city_db" || -n "$asn_db" ]]; then
-      install_geoip="true"
-    fi
+  geoip_selection="$(configure_geoip_databases "$state_dir")"
+  tab="$(printf '\t')"
+  city_db="${geoip_selection%%"$tab"*}"
+  asn_db="${geoip_selection#*"$tab"}"
+  if [[ -n "$city_db" || -n "$asn_db" ]]; then
+    install_geoip="true"
   fi
 
   ai_enabled="false"

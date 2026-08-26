@@ -51,7 +51,7 @@ sudo ./install.sh install
 - 审计数据目录、报告目录、数据保留时间、扫描间隔和可选 Falco JSON 日志；
 - 检测 Falco；未安装时解释用途并询问是否使用 modern eBPF 自动安装；
 - Telegram Bot Token、Chat ID、最低推送等级和冷却时间；
-- 可选的本地 MaxMind City/ASN 数据库；
+- 自动检测常见位置的本地 MaxMind City/ASN 数据库；未检测到时可选择从官方安装，默认跳过；
 - 可选 OpenAI 复核、API Key 和明确的模型 ID。
 
 安装完成后使用：
@@ -234,7 +234,11 @@ Falco 进程日志可能包含命令行敏感参数，因此只保存在 VPS 的
 
 ## 本地 IP 情报
 
-建议使用本地 MaxMind MMDB，不调用公开 IP 查询接口。安装器检测到 City/ASN 数据库后会安装可选的 `geoip2` 读取依赖。免费 City/ASN 可以支持城市、不可能旅行和 ASN 切换；要区分家庭宽带、移动网络、VPN、Tor 和机房，还需要 Connection Type、Anonymous IP 或你自己的 IP 情报源。
+建议使用本地 MaxMind MMDB，不调用公开 IP 查询接口。安装器会搜索旧配置、审计数据目录及 `/usr/share/GeoIP`、`/usr/local/share/GeoIP`、`/var/lib/GeoIP`、`/opt/GeoIP`；找到后自动使用。未找到完整 City/ASN 时会询问是否从 MaxMind 官方安装，默认 `no`，拒绝后直接跳过且不影响 IP 数量预警。
+
+官方自动安装需要先注册免费的 [MaxMind GeoLite2 账号](https://www.maxmind.com/en/geolite2/signup) 并生成 License Key。License Key 仅通过标准输入用于本次下载，不会写入配置、日志或命令行参数。City 和 ASN 数据库下载到所选审计数据目录的 `geoip/` 子目录，文件为 `0600 root:root`；下载器会限制文件大小、校验 MaxMind 元数据，并在两份数据库均成功后替换。彻底卸载时它们会随带管理标记的审计数据目录删除，普通卸载则保留。
+
+安装器检测到或安装 City/ASN 数据库后会安装可选的 `geoip2` 读取依赖。免费 City/ASN 可以支持城市、不可能旅行和 ASN 切换；要区分家庭宽带、移动网络、VPN、Tor 和机房，还需要 Connection Type、Anonymous IP 或你自己的 IP 情报源。
 
 ## 推荐上线流程
 
