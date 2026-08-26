@@ -5,6 +5,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -25,6 +26,27 @@ def run_bash(script: str, env=None) -> subprocess.CompletedProcess:
 
 
 class InstallerTests(unittest.TestCase):
+    def test_mmwx_timezone_is_inferred_independently_from_host_timezone(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "mmwx.log"
+            log.write_text(
+                'time="2026-08-26 20:00:00" level="INFO " msg="用户获取订阅" username=test ip=192.0.2.1\n',
+                encoding="utf-8",
+            )
+            modified = datetime(2026, 8, 26, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+            os.utime(log, (modified, modified))
+            completed = run_bash(f'detect_miaomiaowux_timezone "{log}" ""')
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout, "+08:00")
+
+    def test_configured_native_mmwx_log_is_auto_detected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "mmwx.log"
+            log.write_text("fixture\n", encoding="utf-8")
+            completed = run_bash(f'detect_miaomiaowux_log "{log}"')
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout, str(log))
+
     def test_remote_installer_has_valid_shell_syntax(self):
         completed = subprocess.run(
             ["bash", "-n", str(REMOTE_INSTALLER)],

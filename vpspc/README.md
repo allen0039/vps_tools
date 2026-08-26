@@ -44,9 +44,10 @@ chmod +x install.sh
 sudo ./install.sh install
 ```
 
-安装器会依次询问：
+安装器会先自动检测环境，再只询问无法确定或需要管理员选择的项目：
 
-- SSH 日志来源和时区；找不到 `auth.log/secure` 时自动使用 journald 游标；
+- SSH 日志来源和主机时区；找不到 `auth.log/secure` 时自动使用 journald 游标；
+- 妙妙屋 X 原生 `mmwx.log`、Docker 数据挂载和独立的应用日志时区；
 - 审计数据目录、报告目录、数据保留时间、扫描间隔和可选 Falco JSON 日志；
 - 检测 Falco；未安装时解释用途并询问是否使用 modern eBPF 自动安装；
 - Telegram Bot Token、Chat ID、最低推送等级和冷却时间；
@@ -125,7 +126,11 @@ Telegram 默认只展示 IP 前两段、地理位置、ASN、规则和建议，�
 /opt/1panel/docker/compose/miaomiaowux/data/logs/mmwx.log
 ```
 
-安装器会自动检测这个路径并询问日志时区。解析器只读取 `time`、`username` 和 `ip`，忽略其他应用日志，不修改妙妙屋 X 配置或访问权限。
+安装器会依次检查现有配置、常见 1Panel 路径、妙妙屋 X Docker `/app/data` 挂载，以及限定范围内的 `mmwx.log`。检测成功后直接使用原生日志，并自动跳过额外 JSONL 输入。
+
+`mmwx.log` 时区不会盲目沿用宿主机：安装器会比较末尾日志时间与文件写入时间，并以容器当前时区作为后备。例如宿主机是 `+08:00`、容器使用 UTC 时，会分别识别为主机 `+08:00` 和应用日志 `+00:00`。只有无法定位原生日志时才询问本地 JSONL 或手动日志路径。
+
+“订阅访问 JSONL”必须是 VPS 上的本地文件，不是用户订阅 URL。粘贴 `http://` 或 `https://` 地址会被安全忽略，巡查器不会请求、下载或保存订阅内容。解析器只读取 `time`、`username` 和 `ip`，忽略其他应用日志，不修改妙妙屋 X 配置或访问权限。
 
 地理字段可以由应用直接写入：
 

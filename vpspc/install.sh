@@ -195,6 +195,130 @@ detect_auth_log() {
   fi
 }
 
+detect_host_timezone_offset() {
+  local value
+  value="$(date +%:z 2>/dev/null || true)"
+  if [[ "$value" =~ ^[+-][0-9]{2}:[0-9]{2}$ ]]; then
+    printf '%s' "$value"
+    return
+  fi
+  python3 <<'PY'
+from datetime import datetime
+
+value = datetime.now().astimezone().strftime("%z")
+print(value[:3] + ":" + value[3:], end="")
+PY
+}
+
+detect_miaomiaowux_log() {
+  local configured="${1:-}"
+  local candidate mount_source
+  if [[ -n "$configured" && -f "$configured" ]]; then
+    printf '%s' "$configured"
+    return
+  fi
+  for candidate in \
+    /opt/1panel/docker/compose/miaomiaowux/data/logs/mmwx.log \
+    /opt/miaomiaowux/data/logs/mmwx.log \
+    /var/lib/miaomiaowux/data/logs/mmwx.log; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return
+    fi
+  done
+  if command -v docker >/dev/null 2>&1 \
+    && docker inspect miaomiaowux >/dev/null 2>&1; then
+    mount_source="$(docker inspect miaomiaowux \
+      --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{println .Source}}{{end}}{{end}}' \
+      2>/dev/null | head -n 1)"
+    candidate="${mount_source%/}/logs/mmwx.log"
+    if [[ -n "$mount_source" && -f "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return
+    fi
+  fi
+  if [[ -d /opt/1panel/docker/compose ]]; then
+    candidate="$(find /opt/1panel/docker/compose -maxdepth 5 -type f -name mmwx.log -print -quit 2>/dev/null || true)"
+    [[ -n "$candidate" ]] && printf '%s' "$candidate"
+  fi
+}
+
+detect_subscription_jsonl() {
+  local configured="${1:-}"
+  local candidate
+  if [[ -n "$configured" && -f "$configured" ]]; then
+    printf '%s' "$configured"
+    return
+  fi
+  for candidate in \
+    /var/log/miaomiaowu/subscription-access.jsonl \
+    /var/log/miaomiaowux/subscription-access.jsonl; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return
+    fi
+  done
+}
+
+infer_log_timezone_offset() {
+  local log_path="$1"
+  LOG_TIMEZONE_PATH="$log_path" python3 <<'PY'
+import os
+import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+path = Path(os.environ["LOG_TIMEZONE_PATH"])
+try:
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        handle.seek(max(0, size - 262_144))
+        text = handle.read().decode("utf-8", errors="replace")
+    matches = re.findall(r'time="(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"', text)
+    naive = datetime.strptime(matches[-1], "%Y-%m-%d %H:%M:%S")
+    modified = path.stat().st_mtime
+except (OSError, ValueError, IndexError):
+    raise SystemExit(1)
+
+best = None
+for minutes in range(-12 * 60, 14 * 60 + 1, 15):
+    observed = naive.replace(tzinfo=timezone(timedelta(minutes=minutes))).timestamp()
+    difference = abs(modified - observed)
+    if best is None or difference < best[0]:
+        best = (difference, minutes)
+if best is None or best[0] > 900:
+    raise SystemExit(1)
+minutes = best[1]
+sign = "+" if minutes >= 0 else "-"
+hours, remainder = divmod(abs(minutes), 60)
+print(f"{sign}{hours:02d}:{remainder:02d}", end="")
+PY
+}
+
+detect_miaomiaowux_timezone() {
+  local log_path="$1"
+  local configured="${2:-}"
+  local value
+  value="$(infer_log_timezone_offset "$log_path" 2>/dev/null || true)"
+  if [[ "$value" =~ ^[+-][0-9]{2}:[0-9]{2}$ ]]; then
+    printf '%s' "$value"
+    return
+  fi
+  if command -v docker >/dev/null 2>&1 \
+    && docker inspect miaomiaowux >/dev/null 2>&1; then
+    value="$(docker exec miaomiaowux date +%:z 2>/dev/null || true)"
+    if [[ "$value" =~ ^[+-][0-9]{2}:[0-9]{2}$ ]]; then
+      printf '%s' "$value"
+      return
+    fi
+  fi
+  if [[ "$configured" =~ ^[+-][0-9]{2}:[0-9]{2}$ ]]; then
+    printf '%s' "$configured"
+    return
+  fi
+  detect_host_timezone_offset
+}
+
 copy_application() {
   install -d -m 0755 "$INSTALL_ROOT"
   cp -a "$SCRIPT_DIR/vps_audit" "$INSTALL_ROOT/"
@@ -601,18 +725,16 @@ write_runtime_config() {
   local falco_install_requested falco_skipped
 
   auth_default="$(existing_config_value auth_logs "$(detect_auth_log)")"
-  timezone_default="$(existing_config_value auth_timezone "$(date +%:z 2>/dev/null || echo +00:00)")"
+  timezone_default="$(existing_config_value auth_timezone "$(detect_host_timezone_offset)")"
   [[ "$timezone_default" =~ ^[+-][0-9]{2}:[0-9]{2}$ ]] || timezone_default="+00:00"
   falco_default=""
   [[ -f "$FALCO_LOG_FILE" ]] && falco_default="$FALCO_LOG_FILE"
   [[ -f /var/log/falco/events.json ]] && falco_default="/var/log/falco/events.json"
   falco_default="$(existing_config_value falco_logs "$falco_default")"
   local subscription_default
-  subscription_default="$(existing_config_value subscription_logs "")"
+  subscription_default="$(detect_subscription_jsonl "$(existing_config_value subscription_logs "")")"
   local miaomiaowux_default
-  miaomiaowux_default="$(existing_config_value miaomiaowux_logs "")"
-  [[ -f /opt/1panel/docker/compose/miaomiaowux/data/logs/mmwx.log ]] \
-    && miaomiaowux_default="/opt/1panel/docker/compose/miaomiaowux/data/logs/mmwx.log"
+  miaomiaowux_default="$(detect_miaomiaowux_log "$(existing_config_value miaomiaowux_logs "")")"
 
   echo
   echo "配置本地审计数据存储"
@@ -647,22 +769,55 @@ write_runtime_config() {
 
   echo
   echo "配置日志与巡查周期"
-  auth_log="$(ask "SSH 登录日志路径（留空自动读取 journald）" "$auth_default")"
   journal_enabled="false"
-  [[ -n "$auth_log" ]] || journal_enabled="true"
-  auth_timezone="$(ask "日志时区偏移" "$timezone_default")"
+  if [[ -n "$auth_default" ]]; then
+    auth_log="$auth_default"
+    echo "SSH 登录来源：已自动检测文件 $auth_log"
+  else
+    auth_log=""
+    journal_enabled="true"
+    echo "SSH 登录来源：未发现 auth.log/secure，自动使用 journald"
+  fi
+  auth_timezone="$timezone_default"
+  echo "SSH/主机日志时区：已自动检测 $auth_timezone"
   interval="$(ask "巡查间隔（分钟）" "$(existing_config_value scan_interval_minutes 5)")"
   if [[ "$falco_install_requested" == "true" ]]; then
     falco_log="$FALCO_LOG_FILE"
     echo "Falco JSON 日志路径 [$falco_log]"
   elif [[ "$falco_skipped" == "true" ]]; then
     falco_log=""
+  elif [[ -n "$falco_default" && -f "$falco_default" ]]; then
+    falco_log="$falco_default"
+    echo "Falco JSON 日志：已自动检测 $falco_log"
   else
     falco_log="$(ask "Falco JSON 日志路径，留空则不审计进程/网络行为" "$falco_default")"
   fi
-  subscription_log="$(ask "妙妙屋 X 订阅访问 JSONL 路径，留空则不采集" "$subscription_default")"
-  miaomiaowux_log="$(ask "妙妙屋 X 原生 mmwx.log 路径，留空则不采集" "$miaomiaowux_default")"
-  miaomiaowux_timezone="$(ask "mmwx.log 时区偏移" "$(existing_config_value miaomiaowux_timezone +00:00)")"
+  if [[ -n "$miaomiaowux_default" ]]; then
+    miaomiaowux_log="$miaomiaowux_default"
+    subscription_log=""
+    miaomiaowux_timezone="$(detect_miaomiaowux_timezone "$miaomiaowux_log" "$(existing_config_value miaomiaowux_timezone "")")"
+    echo "妙妙屋 X 日志：已自动检测原生日志 $miaomiaowux_log"
+    echo "mmwx.log 时区：已根据现有配置、日志时间或容器时间自动检测 $miaomiaowux_timezone"
+    echo "已跳过额外 JSONL；这里不需要填写订阅 URL。"
+  else
+    if [[ -n "$subscription_default" ]]; then
+      subscription_log="$subscription_default"
+      echo "妙妙屋 X JSONL：已自动检测 $subscription_log"
+    else
+      subscription_log="$(ask "妙妙屋 X 本地订阅访问 JSONL 文件，留空则不采集" "")"
+    fi
+    if [[ "$subscription_log" =~ ^https?:// ]]; then
+      echo "提示: 已忽略订阅 URL；该项目只读取本地日志文件，不会请求或保存订阅内容。" >&2
+      subscription_log=""
+    fi
+    miaomiaowux_log="$(ask "未自动发现 mmwx.log；如有本地文件请输入绝对路径，留空跳过" "")"
+    if [[ -n "$miaomiaowux_log" ]]; then
+      miaomiaowux_timezone="$(detect_miaomiaowux_timezone "$miaomiaowux_log" "")"
+      echo "mmwx.log 时区：已自动检测 $miaomiaowux_timezone"
+    else
+      miaomiaowux_timezone="$(detect_host_timezone_offset)"
+    fi
+  fi
   [[ "$auth_timezone" =~ ^[+-][0-9]{2}:[0-9]{2}$ ]] || die "日志时区格式应为 +08:00"
   if [[ ! "$interval" =~ ^[0-9]+$ ]] || (( interval < 1 || interval > 1440 )); then
     die "巡查间隔应为 1 到 1440 的整数"
