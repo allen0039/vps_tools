@@ -2,7 +2,14 @@ import json
 import unittest
 from unittest.mock import patch
 
-from vps_audit.telegram import TelegramTransientError, edit_message_text, get_updates, send_message
+from vps_audit.telegram import (
+    TelegramTransientError,
+    edit_message_text,
+    get_updates,
+    send_message,
+    set_chat_menu_button,
+    set_my_commands,
+)
 
 
 class FakeResponse:
@@ -65,6 +72,21 @@ class TelegramApiTests(unittest.TestCase):
         self.assertEqual(payload["chat_id"], "-100123")
         self.assertEqual(payload["message_id"], 77)
         self.assertEqual(payload["reply_markup"], keyboard)
+
+    def test_command_menu_registration_uses_telegram_menu_apis(self):
+        with patch(
+            "vps_audit.telegram.urllib.request.urlopen",
+            return_value=FakeResponse({"ok": True, "result": True}),
+        ) as urlopen:
+            set_my_commands("secret-token")
+            set_chat_menu_button("secret-token")
+        first = json.loads(urlopen.call_args_list[0].args[0].data.decode("utf-8"))
+        second = json.loads(urlopen.call_args_list[1].args[0].data.decode("utf-8"))
+        self.assertIn({"command": "menu", "description": "打开管理菜单"}, first["commands"])
+        self.assertIn({"command": "vpspc", "description": "打开 VPSPC 管理菜单"}, first["commands"])
+        self.assertIn({"command": "incidents", "description": "查看行为事件"}, first["commands"])
+        self.assertIn({"command": "adduser", "description": "添加重点用户"}, first["commands"])
+        self.assertEqual(second["menu_button"], {"type": "commands"})
 
 
 if __name__ == "__main__":

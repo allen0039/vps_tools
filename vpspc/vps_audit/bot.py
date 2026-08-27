@@ -36,12 +36,22 @@ from .telegram import (
     answer_callback_query,
     edit_message_text,
     get_updates,
+    set_chat_menu_button,
+    set_my_commands,
     send_message,
 )
 
 
 DISCOVERY_PAGE_SIZE = 8
 _DISCOVERY_CACHE: Dict[str, Any] = {}
+
+
+def _register_command_menu(token: str) -> None:
+    try:
+        set_my_commands(token)
+        set_chat_menu_button(token)
+    except TelegramTransientError as exc:
+        print(f"vps-audit-bot: command menu registration deferred: {exc}", file=sys.stderr)
 
 
 def _button(text: str, data: str) -> Dict[str, str]:
@@ -642,6 +652,8 @@ def run_bot(config_path: str, once: bool = False) -> None:
     if not telegram.get("bot_management_enabled"):
         raise ValueError("Telegram 双向管理未启用")
     token = _read_secret(str(telegram["token_file"]), "Telegram token")
+    if not once:
+        _register_command_menu(token)
     state_path = Path(config["state_dir"]) / "bot-state.json"
     try:
         state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}

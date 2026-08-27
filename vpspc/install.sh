@@ -76,6 +76,23 @@ ask_secret() {
   printf '%s' "${answer:-$default_value}"
 }
 
+select_node_reporting_mode() {
+  local current_mode="${1:-controller_only}"
+  local default_choice choice
+  case "$current_mode" in
+    node_reporting) default_choice="2" ;;
+    *) default_choice="1" ;;
+  esac
+  echo "1. 仅主控监控" >&2
+  echo "2. 允许节点轻量上报" >&2
+  choice="$(ask "请选择采集模式" "$default_choice")"
+  case "$choice" in
+    1) printf 'controller_only' ;;
+    2) printf 'node_reporting' ;;
+    *) die "请选择 1 或 2" ;;
+  esac
+}
+
 install_os_packages() {
   if command -v python3 >/dev/null 2>&1; then
     python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' \
@@ -1039,8 +1056,7 @@ write_runtime_config() {
 
   echo
   echo "配置主控 / 节点上报模式"
-  node_reporting_mode="$(ask "采集模式 controller_only=仅主控 / node_reporting=允许节点轻量上报" "$(existing_config_value node_reporting.mode controller_only)")"
-  case "$node_reporting_mode" in controller_only|node_reporting) ;; *) die "采集模式只能是 controller_only 或 node_reporting" ;; esac
+  node_reporting_mode="$(select_node_reporting_mode "$(existing_config_value node_reporting.mode controller_only)")"
   node_public_base_url="$(existing_config_value node_reporting.public_base_url "")"
   node_listen_host="$(existing_config_value node_reporting.listen_host "127.0.0.1")"
   node_listen_port="$(existing_config_value node_reporting.listen_port "8766")"

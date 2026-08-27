@@ -15,6 +15,34 @@ class TelegramTransientError(RuntimeError):
     """A temporary network or server failure that is safe to retry."""
 
 
+DEFAULT_COMMANDS: List[Dict[str, str]] = [
+    {"command": "menu", "description": "打开管理菜单"},
+    {"command": "vpspc", "description": "打开 VPSPC 管理菜单"},
+    {"command": "status", "description": "查看运行状态"},
+    {"command": "users", "description": "管理订阅用户"},
+    {"command": "discover", "description": "从日志发现用户"},
+    {"command": "ips", "description": "查询用户活跃 IP"},
+    {"command": "incidents", "description": "查看行为事件"},
+    {"command": "incident", "description": "查看事件详情"},
+    {"command": "incidentai", "description": "AI 复核事件"},
+    {"command": "ask", "description": "向 AI 追问事件"},
+    {"command": "thresholds", "description": "查看检测参数"},
+    {"command": "set", "description": "修改检测参数"},
+    {"command": "ai", "description": "管理 AI 供应商"},
+    {"command": "aiuse", "description": "切换 AI 供应商"},
+    {"command": "aimodel", "description": "修改 AI 模型名"},
+    {"command": "aitest", "description": "测试当前 AI 模型"},
+    {"command": "aion", "description": "启用 AI 复核"},
+    {"command": "aioff", "description": "暂停 AI 复核"},
+    {"command": "run", "description": "立即执行一次巡查"},
+    {"command": "help", "description": "查看帮助"},
+    {"command": "mode", "description": "切换全部或重点用户"},
+    {"command": "monitor", "description": "启用或暂停订阅监测"},
+    {"command": "adduser", "description": "添加重点用户"},
+    {"command": "deluser", "description": "删除重点用户"},
+]
+
+
 def _mask_address(value: str) -> str:
     if "." in value:
         parts = value.split(".")
@@ -182,6 +210,19 @@ def send_message(
     if reply_markup:
         payload["reply_markup"] = reply_markup
     return api_request(token, "sendMessage", payload, timeout)
+
+
+def set_my_commands(
+    token: str, commands: Iterable[Dict[str, str]] | None = None, timeout: int = 20
+) -> Dict[str, Any]:
+    selected = list(commands or DEFAULT_COMMANDS)
+    if len(selected) > 100:
+        raise ValueError("Telegram command list cannot contain more than 100 commands")
+    return api_request(token, "setMyCommands", {"commands": selected}, timeout)
+
+
+def set_chat_menu_button(token: str, timeout: int = 20) -> Dict[str, Any]:
+    return api_request(token, "setChatMenuButton", {"menu_button": {"type": "commands"}}, timeout)
 
 
 def get_updates(token: str, offset: int | None, timeout: int = 30) -> List[Dict[str, Any]]:

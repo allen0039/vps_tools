@@ -28,6 +28,25 @@ def run_bash(script: str, env=None) -> subprocess.CompletedProcess:
 
 
 class InstallerTests(unittest.TestCase):
+    def test_node_reporting_mode_uses_numeric_menu(self):
+        controller = run_bash(
+            'ask() { printf 1; }\nselect_node_reporting_mode node_reporting'
+        )
+        self.assertEqual(controller.returncode, 0, controller.stderr)
+        self.assertEqual(controller.stdout, "controller_only")
+        self.assertIn("1. 仅主控监控", controller.stderr)
+        self.assertIn("2. 允许节点轻量上报", controller.stderr)
+
+        reporting = run_bash(
+            'ask() { printf 2; }\nselect_node_reporting_mode controller_only'
+        )
+        self.assertEqual(reporting.returncode, 0, reporting.stderr)
+        self.assertEqual(reporting.stdout, "node_reporting")
+
+        invalid = run_bash('ask() { printf 3; }\nselect_node_reporting_mode controller_only')
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("请选择 1 或 2", invalid.stderr)
+
     def test_geoip_database_is_auto_detected_in_state_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
