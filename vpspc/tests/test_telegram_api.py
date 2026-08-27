@@ -85,6 +85,7 @@ class TelegramApiTests(unittest.TestCase):
         self.assertIn({"command": "menu", "description": "打开管理菜单"}, first["commands"])
         self.assertIn({"command": "vpspc", "description": "打开 VPSPC 管理菜单"}, first["commands"])
         self.assertIn({"command": "web", "description": "管理 Web 与 Token"}, first["commands"])
+        self.assertIn({"command": "nodes", "description": "管理节点与部署命令"}, first["commands"])
         self.assertIn({"command": "incidents", "description": "查看行为事件"}, first["commands"])
         self.assertIn({"command": "adduser", "description": "添加重点用户"}, first["commands"])
         self.assertEqual(second["menu_button"], {"type": "commands"})

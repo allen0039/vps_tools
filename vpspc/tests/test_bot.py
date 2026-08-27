@@ -93,6 +93,34 @@ class BotTests(unittest.TestCase):
             self.assertIn("已重新生成", response)
             self.assertNotEqual(web_token.read_text(encoding="utf-8").strip(), "old-web-token")
 
+    def test_nodes_menu_generates_named_deployment_command(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = self._config(root)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["node_reporting"] = {
+                "mode": "node_reporting",
+                "public_base_url": "https://monitor.example.com",
+                "registry_file": str(root / "nodes.json"),
+                "inbox_file": str(root / "node-inbox.jsonl"),
+                "agent_asset_path": str(root / "node.py"),
+            }
+            Path(data["node_reporting"]["agent_asset_path"]).write_text("# agent\n", encoding="utf-8")
+            path.write_text(json.dumps(data), encoding="utf-8")
+            response, keyboard = _handle(str(path), 12345, "/nodes", {})
+            self.assertIn("已注册节点：0", response)
+            callbacks = [
+                button["callback_data"]
+                for row in keyboard["inline_keyboard"]
+                for button in row
+            ]
+            self.assertIn("prompt:node:normal", callbacks)
+            pending = {}
+            response, _ = _handle(str(path), 12345, "prompt:node:normal", pending)
+            self.assertIn("显示名称", response)
+            response, _ = _handle(str(path), 12345, "vmiss hk", pending)
+            self.assertIn("curl -fsSL", response)
+
     def test_button_prompt_uses_per_admin_pending_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = self._config(Path(temporary))

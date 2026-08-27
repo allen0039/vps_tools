@@ -13,6 +13,13 @@ from typing import Any, Dict, List, Tuple
 
 from .activity import query_active_subscription_ips, render_active_ip_query
 from .behavior_audit import list_incidents, load_incident, render_ai_review, render_incident
+from .node_reporting import (
+    create_install_command,
+    delete_registered_node,
+    list_registered_nodes,
+    request_registered_node_uninstall,
+    revoke_registered_node,
+)
 from .runtime import (
     _atomic_json,
     _read_secret,
@@ -65,6 +72,7 @@ def _main_keyboard() -> Dict[str, Any]:
         [_button("📊 状态", "menu:status"), _button("👥 订阅用户", "menu:users")],
         [_button("🌐 查询重点用户活跃 IP", "activeips:0")],
         [_button("🧾 行为事件", "incident:list")],
+        [_button("🖥️ 节点部署与管理", "menu:nodes")],
         [_button("🌐 Web 管理台", "menu:web")],
         [_button("⚙️ 检测参数", "menu:thresholds"), _button("🔔 推送参数", "menu:telegram")],
         [_button("🤖 AI 复核", "menu:ai")],
@@ -108,6 +116,73 @@ def _web_keyboard() -> Dict[str, Any]:
 def _web_regenerate_keyboard() -> Dict[str, Any]:
     return {"inline_keyboard": [
         [_button("确认重新生成", "web:regenerate:yes"), _button("取消", "menu:web")],
+    ]}
+
+
+def _nodes_text(config_path: str, config: Dict[str, Any] | None = None) -> str:
+    current = config or load_runtime_config(config_path)
+    node_reporting = current["node_reporting"]
+    lines = [
+        "节点上报与部署",
+        f"当前模式：{node_reporting['mode']}",
+        f"接收服务：{_service_state('vps-audit-node-receiver.service')}",
+        f"主控地址：{node_reporting.get('public_base_url') or '未配置'}",
+        f"部署命令有效期：{node_reporting.get('enrollment_ttl_minutes', 15)} 分钟",
+    ]
+    nodes = list_registered_nodes(config_path)
+    if not nodes:
+        lines.append("已注册节点：0")
+    else:
+        lines.append(f"已注册节点：{len(nodes)}")
+        for node in nodes:
+            state = "已撤销" if node.get("revoked") else "等待卸载" if node.get("pending_command") else "有效"
+            lines.append(
+                f"{node.get('name', '-')} | {node.get('node_id', '-')} | {state} | "
+                f"最后上报：{node.get('last_seen') or '从未'}"
+            )
+    if node_reporting["mode"] != "node_reporting":
+        lines.append("\n请先在主控执行完整重新配置并选择“允许节点轻量上报”。")
+    return "\n".join(lines)[:3900]
+
+
+def _service_state(unit: str) -> str:
+    try:
+        completed = subprocess.run(
+            ["systemctl", "is-active", unit],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return "无法查询"
+    return (completed.stdout or "").strip() or "未运行"
+
+
+def _nodes_keyboard(config_path: str) -> Dict[str, Any]:
+    rows: List[List[Dict[str, str]]] = [
+        [_button("➕ 生成普通部署命令", "prompt:node:normal")],
+        [_button("♻️ 生成允许覆盖重绑命令", "prompt:node:replace")],
+    ]
+    for node in list_registered_nodes(config_path):
+        node_id = str(node.get("node_id", ""))
+        if not node_id:
+            continue
+        label = str(node.get("name") or node_id)
+        if len(label) > 28:
+            label = label[:25] + "..."
+        if node.get("revoked"):
+            rows.append([_button(f"删除记录 {label}", f"node:delete:{node_id}")])
+        else:
+            rows.append([_button(f"撤销 {label}", f"node:revoke:{node_id}")])
+            rows.append([_button(f"请求卸载 {label}", f"node:uninstall:{node_id}")])
+    rows.append([_button("🔄 刷新", "menu:nodes")])
+    rows.append([_button("⬅️ 主菜单", "menu:main")])
+    return {"inline_keyboard": rows}
+
+
+def _node_confirm_keyboard(action: str, node_id: str) -> Dict[str, Any]:
+    return {"inline_keyboard": [
+        [_button("确认", f"node:{action}:yes:{node_id}"), _button("取消", "menu:nodes")],
     ]}
 
 
@@ -423,6 +498,7 @@ def _help_text() -> str:
         "/menu 或 /vpspc - 打开菜单\n"
         "/status - 查看状态\n"
         "/web - 管理 Web 服务与 Token\n"
+        "/nodes - 管理节点并生成一键部署命令\n"
         "/users - 查看监测名单\n"
         "/discover - 从本地日志点选用户\n"
         "/ips [用户名] - 查询已添加用户的活跃 IP 与位置\n"
@@ -513,6 +589,14 @@ def _apply_pending(config_path: str, pending: Dict[str, Any], sender_id: int, te
     if action == "ai_model":
         config = set_ai_provider_model(config_path, str(entry["provider_id"]), text)
         return "AI 模型已更新。\n\n" + _ai_text(config)
+    if action == "node_create":
+        command = create_install_command(
+            config_path,
+            text,
+            replace=bool(entry.get("replace")),
+        )
+        mode = "允许覆盖重绑" if entry.get("replace") else "普通"
+        return f"已生成{mode}节点部署命令，请在被控端以 root 执行：\n\n{command}"
     if action == "incident_question":
         review = review_behavior_incident(config_path, str(entry["incident_id"]), text)
         return render_ai_review(review)
@@ -520,7 +604,7 @@ def _apply_pending(config_path: str, pending: Dict[str, Any], sender_id: int, te
 
 
 def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any]) -> Tuple[str, Dict[str, Any] | None]:
-    if not value.startswith("/") and not value.startswith(("menu:", "mode:", "prompt:", "toggle:", "discover:", "activeips:", "ai:", "incident:", "web:")):
+    if not value.startswith("/") and not value.startswith(("menu:", "mode:", "prompt:", "toggle:", "discover:", "activeips:", "ai:", "incident:", "web:", "node:")):
         result = _apply_pending(config_path, pending, sender_id, value)
         if result:
             return result, _main_keyboard()
@@ -533,6 +617,8 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
         return _status_text(config_path), _main_keyboard()
     if command in {"/users", "menu:users"}:
         return _monitoring_text(config), _users_keyboard()
+    if command in {"/nodes", "menu:nodes"}:
+        return _nodes_text(config_path, config), _nodes_keyboard(config_path)
     if command in {"/web", "menu:web"}:
         return _web_text(config), _web_keyboard()
     if command == "/discover":
@@ -621,6 +707,11 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
             pending[str(sender_id)] = {"action": parts[1]}
             action_text = "添加" if parts[1] == "adduser" else "删除"
             return f"请发送需要{action_text}的用户名或订阅 ID。发送 /cancel 可取消。", None
+        if len(parts) == 3 and parts[1] == "node" and parts[2] in {"normal", "replace"}:
+            if config["node_reporting"]["mode"] != "node_reporting":
+                raise ValueError("请先在主控执行完整重新配置并选择允许节点轻量上报")
+            pending[str(sender_id)] = {"action": "node_create", "replace": parts[2] == "replace"}
+            return "请发送被控端显示名称，例如：vmiss hk。发送 /cancel 可取消。", None
         if len(parts) == 3 and parts[1] in {"threshold", "telegram"}:
             pending[str(sender_id)] = {"action": parts[1], "key": parts[2]}
             return f"请发送 {parts[2]} 的新值。发送 /cancel 可取消。", None
@@ -652,6 +743,23 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
         _restart_web_service()
         config = load_runtime_config(config_path)
         return "Web 服务已重启并通过 active 检查。\n\n" + _web_text(config), _web_keyboard()
+    if command.startswith("node:revoke:yes:"):
+        node_id = command.split(":", 3)[3]
+        revoke_registered_node(config_path, node_id)
+        return f"节点 {node_id} 的凭据已撤销。\n\n" + _nodes_text(config_path), _nodes_keyboard(config_path)
+    if command.startswith("node:uninstall:yes:"):
+        node_id = command.split(":", 3)[3]
+        request = request_registered_node_uninstall(config_path, node_id)
+        return f"节点 {node_id} 已排队自卸载命令：{request['id']}\n\n" + _nodes_text(config_path), _nodes_keyboard(config_path)
+    if command.startswith("node:delete:yes:"):
+        node_id = command.split(":", 3)[3]
+        delete_registered_node(config_path, node_id)
+        return f"节点 {node_id} 的注册记录已删除。\n\n" + _nodes_text(config_path), _nodes_keyboard(config_path)
+    if command.startswith("node:revoke:") or command.startswith("node:uninstall:") or command.startswith("node:delete:"):
+        parts = command.split(":", 2)
+        action, node_id = parts[1], parts[2]
+        labels = {"revoke": "撤销凭据", "uninstall": "请求自卸载", "delete": "删除注册记录"}
+        return f"确认对节点 {node_id} 执行{labels[action]}？", _node_confirm_keyboard(action, node_id)
     if command == "toggle:include_source_ip":
         config = set_telegram_option(config_path, "include_source_ip", not config["telegram"]["include_source_ip"])
         return "完整 IP 显示设置已切换。\n\n" + _telegram_text(config), _telegram_keyboard()

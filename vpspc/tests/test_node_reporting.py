@@ -80,6 +80,22 @@ class NodeReportingTests(unittest.TestCase):
                 }, now)
             self.assertEqual(registry.inspect_enrollment(link["token"], now)["name"], "edge")
 
+    def test_node_record_must_be_revoked_before_deletion(self):
+        now = datetime(2026, 8, 27, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temporary:
+            registry = NodeRegistry(Path(temporary) / "nodes.json")
+            link = registry.create_enrollment("edge", now=now)
+            node = registry.enroll(
+                link["token"],
+                {"installation_id": "install_abcdefgh", "node_name": "host"},
+                now,
+            )
+            with self.assertRaisesRegex(ValueError, "revoked"):
+                registry.delete(node["node_id"])
+            registry.revoke(node["node_id"])
+            registry.delete(node["node_id"])
+            self.assertEqual(registry.list_nodes(), [])
+
     def test_hmac_authentication_rejects_replay(self):
         now = datetime(2026, 8, 27, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as temporary:

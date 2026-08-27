@@ -13,6 +13,7 @@ from typing import Any, Dict, List
 from .activity import query_active_subscription_ips, render_active_ip_query
 from .node_reporting import (
     create_install_command,
+    delete_registered_node,
     list_registered_nodes,
     request_registered_node_uninstall,
     revoke_registered_node,
@@ -397,6 +398,7 @@ def _nodes_menu(config_path: str) -> None:
         print("2. 生成允许覆盖重绑的链接")
         print("3. 撤销节点凭据")
         print("4. 请求节点自卸载并撤销")
+        print("5. 删除已撤销节点的注册记录")
         print("0. 返回")
         choice = _ask("请选择", "0")
         if choice == "0":
@@ -415,6 +417,9 @@ def _nodes_menu(config_path: str) -> None:
         elif choice == "4":
             command = request_registered_node_uninstall(config_path, _ask("节点 ID"))
             print(f"固定自卸载命令已排队：{command['id']}")
+        elif choice == "5":
+            delete_registered_node(config_path, _ask("已撤销的节点 ID"))
+            print("节点注册记录已删除。")
         else:
             print("无效选择。")
 

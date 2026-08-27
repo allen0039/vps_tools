@@ -284,6 +284,18 @@ class NodeRegistry:
             _atomic_json(self.path, state)
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
+    def delete(self, node_id: str) -> None:
+        with self._locked() as lock:
+            state = self._load()
+            node = state["nodes"].get(node_id)
+            if not isinstance(node, dict):
+                raise ValueError("node does not exist")
+            if not node.get("revoked"):
+                raise ValueError("active node must be revoked or uninstalled before deletion")
+            state["nodes"].pop(node_id, None)
+            _atomic_json(self.path, state)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
     def request_uninstall(self, node_id: str) -> Dict[str, Any]:
         with self._locked() as lock:
             state = self._load()
@@ -648,6 +660,10 @@ def revoke_registered_node(config_path: str, node_id: str) -> None:
     _load_admin(config_path)[1].revoke(node_id)
 
 
+def delete_registered_node(config_path: str, node_id: str) -> None:
+    _load_admin(config_path)[1].delete(node_id)
+
+
 def request_registered_node_uninstall(config_path: str, node_id: str) -> Dict[str, Any]:
     return _load_admin(config_path)[1].request_uninstall(node_id)
 
@@ -664,6 +680,8 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("list")
     revoke = sub.add_parser("revoke")
     revoke.add_argument("node_id")
+    delete = sub.add_parser("delete")
+    delete.add_argument("node_id")
     uninstall = sub.add_parser("uninstall")
     uninstall.add_argument("node_id")
     return parser
@@ -685,6 +703,9 @@ def main(argv: List[str] | None = None) -> int:
         elif args.command == "revoke":
             registry.revoke(args.node_id)
             print("节点凭据已撤销。")
+        elif args.command == "delete":
+            registry.delete(args.node_id)
+            print("已删除撤销节点的注册记录。")
         else:
             command = registry.request_uninstall(args.node_id)
             print(f"已排队固定自卸载命令：{command['id']}")
