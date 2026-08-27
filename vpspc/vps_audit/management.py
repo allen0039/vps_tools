@@ -4,6 +4,7 @@ import argparse
 import getpass
 import json
 import os
+import secrets
 import subprocess
 import sys
 from pathlib import Path
@@ -68,6 +69,72 @@ def _run_audit() -> None:
     if completed.returncode:
         raise RuntimeError("巡查失败，请执行 journalctl -u vps-audit.service -n 50 查看日志")
     print("巡查完成。")
+
+
+def _web_service_state() -> str:
+    try:
+        completed = subprocess.run(
+            ["systemctl", "is-active", "vps-audit-web.service"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return "无法查询"
+    state = (completed.stdout or "").strip()
+    return state or "未运行"
+
+
+def _restart_web_service() -> None:
+    completed = subprocess.run(["systemctl", "restart", "vps-audit-web.service"], check=False)
+    if completed.returncode:
+        raise RuntimeError("Web 服务启动失败，请执行 journalctl -u vps-audit-web.service -n 50 查看日志")
+    if _web_service_state() != "active":
+        raise RuntimeError("Web 服务未进入 active 状态，请执行 systemctl status vps-audit-web.service 查看日志")
+
+
+def _web_menu(config_path: str) -> None:
+    while True:
+        config = load_runtime_config(config_path)
+        web = config["web"]
+        token_path = Path(str(web["token_file"]))
+        print("\nWeb 管理台")
+        print(f"启用：{'是' if web['enabled'] else '否'}")
+        print(f"监听：{web['listen_host']}:{web['listen_port']}")
+        print(f"服务状态：{_web_service_state()}")
+        print("1. 查看 Web Token")
+        print("2. 重新生成 Web Token")
+        print("3. 重启并检查 Web 服务")
+        print("4. 停止 Web 服务")
+        print("0. 返回")
+        choice = _ask("请选择", "0")
+        if choice == "0":
+            return
+        if choice == "1":
+            if not token_path.is_file():
+                raise RuntimeError(f"找不到 Web Token 文件：{token_path}")
+            print(f"Web Token：{token_path.read_text(encoding='utf-8').strip()}")
+        elif choice == "2":
+            if not web["enabled"]:
+                raise RuntimeError("Web 管理台未启用，请先通过完整重新配置启用")
+            if _ask("确认重新生成 Token？输入 REGENERATE", "").upper() != "REGENERATE":
+                print("已取消。")
+                continue
+            _atomic_secret(token_path, secrets.token_urlsafe(32))
+            _restart_web_service()
+            print("Web Token 已重新生成，Web 服务已重启。")
+        elif choice == "3":
+            if not web["enabled"]:
+                raise RuntimeError("Web 管理台未启用，请先通过完整重新配置启用")
+            _restart_web_service()
+            print("Web 服务已启动并通过 active 检查。")
+        elif choice == "4":
+            completed = subprocess.run(["systemctl", "stop", "vps-audit-web.service"], check=False)
+            if completed.returncode:
+                raise RuntimeError("停止 Web 服务失败")
+            print("Web 服务已停止。")
+        else:
+            print("无效选择。")
 
 
 def _users_menu(config_path: str) -> None:
@@ -374,9 +441,10 @@ def interactive_menu(config_path: str, installer: str) -> None:
         print("6. Telegram 参数管理")
         print("7. AI 供应商与模型")
         print("8. 节点上报与注册链接")
-        print("9. 完整重新配置")
-        print("10. 回滚上一次配置")
-        print("11. 卸载 / 彻底清理")
+        print("9. Web 管理台与 Token")
+        print("10. 完整重新配置")
+        print("11. 回滚上一次配置")
+        print("12. 卸载 / 彻底清理")
         print("0. 退出")
         choice = _ask("请选择", "0")
         try:
@@ -401,11 +469,13 @@ def interactive_menu(config_path: str, installer: str) -> None:
             elif choice == "8":
                 _nodes_menu(config_path)
             elif choice == "9":
-                _run_installer(installer, "configure")
+                _web_menu(config_path)
             elif choice == "10":
+                _run_installer(installer, "configure")
+            elif choice == "11":
                 if _ask("确认回滚上一次配置？输入 yes", "no").lower() == "yes":
                     _run_installer(installer, "rollback")
-            elif choice == "11":
+            elif choice == "12":
                 mode = _ask("输入 uninstall 保留数据，或 destroy 彻底清理", "uninstall").lower()
                 if mode == "destroy" and _ask("彻底清理不可恢复，输入 DESTROY 确认", "").upper() == "DESTROY":
                     _run_installer(installer, "destroy")

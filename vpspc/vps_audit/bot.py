@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import secrets
 import subprocess
 import sys
 import time
@@ -63,10 +65,73 @@ def _main_keyboard() -> Dict[str, Any]:
         [_button("📊 状态", "menu:status"), _button("👥 订阅用户", "menu:users")],
         [_button("🌐 查询重点用户活跃 IP", "activeips:0")],
         [_button("🧾 行为事件", "incident:list")],
+        [_button("🌐 Web 管理台", "menu:web")],
         [_button("⚙️ 检测参数", "menu:thresholds"), _button("🔔 推送参数", "menu:telegram")],
         [_button("🤖 AI 复核", "menu:ai")],
         [_button("▶️ 立即巡查", "menu:run"), _button("❓ 帮助", "menu:help")],
     ]}
+
+
+def _web_service_state() -> str:
+    try:
+        completed = subprocess.run(
+            ["systemctl", "is-active", "vps-audit-web.service"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return "无法查询"
+    return (completed.stdout or "").strip() or "未运行"
+
+
+def _web_text(config: Dict[str, Any]) -> str:
+    web = config["web"]
+    return (
+        "Web 管理台\n"
+        f"启用：{'是' if web['enabled'] else '否'}\n"
+        f"监听：{web['listen_host']}:{web['listen_port']}\n"
+        f"服务状态：{_web_service_state()}\n\n"
+        "查看或重新生成 Token 后，如果浏览器仍使用旧 Token，请重新打开页面。"
+    )
+
+
+def _web_keyboard() -> Dict[str, Any]:
+    return {"inline_keyboard": [
+        [_button("🔑 查看 Web Token", "web:show")],
+        [_button("♻️ 重新生成 Token", "web:regenerate")],
+        [_button("🔄 重启 Web 服务", "web:restart")],
+        [_button("⬅️ 主菜单", "menu:main")],
+    ]}
+
+
+def _web_regenerate_keyboard() -> Dict[str, Any]:
+    return {"inline_keyboard": [
+        [_button("确认重新生成", "web:regenerate:yes"), _button("取消", "menu:web")],
+    ]}
+
+
+def _atomic_secret(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    temporary = path.with_name(path.name + f".tmp.{os.getpid()}")
+    try:
+        temporary.write_text(value.strip() + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _restart_web_service() -> None:
+    completed = subprocess.run(["systemctl", "restart", "vps-audit-web.service"], check=False)
+    if completed.returncode:
+        raise RuntimeError("Web 服务启动失败，请检查 journalctl -u vps-audit-web.service")
+    if _web_service_state() != "active":
+        raise RuntimeError("Web 服务未进入 active 状态，请检查 systemctl status vps-audit-web.service")
 
 
 def _users_keyboard() -> Dict[str, Any]:
@@ -357,6 +422,7 @@ def _help_text() -> str:
         "VPSPC 管理命令：\n"
         "/menu 或 /vpspc - 打开菜单\n"
         "/status - 查看状态\n"
+        "/web - 管理 Web 服务与 Token\n"
         "/users - 查看监测名单\n"
         "/discover - 从本地日志点选用户\n"
         "/ips [用户名] - 查询已添加用户的活跃 IP 与位置\n"
@@ -454,7 +520,7 @@ def _apply_pending(config_path: str, pending: Dict[str, Any], sender_id: int, te
 
 
 def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any]) -> Tuple[str, Dict[str, Any] | None]:
-    if not value.startswith("/") and not value.startswith(("menu:", "mode:", "prompt:", "toggle:", "discover:", "activeips:", "ai:", "incident:")):
+    if not value.startswith("/") and not value.startswith(("menu:", "mode:", "prompt:", "toggle:", "discover:", "activeips:", "ai:", "incident:", "web:")):
         result = _apply_pending(config_path, pending, sender_id, value)
         if result:
             return result, _main_keyboard()
@@ -467,6 +533,8 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
         return _status_text(config_path), _main_keyboard()
     if command in {"/users", "menu:users"}:
         return _monitoring_text(config), _users_keyboard()
+    if command in {"/web", "menu:web"}:
+        return _web_text(config), _web_keyboard()
     if command == "/discover":
         return _discovery_view(config, 0)
     if command in {"/ips", "/activeips"}:
@@ -565,6 +633,25 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
     if command == "/cancel":
         pending.pop(str(sender_id), None)
         return "已取消。", _main_keyboard()
+    if command == "web:show":
+        token_path = Path(str(config["web"]["token_file"]))
+        token = _read_secret(str(token_path), "Web Token")
+        return f"Web Token：\n{token}", _web_keyboard()
+    if command == "web:regenerate":
+        return "重新生成后，当前浏览器中的旧 Token 会立即失效。确认继续？", _web_regenerate_keyboard()
+    if command == "web:regenerate:yes":
+        if not config["web"]["enabled"]:
+            raise ValueError("Web 管理台未启用，请先在 VPS 本机运行 vpspc 完整重新配置")
+        token_path = Path(str(config["web"]["token_file"]))
+        _atomic_secret(token_path, secrets.token_urlsafe(32))
+        _restart_web_service()
+        return "Web Token 已重新生成，服务已重启。请点击“查看 Web Token”获取新 Token。", _web_keyboard()
+    if command == "web:restart":
+        if not config["web"]["enabled"]:
+            raise ValueError("Web 管理台未启用，请先在 VPS 本机运行 vpspc 完整重新配置")
+        _restart_web_service()
+        config = load_runtime_config(config_path)
+        return "Web 服务已重启并通过 active 检查。\n\n" + _web_text(config), _web_keyboard()
     if command == "toggle:include_source_ip":
         config = set_telegram_option(config_path, "include_source_ip", not config["telegram"]["include_source_ip"])
         return "完整 IP 显示设置已切换。\n\n" + _telegram_text(config), _telegram_keyboard()

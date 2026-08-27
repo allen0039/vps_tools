@@ -10,6 +10,7 @@ from vps_audit.management import (
     _nodes_menu,
     _threshold_menu,
     _users_menu,
+    _web_menu,
     interactive_menu,
 )
 from vps_audit.runtime import load_runtime_config
@@ -60,6 +61,23 @@ class ManagementTests(unittest.TestCase):
                 "builtins.input", side_effect=["0"]
             ):
                 interactive_menu(str(path), "/unused/install.sh")
+
+    def test_web_menu_can_view_token(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = self._config(root)
+            token = root / "web.token"
+            token.write_text("web-test-token\n", encoding="utf-8")
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["web"] = {
+                "enabled": True,
+                "listen_host": "127.0.0.1",
+                "listen_port": 18381,
+                "token_file": str(token),
+            }
+            path.write_text(json.dumps(data), encoding="utf-8")
+            with patch("builtins.input", side_effect=["1", "0"]):
+                _web_menu(str(path))
 
     def test_local_manager_adds_provider_and_stores_key_privately(self):
         with tempfile.TemporaryDirectory() as temporary:

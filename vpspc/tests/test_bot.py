@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,6 +55,43 @@ class BotTests(unittest.TestCase):
             self.assertEqual(config["subscription_monitoring"]["mode"], "allowlist")
             self.assertEqual(config["subscription_monitoring"]["users"], ["alice", "bob"])
             self.assertEqual(config["rules"]["thresholds"]["subscription_ip_count"], 11)
+
+    def test_web_menu_can_view_and_regenerate_token(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = self._config(root)
+            web_token = root / "web.token"
+            web_token.write_text("old-web-token\n", encoding="utf-8")
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["web"] = {
+                "enabled": True,
+                "listen_host": "127.0.0.1",
+                "listen_port": 18381,
+                "token_file": str(web_token),
+            }
+            path.write_text(json.dumps(data), encoding="utf-8")
+            response, keyboard = _handle(str(path), 12345, "menu:web", {})
+            self.assertIn("18381", response)
+            callbacks = [
+                button["callback_data"]
+                for row in keyboard["inline_keyboard"]
+                for button in row
+            ]
+            self.assertIn("web:show", callbacks)
+            response, _ = _handle(str(path), 12345, "web:show", {})
+            self.assertIn("old-web-token", response)
+            response, keyboard = _handle(str(path), 12345, "web:regenerate", {})
+            self.assertIn("确认", response)
+            with patch(
+                "vps_audit.bot.subprocess.run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0),
+                    subprocess.CompletedProcess([], 0, stdout="active\n"),
+                ],
+            ):
+                response, _ = _handle(str(path), 12345, "web:regenerate:yes", {})
+            self.assertIn("已重新生成", response)
+            self.assertNotEqual(web_token.read_text(encoding="utf-8").strip(), "old-web-token")
 
     def test_button_prompt_uses_per_admin_pending_state(self):
         with tempfile.TemporaryDirectory() as temporary:

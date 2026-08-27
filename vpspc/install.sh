@@ -1636,10 +1636,22 @@ configure_node_receiver_service() {
 
 configure_web_service() {
   if [[ -f "$CONFIG_FILE" && "$(existing_config_value web.enabled no)" == "yes" && -f "$SYSTEMD_DIR/vps-audit-web.service" ]]; then
+    [[ -s "$(existing_config_value web.token_file "$CONFIG_DIR/web.token")" ]] \
+      || die "Web 已启用，但找不到 Web Token 文件；请重新配置 Web Token"
     systemctl enable vps-audit-web.service
-    systemctl restart vps-audit-web.service
+    if ! systemctl restart vps-audit-web.service; then
+      journalctl -u vps-audit-web.service -n 30 --no-pager || true
+      die "Web 管理台启动失败；请执行 systemctl status vps-audit-web.service 查看详情"
+    fi
+    if ! systemctl is-active --quiet vps-audit-web.service; then
+      journalctl -u vps-audit-web.service -n 30 --no-pager || true
+      die "Web 管理台未进入运行状态；请执行 systemctl status vps-audit-web.service 查看详情"
+    fi
+    echo "Web 管理台已启动：$(existing_config_value web.listen_host 127.0.0.1):$(existing_config_value web.listen_port 8787)"
+    echo "如使用反代，请将后端指向上述地址；Web Token 可通过 vpspc 菜单查看。"
   else
     systemctl disable --now vps-audit-web.service >/dev/null 2>&1 || true
+    echo "Web 管理台未启用。"
   fi
 }
 
@@ -1672,12 +1684,12 @@ install_app() {
   INTERVAL="5"
   write_runtime_config
   install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR" "$CONFIGURED_BEHAVIOR_ARCHIVE_DIR"
+  configure_web_service
   test_ai_if_requested
   run_initial_audit_and_enable_timer
   install_cli_shortcut
   configure_bot_service
   configure_node_receiver_service
-  configure_web_service
   if [[ "$(existing_config_value telegram.enabled no)" == "yes" ]] && ask_yes_no "发送 Telegram 测试消息" "yes"; then
     "$INSTALL_ROOT/venv/bin/vps-audit-runner" --config "$CONFIG_FILE" test-telegram
   fi
@@ -1699,12 +1711,12 @@ configure_app() {
   INTERVAL="5"
   write_runtime_config
   install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR" "$CONFIGURED_BEHAVIOR_ARCHIVE_DIR"
+  configure_web_service
   test_ai_if_requested
   run_initial_audit_and_enable_timer
   install_cli_shortcut
   configure_bot_service
   configure_node_receiver_service
-  configure_web_service
   echo "配置已更新。"
 }
 
