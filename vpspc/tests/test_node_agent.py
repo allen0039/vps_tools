@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 import os
 import tempfile
@@ -117,6 +118,229 @@ class NodeAgentTests(unittest.TestCase):
             self.assertEqual(result["sent"], 0)
             self.assertEqual(config_path.read_bytes(), original_config)
             self.assertTrue(state["behavior_audit_enabled"])
+
+    def test_command_poll_uses_60_second_heartbeat_and_keeps_log_state_separate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            env = {"VPSPC_NODE_TEST_ROOT": temporary, "VPSPC_NODE_SKIP_SYSTEMCTL": "1"}
+            config = {
+                "controller_url": "https://monitor.example.com",
+                "node_id": "node_1234567890abcdef12345678",
+                "installation_id": "install_12345678",
+                "node_name": "edge",
+                "xray_logs": [],
+                "interval_minutes": 5,
+                "timeout_seconds": 30,
+                "agent_version": "test",
+            }
+            with patch.dict(os.environ, env, clear=False), patch.object(
+                agent, "_authenticated_request", return_value={"ok": True}
+            ) as request:
+                agent._write_installation(config, "private-node-key", 5)
+                result = agent.command_poll()
+
+            self.assertEqual(result, {"ok": True, "task": None})
+            self.assertEqual(request.call_args.args[2], "/v1/node/heartbeat")
+            self.assertEqual(request.call_args.args[3], {
+                "agent_version": agent.AGENT_VERSION,
+                "agent_protocol": agent.AGENT_PROTOCOL,
+                "claim": True,
+            })
+            root = Path(temporary)
+            command_timer = (root / "etc" / "systemd" / "system" / "vpspc-node-command.timer").read_text()
+            command_service = (root / "etc" / "systemd" / "system" / "vpspc-node-command.service").read_text()
+            self.assertIn("OnUnitActiveSec=60s", command_timer)
+            self.assertIn("command-poll", command_service)
+            self.assertNotIn("/var/log", command_service)
+            self.assertFalse((root / "var" / "lib" / "vpspc-node" / "spool.jsonl").exists())
+
+    def test_update_replaces_agent_reports_success_and_removes_backup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            env = {"VPSPC_NODE_TEST_ROOT": temporary, "VPSPC_NODE_SKIP_SYSTEMCTL": "1"}
+            config = {
+                "controller_url": "https://monitor.example.com",
+                "node_id": "node_1234567890abcdef12345678",
+                "installation_id": "install_12345678",
+                "node_name": "edge",
+                "xray_logs": [],
+                "interval_minutes": 5,
+                "timeout_seconds": 30,
+                "agent_version": "test",
+            }
+            replacement = AGENT_PATH.read_bytes().replace(b'AGENT_VERSION = "0.1.1"', b'AGENT_VERSION = "0.2.0"')
+            task = {
+                "task_id": "task_" + "a" * 32,
+                "node_id": config["node_id"],
+                "kind": "node_update",
+                "payload": {
+                    "artifact_id": "sha256-" + hashlib.sha256(replacement).hexdigest(),
+                    "sha256": hashlib.sha256(replacement).hexdigest(),
+                    "size": len(replacement),
+                    "version": "v0.2.0",
+                },
+            }
+            with patch.dict(os.environ, env, clear=False), patch.object(
+                agent, "_download_update_artifact", return_value=replacement
+            ), patch.object(agent, "_node_healthcheck"), patch.object(agent, "_report_task_status") as report:
+                agent._write_installation(config, "private-node-key", 5)
+                result = agent.execute_update_task(task)
+
+            installed = (Path(temporary) / "usr" / "local" / "lib" / "vpspc-node" / "vpspc-node.py")
+            self.assertEqual(result["status"], "success")
+            self.assertIn(b'AGENT_VERSION = "0.2.0"', installed.read_bytes())
+            self.assertFalse((Path(temporary) / "var" / "lib" / "vpspc-node" / "update-backup.py").exists())
+            self.assertEqual(report.call_args_list[-1].args[2], "success")
+
+    def test_failed_healthcheck_restores_previous_agent_and_reports_rollback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            env = {"VPSPC_NODE_TEST_ROOT": temporary, "VPSPC_NODE_SKIP_SYSTEMCTL": "1"}
+            config = {
+                "controller_url": "https://monitor.example.com",
+                "node_id": "node_1234567890abcdef12345678",
+                "installation_id": "install_12345678",
+                "node_name": "edge",
+                "xray_logs": [],
+                "interval_minutes": 5,
+                "timeout_seconds": 30,
+                "agent_version": "test",
+            }
+            replacement = AGENT_PATH.read_bytes().replace(b'AGENT_VERSION = "0.1.1"', b'AGENT_VERSION = "0.2.0"')
+            task = {
+                "task_id": "task_" + "b" * 32,
+                "node_id": config["node_id"],
+                "kind": "node_update",
+                "payload": {
+                    "artifact_id": "sha256-" + hashlib.sha256(replacement).hexdigest(),
+                    "sha256": hashlib.sha256(replacement).hexdigest(),
+                    "size": len(replacement),
+                    "version": "v0.2.0",
+                },
+            }
+            with patch.dict(os.environ, env, clear=False), patch.object(
+                agent, "_download_update_artifact", return_value=replacement
+            ), patch.object(agent, "_node_healthcheck", side_effect=[RuntimeError("auth failed"), None]), patch.object(
+                agent, "_report_task_status"
+            ) as report:
+                agent._write_installation(config, "private-node-key", 5)
+                installed = Path(temporary) / "usr" / "local" / "lib" / "vpspc-node" / "vpspc-node.py"
+                before = installed.read_bytes()
+                result = agent.execute_update_task(task)
+
+            self.assertEqual(result["status"], "rolled_back")
+            self.assertEqual(installed.read_bytes(), before)
+            self.assertEqual(report.call_args_list[-1].args[2], "rolled_back")
+
+    def test_remote_destroy_removes_only_vpspc_and_preserves_node_services(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            env = {"VPSPC_NODE_TEST_ROOT": temporary, "VPSPC_NODE_SKIP_SYSTEMCTL": "1"}
+            root = Path(temporary)
+            config = {
+                "controller_url": "https://monitor.example.com",
+                "node_id": "node_1234567890abcdef12345678",
+                "installation_id": "install_12345678",
+                "node_name": "edge",
+                "xray_logs": ["/var/log/xray/access.log"],
+                "interval_minutes": 5,
+                "timeout_seconds": 30,
+            }
+            sentinels = {
+                root / "etc" / "systemd" / "system" / "xrayagent.service": b"third-party service\n",
+                root / "var" / "log" / "xray" / "access.log": b"third-party log\n",
+                root / "opt" / "miaomiaowux" / "config.json": b'{"third_party": true}\n',
+            }
+            for path, content in sentinels.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+            task = {
+                "task_id": "task_" + "c" * 32,
+                "node_id": config["node_id"],
+                "kind": "node_destroy",
+                "payload": {"receipt_token": "receipt-token"},
+            }
+            with patch.dict(os.environ, env, clear=False), patch.object(
+                agent.os, "geteuid", return_value=0
+            ), patch.object(agent, "_send_uninstall_receipt", return_value=True) as receipt:
+                agent._write_installation(config, "private-node-key", 5)
+                result = agent.execute_uninstall_task(task)
+
+            self.assertEqual(result["status"], "success")
+            for path, content in sentinels.items():
+                self.assertEqual(path.read_bytes(), content)
+            self.assertFalse((root / "etc" / "vpspc-node").exists())
+            self.assertFalse((root / "var" / "lib" / "vpspc-node").exists())
+            self.assertFalse((root / "usr" / "local" / "lib" / "vpspc-node").exists())
+            self.assertFalse((root / "etc" / "systemd" / "system" / "vpspc-node-maintenance.service").exists())
+            self.assertEqual(receipt.call_args.args[2], "success")
+
+    def test_destroy_marker_mismatch_deletes_nothing_and_reports_safely_retained(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            env = {"VPSPC_NODE_TEST_ROOT": temporary, "VPSPC_NODE_SKIP_SYSTEMCTL": "1"}
+            root = Path(temporary)
+            config = {
+                "controller_url": "https://monitor.example.com",
+                "node_id": "node_1234567890abcdef12345678",
+                "installation_id": "install_12345678",
+                "node_name": "edge",
+                "xray_logs": [],
+                "interval_minutes": 5,
+                "timeout_seconds": 30,
+            }
+            task = {
+                "task_id": "task_" + "d" * 32,
+                "node_id": config["node_id"],
+                "kind": "node_destroy",
+                "payload": {"receipt_token": "receipt-token"},
+            }
+            with patch.dict(os.environ, env, clear=False), patch.object(
+                agent.os, "geteuid", return_value=0
+            ), patch.object(agent, "_report_task_status") as report:
+                agent._write_installation(config, "private-node-key", 5)
+                marker = root / "var" / "lib" / "vpspc-node" / ".managed-by-vpspc-node"
+                marker.write_text("managed by another tool\n", encoding="utf-8")
+                before = {
+                    path.relative_to(root): path.read_bytes()
+                    for path in root.rglob("*") if path.is_file()
+                }
+                result = agent.execute_uninstall_task(task)
+
+            after = {
+                path.relative_to(root): path.read_bytes()
+                for path in root.rglob("*") if path.is_file()
+            }
+            self.assertEqual(result["status"], "safely_retained")
+            self.assertEqual(after, before)
+            self.assertEqual(report.call_args.args[2], "safely_retained")
+
+    def test_destroy_dangling_owned_path_is_safely_retained(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            env = {"VPSPC_NODE_TEST_ROOT": temporary, "VPSPC_NODE_SKIP_SYSTEMCTL": "1"}
+            root = Path(temporary)
+            config = {
+                "controller_url": "https://monitor.example.com",
+                "node_id": "node_1234567890abcdef12345678",
+                "installation_id": "install_12345678",
+                "node_name": "edge",
+                "xray_logs": [],
+                "interval_minutes": 5,
+                "timeout_seconds": 30,
+            }
+            task = {
+                "task_id": "task_" + "e" * 32,
+                "node_id": config["node_id"],
+                "kind": "node_destroy",
+                "payload": {"receipt_token": "receipt-token"},
+            }
+            with patch.dict(os.environ, env, clear=False), patch.object(
+                agent.os, "geteuid", return_value=0
+            ), patch.object(agent, "_report_task_status") as report:
+                agent._write_installation(config, "private-node-key", 5)
+                dangling = root / "usr" / "local" / "bin" / "vpspc-node"
+                dangling.unlink()
+                dangling.symlink_to("/not-a-vpspc-target")
+                result = agent.execute_uninstall_task(task)
+
+            self.assertEqual(result["status"], "safely_retained")
+            self.assertTrue(dangling.is_symlink())
+            self.assertEqual(report.call_args.args[2], "safely_retained")
 
     def test_fixed_remote_uninstall_acknowledges_then_purges_managed_files(self):
         with tempfile.TemporaryDirectory() as temporary:

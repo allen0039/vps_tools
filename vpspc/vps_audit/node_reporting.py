@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -21,6 +22,8 @@ from typing import Any, Dict, Iterable, List, Tuple
 from urllib.parse import urlsplit
 
 from .behavior_audit import append_connections, classify_destination
+from .maintenance.releases import GitHubReleaseSource
+from .maintenance.store import MaintenanceStore
 from .models import parse_timestamp
 
 
@@ -28,10 +31,20 @@ REGISTRY_VERSION = 2
 LEGACY_REGISTRY_VERSION = 1
 AGENT_VERSION = "0.1.0"
 MAX_REQUEST_BYTES = 1_048_576
+MAX_TASK_RESULT_BYTES = 65_536
+MAX_TASK_RESULT_DEPTH = 6
+MAX_TASK_RESULT_ITEMS = 256
 COMMAND_ONLINE_SECONDS = 120
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 SAFE_NODE_ID = re.compile(r"^node_[a-f0-9]{24}$")
 SAFE_NONCE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+SAFE_TASK_ID = re.compile(r"^task_[a-f0-9]{32}$")
+SAFE_ARTIFACT_ID = re.compile(r"^sha256-[a-f0-9]{64}$")
+SAFE_BEARER_TOKEN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
+NODE_TASK_STATUS = frozenset(
+    {"downloading", "installing", "verifying", "success", "failed", "rolled_back", "safely_retained"}
+)
+UNINSTALL_TASK_STATUS = frozenset({"success", "failed", "safely_retained"})
 
 
 def _utc_now() -> datetime:
@@ -81,6 +94,113 @@ def _clean_name(value: Any, label: str = "node name") -> str:
     if not name or len(name) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in name):
         raise ValueError(f"{label} must contain 1-128 printable characters")
     return name
+
+
+def _require_exact_fields(value: Dict[str, Any], required: Iterable[str], optional: Iterable[str] = ()) -> None:
+    expected = set(required) | set(optional)
+    actual = set(value)
+    if actual - expected or set(required) - actual:
+        raise ValueError("request fields are invalid")
+
+
+def _bounded_json_value(value: Any, depth: int = 0) -> None:
+    """Reject unbounded or non-JSON task reports before persisting them."""
+
+    if depth > MAX_TASK_RESULT_DEPTH:
+        raise ValueError("task result is nested too deeply")
+    if value is None or isinstance(value, bool):
+        return
+    if isinstance(value, str):
+        if len(value) > 4_096 or any(ord(char) < 32 and char not in "\t\n\r" for char in value):
+            raise ValueError("task result string is invalid")
+        return
+    if isinstance(value, int):
+        if abs(value) > 2**53 - 1:
+            raise ValueError("task result number is invalid")
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value) or abs(value) > 2**53 - 1:
+            raise ValueError("task result number is invalid")
+        return
+    if isinstance(value, list):
+        if len(value) > MAX_TASK_RESULT_ITEMS:
+            raise ValueError("task result contains too many items")
+        for item in value:
+            _bounded_json_value(item, depth + 1)
+        return
+    if isinstance(value, dict):
+        if len(value) > MAX_TASK_RESULT_ITEMS:
+            raise ValueError("task result contains too many fields")
+        for key, item in value.items():
+            if not isinstance(key, str) or not key or len(key) > 128:
+                raise ValueError("task result field is invalid")
+            _bounded_json_value(item, depth + 1)
+        return
+    raise ValueError("task result must contain JSON values")
+
+
+def _validate_result(value: Any) -> Any:
+    _bounded_json_value(value)
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("task result must contain JSON values") from exc
+    if len(encoded) > MAX_TASK_RESULT_BYTES:
+        raise ValueError("task result exceeds its size limit")
+    return value
+
+
+def _validate_heartbeat(value: Dict[str, Any]) -> Tuple[str, int, bool]:
+    _require_exact_fields(value, {"agent_version", "agent_protocol", "claim"})
+    version = value["agent_version"]
+    if (
+        not isinstance(version, str)
+        or not version
+        or len(version) > 64
+        or version != version.strip()
+        or any(ord(char) < 32 or ord(char) == 127 for char in version)
+    ):
+        raise ValueError("agent version is invalid")
+    protocol = value["agent_protocol"]
+    if isinstance(protocol, bool) or not isinstance(protocol, int) or not 1 <= protocol <= 1_000_000:
+        raise ValueError("agent protocol is invalid")
+    claim = value["claim"]
+    if not isinstance(claim, bool):
+        raise ValueError("task claim flag is invalid")
+    return version, protocol, claim
+
+
+def _validate_task_status(value: Dict[str, Any]) -> Tuple[str, str, Any]:
+    _require_exact_fields(value, {"task_id", "status"}, {"result"})
+    task_id = value["task_id"]
+    if not isinstance(task_id, str) or not SAFE_TASK_ID.fullmatch(task_id):
+        raise ValueError("node task ID is invalid")
+    status = value["status"]
+    if not isinstance(status, str) or status not in NODE_TASK_STATUS:
+        raise ValueError("node task status is invalid")
+    result = _validate_result(value["result"]) if "result" in value else None
+    return task_id, status, result
+
+
+def _validate_uninstall_receipt(value: Dict[str, Any]) -> Tuple[str, str, str, int]:
+    _require_exact_fields(value, {"node_id", "task_id", "status", "removed_paths_count"})
+    node_id = value["node_id"]
+    task_id = value["task_id"]
+    status = value["status"]
+    removed_paths_count = value["removed_paths_count"]
+    if not isinstance(node_id, str) or not SAFE_NODE_ID.fullmatch(node_id):
+        raise ValueError("uninstall receipt node ID is invalid")
+    if not isinstance(task_id, str) or not SAFE_TASK_ID.fullmatch(task_id):
+        raise ValueError("uninstall receipt task ID is invalid")
+    if not isinstance(status, str) or status not in UNINSTALL_TASK_STATUS:
+        raise ValueError("uninstall receipt status is invalid")
+    if (
+        isinstance(removed_paths_count, bool)
+        or not isinstance(removed_paths_count, int)
+        or not 0 <= removed_paths_count <= 100_000
+    ):
+        raise ValueError("removed paths count is invalid")
+    return node_id, task_id, status, removed_paths_count
 
 
 class NodeRegistry:
@@ -571,6 +691,23 @@ class NodeRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _artifact(self, path: Path) -> None:
+        """Send one pre-validated immutable release artifact without buffering it."""
+
+        with path.open("rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "public, immutable")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+
     def _body(self) -> bytes:
         try:
             size = int(self.headers.get("Content-Length", "0"))
@@ -594,8 +731,36 @@ class NodeRequestHandler(BaseHTTPRequestHandler):
         )
         return node_id, node
 
+    def _maintenance_store(self) -> MaintenanceStore:
+        store = self.context.get("maintenance_store")
+        if not isinstance(store, MaintenanceStore):
+            raise ValueError("maintenance task store is unavailable")
+        return store
+
+    def _release_source(self) -> GitHubReleaseSource:
+        source = self.context.get("release_source")
+        if not isinstance(source, GitHubReleaseSource):
+            raise ValueError("managed release cache is unavailable")
+        return source
+
+    def _uninstall_bearer(self) -> str:
+        value = self.headers.get("Authorization", "")
+        prefix = "Bearer "
+        if not value.startswith(prefix):
+            raise PermissionError("uninstall receipt authorization is invalid")
+        token = value[len(prefix) :]
+        if not SAFE_BEARER_TOKEN.fullmatch(token):
+            raise PermissionError("uninstall receipt authorization is invalid")
+        return token
+
     def do_GET(self) -> None:
         try:
+            if self.path.startswith("/assets/updates/"):
+                artifact_id = self.path[len("/assets/updates/") :]
+                if not SAFE_ARTIFACT_ID.fullmatch(artifact_id):
+                    raise FileNotFoundError("unknown managed artifact")
+                self._artifact(self._release_source().artifact_path(artifact_id))
+                return
             if self.path == "/assets/vpspc-node.py":
                 asset = Path(self.context["agent_asset_path"])
                 self._text(HTTPStatus.OK, asset.read_text(encoding="utf-8"), "text/x-python; charset=utf-8")
@@ -610,6 +775,8 @@ class NodeRequestHandler(BaseHTTPRequestHandler):
                 )
                 self._text(HTTPStatus.OK, script, "text/x-shellscript; charset=utf-8")
                 return
+            self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
+        except FileNotFoundError:
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
         except (OSError, ValueError) as exc:
             self._json(HTTPStatus.GONE, {"ok": False, "error": str(exc)})
@@ -628,7 +795,52 @@ class NodeRequestHandler(BaseHTTPRequestHandler):
                     {"ok": True, **result, "behavior_audit": self._behavior_audit_policy()},
                 )
                 return
+            if self.path == "/v1/node/uninstall-receipt":
+                node_id, task_id, status, removed_paths_count = _validate_uninstall_receipt(raw)
+                receipt = self._maintenance_store().consume_uninstall_receipt(
+                    self._uninstall_bearer(), node_id, task_id
+                )
+                if receipt is None:
+                    raise PermissionError("uninstall receipt authorization is invalid")
+                task = self._maintenance_store().record_node_task_status(
+                    node_id,
+                    task_id,
+                    status,
+                    result={"removed_paths_count": removed_paths_count},
+                )
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "receipt": {
+                            "node_id": node_id,
+                            "task_id": task_id,
+                            "removed_paths_count": removed_paths_count,
+                        },
+                        "task": task,
+                    },
+                )
+                return
             node_id, node = self._authenticate(body)
+            if self.path == "/v1/node/heartbeat":
+                agent_version, agent_protocol, claim = _validate_heartbeat(raw)
+                current = _utc_now()
+                self.context["registry"].record_command_heartbeat(
+                    node_id, agent_version, agent_protocol, current
+                )
+                task = self._maintenance_store().claim_node_task(node_id, current) if claim else None
+                self._json(
+                    HTTPStatus.OK,
+                    {"ok": True, "server_time": _iso(current), "task": task},
+                )
+                return
+            if self.path == "/v1/node/task-status":
+                task_id, status, result = _validate_task_status(raw)
+                task = self._maintenance_store().record_node_task_status(
+                    node_id, task_id, status, result=result
+                )
+                self._json(HTTPStatus.OK, {"ok": True, "task": task})
+                return
             if self.path == "/v1/node/events":
                 rows = raw.get("events")
                 if not isinstance(rows, list) or len(rows) > int(self.context["max_batch_events"]):
@@ -658,7 +870,7 @@ class NodeRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
         except PermissionError as exc:
             self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": str(exc)})
-        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        except (OSError, RuntimeError, ValueError, TypeError, json.JSONDecodeError) as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
 
 
@@ -669,6 +881,8 @@ def _paths(config: Dict[str, Any]) -> Dict[str, Any]:
         "registry_path": Path(node_config.get("registry_file") or state_dir / "nodes.json"),
         "inbox_path": Path(node_config.get("inbox_file") or state_dir / "node-inbox.jsonl"),
         "agent_asset_path": str(node_config["agent_asset_path"]),
+        "maintenance_state_path": state_dir / "maintenance.json",
+        "release_cache_dir": state_dir / "release-artifacts",
     }
 
 
@@ -684,6 +898,8 @@ def serve(config_path: str) -> None:
     context = {
         **paths,
         "registry": registry,
+        "maintenance_store": MaintenanceStore(paths["maintenance_state_path"]),
+        "release_source": GitHubReleaseSource(paths["release_cache_dir"]),
         "public_base_url": node_config["public_base_url"],
         "max_batch_events": int(node_config["max_batch_events"]),
         "max_request_bytes": MAX_REQUEST_BYTES,

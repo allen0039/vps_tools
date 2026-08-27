@@ -1,4 +1,5 @@
 import http.client
+import hashlib
 import json
 import tempfile
 import threading
@@ -15,6 +16,8 @@ from vps_audit.node_reporting import (
     build_bootstrap,
     sign_request,
 )
+from vps_audit.maintenance.releases import GitHubReleaseSource
+from vps_audit.maintenance.store import MaintenanceStore
 from vps_audit.runtime import normalize_runtime_config, run_cycle
 
 
@@ -471,6 +474,219 @@ class NodeReportingTests(unittest.TestCase):
                 registered[enrolled["node_id"]]["uninstalled_at"][:10],
                 datetime.now(timezone.utc).date().isoformat(),
             )
+
+    def test_authenticated_maintenance_endpoints_and_fixed_update_asset(self):
+        """Nodes can only claim and advance their own short-lived commands."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            registry = NodeRegistry(root / "nodes.json", replay_window_seconds=300)
+            store = MaintenanceStore(root / "maintenance.json")
+            cache = root / "release-cache"
+            release_source = GitHubReleaseSource(cache)
+            artifact_payload = b"verified node update artifact\n"
+            artifact_id = "sha256-" + hashlib.sha256(artifact_payload).hexdigest()
+            cache.mkdir(mode=0o700)
+            artifact_path = cache / (artifact_id + ".bundle")
+            artifact_path.write_bytes(artifact_payload)
+            artifact_path.chmod(0o600)
+            (cache / "artifacts.json").write_text(
+                json.dumps({"schema_version": 1, "artifacts": {artifact_id: artifact_path.name}}),
+                encoding="utf-8",
+            )
+
+            first_link = registry.create_enrollment("vmiss hk")
+            first = registry.enroll(
+                first_link["token"],
+                {"installation_id": "install_task_http_001", "node_name": "host-a", "agent_version": "test"},
+            )
+            second_link = registry.create_enrollment("vmiss sg")
+            second = registry.enroll(
+                second_link["token"],
+                {"installation_id": "install_task_http_002", "node_name": "host-b", "agent_version": "test"},
+            )
+            initial_task = store.create_node_tasks(
+                "job_maintenance_http_001",
+                [{"node_id": first["node_id"], "name": "vmiss hk"}],
+                {"kind": "node_update", "artifact_id": artifact_id},
+            )[0]
+
+            agent_asset = root / "vpspc-node.py"
+            agent_asset.write_text("# node agent\n", encoding="utf-8")
+            server = NodeHTTPServer(
+                ("127.0.0.1", 0),
+                NodeRequestHandler,
+                {
+                    "registry": registry,
+                    "maintenance_store": store,
+                    "release_source": release_source,
+                    "public_base_url": "http://127.0.0.1",
+                    "agent_asset_path": str(agent_asset),
+                    "inbox_path": root / "node-inbox.jsonl",
+                    "max_batch_events": 500,
+                    "max_request_bytes": 1024,
+                },
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+            nonce_counter = 0
+
+            def request(method, path, body=b"", headers=None):
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+                connection.request(method, path, body=body, headers=headers or {})
+                response = connection.getresponse()
+                payload = response.read()
+                result = (response.status, dict(response.getheaders()), payload)
+                connection.close()
+                return result
+
+            def signed_request(path, value, node=first, *, nonce=None):
+                nonlocal nonce_counter
+                body = json.dumps(value, separators=(",", ":")).encode("utf-8")
+                if nonce is None:
+                    nonce_counter += 1
+                    nonce = f"nonce_maintenance_{nonce_counter:08d}"
+                timestamp = str(int(datetime.now(timezone.utc).timestamp()))
+                return request(
+                    "POST",
+                    path,
+                    body,
+                    {
+                        "Content-Type": "application/json",
+                        "Content-Length": str(len(body)),
+                        "X-VPSPC-Node": node["node_id"],
+                        "X-VPSPC-Timestamp": timestamp,
+                        "X-VPSPC-Nonce": nonce,
+                        "X-VPSPC-Signature": sign_request(node["credential"], timestamp, nonce, body),
+                    },
+                )
+
+            status, _headers, payload = signed_request(
+                "/v1/node/heartbeat",
+                {"agent_version": "0.2.0", "agent_protocol": 2, "claim": True},
+            )
+            heartbeat = json.loads(payload)
+            self.assertEqual(status, 200)
+            self.assertEqual(heartbeat["task"]["task_id"], initial_task["task_id"])
+            self.assertEqual(heartbeat["task"]["node_id"], first["node_id"])
+            self.assertNotIn("credential", json.dumps(heartbeat))
+            registered = {item["node_id"]: item for item in registry.list_nodes()}
+            self.assertEqual(registered[first["node_id"]]["agent_version"], "0.2.0")
+
+            replay_body = json.dumps(
+                {"agent_version": "0.2.0", "agent_protocol": 2, "claim": False},
+                separators=(",", ":"),
+            ).encode("utf-8")
+            replay_timestamp = str(int(datetime.now(timezone.utc).timestamp()))
+            replay_nonce = "nonce_maintenance_replay_01"
+            replay_headers = {
+                "Content-Type": "application/json",
+                "Content-Length": str(len(replay_body)),
+                "X-VPSPC-Node": first["node_id"],
+                "X-VPSPC-Timestamp": replay_timestamp,
+                "X-VPSPC-Nonce": replay_nonce,
+                "X-VPSPC-Signature": sign_request(
+                    first["credential"], replay_timestamp, replay_nonce, replay_body
+                ),
+            }
+            first_status, _headers, _payload = request(
+                "POST", "/v1/node/heartbeat", replay_body, replay_headers
+            )
+            replay_status, _headers, replay_payload = request(
+                "POST", "/v1/node/heartbeat", replay_body, replay_headers
+            )
+            self.assertEqual(first_status, 200)
+            self.assertEqual(replay_status, 401)
+            self.assertIn("already been used", json.loads(replay_payload)["error"])
+
+            status, _headers, payload = signed_request(
+                "/v1/node/task-status",
+                {"task_id": initial_task["task_id"], "status": "downloading", "result": {"stage": "fetch"}},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(payload)["task"]["status"], "downloading")
+            status, _headers, payload = signed_request(
+                "/v1/node/task-status",
+                {"task_id": initial_task["task_id"], "status": "installing"},
+                node=second,
+            )
+            self.assertEqual(status, 401)
+            self.assertIn("does not belong", json.loads(payload)["error"])
+
+            removal_task = store.create_node_tasks(
+                "job_maintenance_http_002",
+                [{"node_id": first["node_id"], "name": "vmiss hk"}],
+                {"kind": "node_destroy"},
+            )[0]
+            status, _headers, payload = signed_request(
+                "/v1/node/heartbeat",
+                {"agent_version": "0.2.0", "agent_protocol": 2, "claim": True},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(payload)["task"]["task_id"], removal_task["task_id"])
+            receipt = store.issue_uninstall_receipt(first["node_id"], removal_task["task_id"])
+            receipt_body = json.dumps(
+                {
+                    "node_id": first["node_id"],
+                    "task_id": removal_task["task_id"],
+                    "status": "success",
+                    "removed_paths_count": 6,
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+            status, _headers, _payload = signed_request(
+                "/v1/node/uninstall-receipt", json.loads(receipt_body)
+            )
+            self.assertEqual(status, 401)
+            status, _headers, payload = request(
+                "POST",
+                "/v1/node/uninstall-receipt",
+                receipt_body,
+                {
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(receipt_body)),
+                    "Authorization": "Bearer " + receipt["token"],
+                },
+            )
+            self.assertEqual(status, 200)
+            self.assertTrue(json.loads(payload)["ok"])
+            self.assertEqual(
+                store.node_results("job_maintenance_http_002")[first["node_id"]]["status"], "success"
+            )
+            expired = store.issue_uninstall_receipt(first["node_id"], removal_task["task_id"])
+            store.expire(datetime.now(timezone.utc) + timedelta(seconds=121))
+            status, _headers, _payload = request(
+                "POST",
+                "/v1/node/uninstall-receipt",
+                receipt_body,
+                {
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(receipt_body)),
+                    "Authorization": "Bearer " + expired["token"],
+                },
+            )
+            self.assertEqual(status, 401)
+
+            status, headers, payload = request("GET", "/assets/updates/" + artifact_id)
+            self.assertEqual(status, 200)
+            self.assertEqual(payload, artifact_payload)
+            self.assertEqual(headers["Content-Length"], str(len(artifact_payload)))
+            self.assertEqual(headers["Cache-Control"], "public, immutable")
+            self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+            for path in ("/assets/updates/unknown", "/assets/updates/" + artifact_id + "?x=1"):
+                with self.subTest(path=path):
+                    self.assertEqual(request("GET", path)[0], 404)
+
+            oversized = b"x" * 1025
+            status, _headers, _payload = request(
+                "POST",
+                "/v1/node/heartbeat",
+                oversized,
+                {"Content-Type": "application/json", "Content-Length": str(len(oversized))},
+            )
+            self.assertEqual(status, 400)
 
 
 if __name__ == "__main__":

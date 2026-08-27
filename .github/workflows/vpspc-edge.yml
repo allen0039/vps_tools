@@ -1,0 +1,102 @@
+name: VPSPC Edge Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: vpspc-edge-publish
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run VPSPC tests
+        working-directory: vpspc
+        run: python3 -m unittest discover -s tests
+      - name: Validate Python and shell sources
+        working-directory: vpspc
+        run: |
+          python3 -m compileall -q vps_audit deploy/node/vpspc-node.py scripts/build_vpspc_release.py
+          bash -n install.sh remote-install.sh
+          find deploy/bin -type f -print0 | xargs -0 -r bash -n
+      - name: Build reproducible edge artifacts
+        working-directory: vpspc
+        run: |
+          python3 scripts/build_vpspc_release.py \
+            --channel edge \
+            --version edge \
+            --revision "$GITHUB_SHA" \
+            --docker-digest sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+            --output ../dist-verify
+      - name: Build VPSPC image without publishing
+        run: docker build --tag vpspc:edge-verify ./vpspc
+
+  publish:
+    needs: verify
+    if: github.repository == 'allen0039/vps_tools'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish edge image
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./vpspc
+          push: true
+          tags: |
+            ghcr.io/allen0039/vpspc:edge
+            ghcr.io/allen0039/vpspc:sha-${{ github.sha }}
+      - name: Build edge release assets with pushed digest
+        working-directory: vpspc
+        run: |
+          python3 scripts/build_vpspc_release.py \
+            --channel edge \
+            --version edge \
+            --revision "$GITHUB_SHA" \
+            --docker-digest "${{ steps.image.outputs.digest }}" \
+            --output ../dist
+      - name: Publish mutable edge prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view edge >/dev/null 2>&1; then
+            release_id="$(gh release view edge --json databaseId --jq .databaseId)"
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+              -f target_commitish="$GITHUB_SHA" \
+              -f prerelease=true \
+              -f name="VPSPC edge" \
+              -f body="Automated main build: $GITHUB_SHA"
+            gh release upload edge \
+              dist/vpspc-controller-edge.tar.gz \
+              dist/vpspc-node-edge.py \
+              dist/manifest.json \
+              dist/SHA256SUMS \
+              --clobber
+          else
+            gh release create edge \
+              dist/vpspc-controller-edge.tar.gz \
+              dist/vpspc-node-edge.py \
+              dist/manifest.json \
+              dist/SHA256SUMS \
+              --target "$GITHUB_SHA" \
+              --title "VPSPC edge" \
+              --prerelease \
+              --notes "Automated main build: $GITHUB_SHA"
+          fi

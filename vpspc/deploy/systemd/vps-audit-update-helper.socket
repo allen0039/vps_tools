@@ -1,0 +1,13 @@
+[Unit]
+Description=VPSPC restricted host update helper socket
+
+[Socket]
+ListenStream=/run/vpspc/updater.sock
+SocketMode=0600
+SocketUser=root
+SocketGroup=root
+DirectoryMode=0700
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target
