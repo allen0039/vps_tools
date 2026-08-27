@@ -7,6 +7,7 @@ import os
 import secrets
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -848,7 +849,7 @@ def run_bot(config_path: str, once: bool = False) -> None:
         raise ValueError("Telegram 双向管理未启用")
     token = _read_secret(str(telegram["token_file"]), "Telegram token")
     if not once:
-        _register_command_menu(token)
+        threading.Thread(target=_register_command_menu, args=(token,), daemon=True).start()
     state_path = Path(config["state_dir"]) / "bot-state.json"
     try:
         state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
@@ -887,16 +888,14 @@ def run_bot(config_path: str, once: bool = False) -> None:
                 _atomic_json(state_path, state)
                 continue
             try:
-                response, keyboard = _handle(config_path, sender_id, value, pending)
                 if callback_id:
                     _answer_callback_safely(token, callback_id)
+                response, keyboard = _handle(config_path, sender_id, value, pending)
                 if callback_id and message_id is not None:
                     edit_message_text(token, str(chat["id"]), message_id, response, reply_markup=keyboard)
                 else:
                     send_message(token, str(chat["id"]), response, reply_markup=keyboard)
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
-                if callback_id:
-                    _answer_callback_safely(token, callback_id, "操作失败")
                 _send_error_safely(token, str(chat["id"]), f"操作失败：{str(exc)[:500]}")
             _atomic_json(state_path, state)
         if once:

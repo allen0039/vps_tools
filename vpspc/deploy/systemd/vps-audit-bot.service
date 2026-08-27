@@ -8,6 +8,7 @@ Type=simple
 User=root
 Group=root
 UMask=0077
+Environment=VPSPC_TELEGRAM_IPV4=1
 ExecStart=/opt/vps-audit/venv/bin/vps-audit-bot --config /etc/vps-audit/config.json
 Restart=on-failure
 RestartSec=10s

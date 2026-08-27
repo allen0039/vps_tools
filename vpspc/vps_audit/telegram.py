@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import http.client
+import os
 import socket
 import urllib.error
 import urllib.request
@@ -13,6 +15,48 @@ SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 
 class TelegramTransientError(RuntimeError):
     """A temporary network or server failure that is safe to retry."""
+
+
+class _IPv4HTTPSConnection(http.client.HTTPSConnection):
+    def connect(self) -> None:
+        server_hostname = self._tunnel_host or self.host
+        raw_socket = None
+        last_error: OSError | None = None
+        for family, socktype, proto, _, address in socket.getaddrinfo(
+            self.host, self.port, socket.AF_INET, socket.SOCK_STREAM
+        ):
+            candidate = socket.socket(family, socktype, proto)
+            try:
+                candidate.settimeout(self.timeout)
+                if self.source_address:
+                    candidate.bind(self.source_address)
+                candidate.connect(address)
+                raw_socket = candidate
+                break
+            except OSError as exc:
+                last_error = exc
+                candidate.close()
+        if raw_socket is None:
+            raise last_error or OSError("Telegram IPv4 connection failed")
+        self.sock = raw_socket
+        if self._tunnel_host:
+            self._tunnel()
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
+
+
+class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, request):
+        return self.do_open(
+            _IPv4HTTPSConnection,
+            request,
+            context=getattr(self, "_context", None),
+        )
+
+
+def _urlopen(request: urllib.request.Request, timeout: int):
+    if os.environ.get("VPSPC_TELEGRAM_IPV4") == "1":
+        return urllib.request.build_opener(_IPv4HTTPSHandler()).open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
 
 
 DEFAULT_COMMANDS: List[Dict[str, str]] = [
@@ -180,7 +224,7 @@ def api_request(token: str, method: str, payload: Dict[str, Any], timeout: int =
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _urlopen(request, timeout) as response:
             result = json.load(response)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
@@ -241,11 +285,11 @@ def get_updates(token: str, offset: int | None, timeout: int = 30) -> List[Dict[
     return [item for item in updates if isinstance(item, dict)]
 
 
-def answer_callback_query(token: str, callback_query_id: str, text: str = "") -> None:
+def answer_callback_query(token: str, callback_query_id: str, text: str = "", timeout: int = 5) -> None:
     payload: Dict[str, Any] = {"callback_query_id": callback_query_id}
     if text:
         payload["text"] = text[:180]
-    api_request(token, "answerCallbackQuery", payload)
+    api_request(token, "answerCallbackQuery", payload, timeout)
 
 
 def edit_message_text(
