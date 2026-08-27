@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vps-user-audit"
-version = "0.5.1"
+version = "0.6.0"
 description = "Evidence-first VPS user behavior audit"
 requires-python = ">=3.9"
 
@@ -16,6 +16,8 @@ vps-audit = "vps_audit.cli:main"
 vps-audit-runner = "vps_audit.runtime:main"
 vps-audit-bot = "vps_audit.bot:main"
 vpspc = "vps_audit.management:main"
+vps-audit-nodes = "vps_audit.node_reporting:main"
+vps-audit-web = "vps_audit.web:main"
 
 [tool.setuptools.packages.find]
 include = ["vps_audit*"]

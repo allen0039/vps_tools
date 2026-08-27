@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from vps_audit.behavior_audit import append_connections, list_incidents
 from vps_audit.falco_parser import parse_falco_event
 from vps_audit.miaomiaowux_parser import parse_miaomiaowux_line
 from vps_audit.runtime import (
@@ -174,6 +175,23 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("SECRET", message)
         self.assertNotIn("secret.py", message)
 
+    def test_telegram_node_finding_names_user_and_all_involved_nodes(self):
+        report = {"users": [{"user": "panel-user-1", "severity": "high", "risk_score": 70}]}
+        findings = [{
+            "user": "panel-user-1",
+            "severity": "high",
+            "title": "同一节点身份短时活跃 IP 过多",
+            "summary": "节点实际连接在窗口内出现多个来源 IP。",
+            "evidence": [
+                {"timestamp": "2026-08-27T01:00:00Z", "source_ip": "198.51.100.1", "node_name": "vmiss hk"},
+                {"timestamp": "2026-08-27T01:01:00Z", "source_ip": "198.51.100.2", "node_name": "oracle jp"},
+                {"timestamp": "2026-08-27T01:02:00Z", "source_ip": "198.51.100.3", "node_name": "vmiss hk"},
+            ],
+        }]
+        message = build_alert_message(report, findings)
+        self.assertIn("panel-user-1", message)
+        self.assertIn("涉及节点：vmiss hk, oracle jp", message)
+
     def test_high_account_score_promotes_medium_findings_to_notification(self):
         report = {
             "users": [{"user": "alice", "severity": "high", "risk_score": 65}],
@@ -285,6 +303,70 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(errors, 0)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["source"], "miaomiaowux")
+
+    def test_behavior_archive_drives_incident_without_copying_targets_to_main_events(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            archive = root / "behavior-audit"
+            rows = []
+            domains = ["accounts.google.com", "auth.openai.com", "login.microsoftonline.com"]
+            for index, domain in enumerate(domains):
+                rows.append({
+                    "timestamp": now.isoformat().replace("+00:00", "Z"),
+                    "event_type": "proxy_connection",
+                    "user": "user-a",
+                    "source_ip": "198.51.100.9",
+                    "source_port": 50000 + index,
+                    "destination_host": domain,
+                    "destination_ip": "",
+                    "destination_port": 443,
+                    "destination_category": "account_service",
+                    "network": "tcp",
+                    "inbound_tag": "vless-in",
+                    "protocol": "xray",
+                    "node_id": "node_1234567890abcdef12345678",
+                    "node_name": "vmiss hk",
+                    "source": "remote_node",
+                    "event_id": f"evt_runtime_{index:08d}",
+                })
+            append_connections(archive, rows)
+            config = root / "config.json"
+            config.write_text(
+                json.dumps({
+                    "auth_logs": [],
+                    "state_dir": str(state),
+                    "report_dir": str(root / "reports"),
+                    "behavior_audit": {
+                        "enabled": True,
+                        "archive_dir": str(archive),
+                        "retention_days": 7,
+                        "incident_retention_days": 30,
+                        "max_disk_mb": 100,
+                    },
+                    "rules": {"thresholds": {
+                        "behavior_connection_count": 3,
+                        "behavior_unique_destination_count": 3,
+                        "behavior_account_service_count": 3,
+                    }},
+                    "telegram": {"enabled": False},
+                    "openai_review": {"enabled": False},
+                }),
+                encoding="utf-8",
+            )
+            report = run_cycle(str(config))
+            self.assertIn(
+                "BEHAVIOR_ACCOUNT_AUTOMATION",
+                {item["rule_id"] for item in report["findings"]},
+            )
+            incidents = list_incidents(archive)
+            self.assertTrue(any(
+                item["rule_id"] == "BEHAVIOR_ACCOUNT_AUTOMATION" for item in incidents
+            ))
+            persistent = (state / "events.jsonl").read_text(encoding="utf-8")
+            self.assertIn("proxy_activity", persistent)
+            self.assertNotIn("accounts.google.com", persistent)
 
 
 if __name__ == "__main__":

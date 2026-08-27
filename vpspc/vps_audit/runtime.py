@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -14,6 +15,13 @@ from urllib.parse import urlsplit
 
 from .ai_review import review_with_provider, test_ai_provider as run_ai_provider_test
 from .analyzer import SEVERITY_ORDER, analyze
+from .behavior_audit import (
+    load_incident,
+    maintain_archive,
+    read_recent_connections,
+    save_incident_ai_review,
+    save_incidents,
+)
 from .config import DEFAULT_CONFIG
 from .falco_parser import parse_falco_event
 from .geoip import GeoIPEnricher
@@ -25,6 +33,12 @@ from .telegram import build_alert_message, send_message
 
 
 DEFAULT_RUNTIME_CONFIG: Dict[str, Any] = {
+    "web": {
+        "enabled": False,
+        "listen_host": "127.0.0.1",
+        "listen_port": 8787,
+        "token_file": "/etc/vps-audit/web.token",
+    },
     "auth_logs": ["/var/log/auth.log", "/var/log/secure"],
     "auth_timezone": "+00:00",
     "journal": {
@@ -36,6 +50,27 @@ DEFAULT_RUNTIME_CONFIG: Dict[str, Any] = {
     "subscription_logs": [],
     "miaomiaowux_logs": [],
     "miaomiaowux_timezone": "+00:00",
+    "node_reporting": {
+        "mode": "controller_only",
+        "listen_host": "127.0.0.1",
+        "listen_port": 8766,
+        "public_base_url": "",
+        "registry_file": "",
+        "inbox_file": "",
+        "agent_asset_path": "/opt/vps-audit/manager/deploy/node/vpspc-node.py",
+        "enrollment_ttl_minutes": 15,
+        "replay_window_seconds": 300,
+        "max_batch_events": 500,
+    },
+    "behavior_audit": {
+        "enabled": False,
+        "archive_dir": "/var/lib/vps-audit/behavior-audit",
+        "retention_days": 7,
+        "incident_retention_days": 30,
+        "max_disk_mb": 20480,
+        "max_analysis_events": 100000,
+        "ai_include_full_metadata": True,
+    },
     "state_dir": "/var/lib/vps-audit",
     "report_dir": "/var/lib/vps-audit/reports",
     "scan_interval_minutes": 5,
@@ -174,6 +209,66 @@ def normalize_runtime_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("runtime config root must be a JSON object")
     config = _merge(DEFAULT_RUNTIME_CONFIG, raw)
     _normalize_ai_review(config, raw)
+    node_reporting = config.get("node_reporting")
+    if not isinstance(node_reporting, dict):
+        raise ValueError("node_reporting must be an object")
+    if node_reporting.get("mode") not in {"controller_only", "node_reporting"}:
+        raise ValueError("node_reporting.mode must be controller_only or node_reporting")
+    listen_host = str(node_reporting.get("listen_host", "")).strip()
+    if not listen_host or len(listen_host) > 255 or any(ord(char) < 32 for char in listen_host):
+        raise ValueError("node_reporting.listen_host is invalid")
+    node_reporting["listen_host"] = listen_host
+    for key in ("registry_file", "inbox_file"):
+        value = str(node_reporting.get(key, "")).strip()
+        if value and (not Path(value).is_absolute() or len(value) > 512):
+            raise ValueError(f"node_reporting.{key} must be empty or an absolute path")
+        node_reporting[key] = value
+    asset_path = str(node_reporting.get("agent_asset_path", "")).strip()
+    if not asset_path or not Path(asset_path).is_absolute() or len(asset_path) > 512:
+        raise ValueError("node_reporting.agent_asset_path must be an absolute path")
+    node_reporting["agent_asset_path"] = asset_path
+    public_base_url = str(node_reporting.get("public_base_url", "")).strip().rstrip("/")
+    if public_base_url:
+        public = urlsplit(public_base_url)
+        if (
+            public.scheme not in {"http", "https"}
+            or not public.hostname
+            or public.username
+            or public.password
+            or public.query
+            or public.fragment
+            or len(public_base_url) > 512
+        ):
+            raise ValueError("node_reporting.public_base_url must be a plain HTTP(S) base URL")
+        if public.scheme != "https" and public.hostname not in {"127.0.0.1", "::1", "localhost"}:
+            raise ValueError("remote node reporting requires an HTTPS public_base_url")
+    if node_reporting["mode"] == "node_reporting" and not public_base_url:
+        raise ValueError("node reporting mode requires node_reporting.public_base_url")
+    node_reporting["public_base_url"] = public_base_url
+    behavior_audit = config.get("behavior_audit")
+    if not isinstance(behavior_audit, dict):
+        raise ValueError("behavior_audit must be an object")
+    if not isinstance(behavior_audit.get("enabled"), bool):
+        raise ValueError("behavior_audit.enabled must be boolean")
+    archive_dir = str(behavior_audit.get("archive_dir", "")).strip()
+    if not archive_dir or not Path(archive_dir).is_absolute() or len(archive_dir) > 512:
+        raise ValueError("behavior_audit.archive_dir must be an absolute path")
+    behavior_audit["archive_dir"] = archive_dir
+    if not isinstance(behavior_audit.get("ai_include_full_metadata"), bool):
+        raise ValueError("behavior_audit.ai_include_full_metadata must be boolean")
+    web = config.get("web")
+    if not isinstance(web, dict):
+        raise ValueError("web must be an object")
+    if not isinstance(web.get("enabled"), bool):
+        raise ValueError("web.enabled must be boolean")
+    web_host = str(web.get("listen_host", "")).strip()
+    if not web_host or len(web_host) > 255 or any(ord(char) < 32 for char in web_host):
+        raise ValueError("web.listen_host is invalid")
+    token_file = str(web.get("token_file", "")).strip()
+    if not token_file or not Path(token_file).is_absolute() or len(token_file) > 512:
+        raise ValueError("web.token_file must be an absolute path")
+    web["listen_host"] = web_host
+    web["token_file"] = token_file
     severity = config["telegram"]["minimum_severity"]
     if severity not in SEVERITY_ORDER:
         raise ValueError(f"invalid telegram.minimum_severity: {severity}")
@@ -231,6 +326,15 @@ def normalize_runtime_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         "telegram.cooldown_hours": (0.0, 8760.0),
         "telegram.max_findings": (1.0, 50.0),
         "telegram.poll_timeout_seconds": (5.0, 50.0),
+        "node_reporting.listen_port": (1.0, 65535.0),
+        "web.listen_port": (1.0, 65535.0),
+        "node_reporting.enrollment_ttl_minutes": (1.0, 1440.0),
+        "node_reporting.replay_window_seconds": (30.0, 3600.0),
+        "node_reporting.max_batch_events": (1.0, 5000.0),
+        "behavior_audit.retention_days": (1.0, 365.0),
+        "behavior_audit.incident_retention_days": (1.0, 3650.0),
+        "behavior_audit.max_disk_mb": (100.0, 1048576.0),
+        "behavior_audit.max_analysis_events": (1000.0, 1000000.0),
     }
     for key, (minimum, maximum) in numeric_ranges.items():
         if "." in key:
@@ -382,6 +486,80 @@ def _parse_subscription_lines(lines: Iterable[str], enricher: GeoIPEnricher) -> 
     return events, errors
 
 
+def _parse_proxy_activity_lines(
+    lines: Iterable[str], enricher: GeoIPEnricher
+) -> Tuple[List[Dict[str, Any]], int]:
+    events: List[Dict[str, Any]] = []
+    errors = 0
+    for line in lines:
+        try:
+            raw = json.loads(line)
+            if not isinstance(raw, dict) or raw.get("event_type") not in {
+                "proxy_activity",
+                "proxy_connection",
+            }:
+                raise ValueError("remote node event must be proxy_activity or proxy_connection")
+            for key in ("timestamp", "user", "source_ip", "node_id", "event_id"):
+                if not raw.get(key):
+                    raise ValueError(f"remote node event requires {key}")
+            parse_timestamp(str(raw["timestamp"]))
+            event = dict(raw)
+            event["timestamp"] = str(raw["timestamp"])
+            event["user"] = str(raw["user"])
+            event["source_ip"] = str(raw["source_ip"])
+            geo = enricher.enrich(event["source_ip"])
+            for key, value in geo.items():
+                event.setdefault(key, value)
+            events.append(event)
+        except (json.JSONDecodeError, ValueError, TypeError, OSError):
+            errors += 1
+    return events, errors
+
+
+def _connection_activity_events(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    latest: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+    for event in events:
+        if event.get("event_type") != "proxy_connection":
+            continue
+        key = (
+            str(event.get("user", "")),
+            str(event.get("node_id", "")),
+            str(event.get("source_ip", "")),
+            str(event.get("protocol", "")),
+        )
+        previous = latest.get(key)
+        if previous and str(previous.get("timestamp", "")) >= str(event.get("timestamp", "")):
+            continue
+        activity = {
+            key_name: value
+            for key_name, value in event.items()
+            if key_name
+            in {
+                "timestamp",
+                "user",
+                "source_ip",
+                "protocol",
+                "node_id",
+                "node_name",
+                "source",
+                "country",
+                "region",
+                "city",
+                "asn",
+                "isp",
+                "network_type",
+                "lat",
+                "lon",
+            }
+        }
+        activity["event_type"] = "proxy_activity"
+        activity["event_id"] = "activity_" + hashlib.sha256(
+            "\0".join(key).encode("utf-8")
+        ).hexdigest()[:32]
+        latest[key] = activity
+    return list(latest.values())
+
+
 def _parse_miaomiaowux_lines(
     lines: Iterable[str], timezone_offset: str, enricher: GeoIPEnricher
 ) -> Tuple[List[Dict[str, Any]], int]:
@@ -471,15 +649,39 @@ def _merge_events(existing: Iterable[Dict[str, Any]], new: Iterable[Dict[str, An
 def _filter_monitored_events(events: Iterable[Event], config: Dict[str, Any]) -> List[Event]:
     monitoring = config["subscription_monitoring"]
     if not monitoring.get("enabled"):
-        return [event for event in events if event.event_type != "subscription_access"]
+        return [
+            event
+            for event in events
+            if event.event_type not in {"subscription_access", "proxy_activity", "proxy_connection"}
+        ]
     if monitoring.get("mode") == "all":
         return list(events)
     allowed = set(monitoring.get("users", []))
     return [
         event
         for event in events
-        if event.event_type != "subscription_access" or event.user in allowed
+        if event.event_type not in {"subscription_access", "proxy_activity", "proxy_connection"} or event.user in allowed
     ]
+
+
+def _claim_node_inbox(path: Path) -> Path | None:
+    processing = path.with_name(path.name + ".processing")
+    lock_path = path.with_name(path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if processing.is_file():
+            return processing
+        try:
+            if path.stat().st_size <= 0:
+                return None
+        except FileNotFoundError:
+            return None
+        os.replace(path, processing)
+        path.touch(mode=0o600)
+        os.chmod(path, 0o600)
+        return processing
 
 
 def _write_events(path: Path, events: Iterable[Dict[str, Any]]) -> None:
@@ -514,7 +716,16 @@ def _notification_candidates(report: Dict[str, Any], state: Dict[str, Any], conf
         )
         if effective < minimum:
             continue
-        key = f"{finding['user']}|{finding['rule_id']}"
+        evidence = finding.get("evidence") or []
+        node_id = next(
+            (
+                str(item.get("node_id"))
+                for item in evidence
+                if isinstance(item, dict) and item.get("node_id")
+            ),
+            "",
+        )
+        key = f"{finding['user']}|{finding['rule_id']}|{node_id}"
         last_value = state["notifications"].get(key)
         if last_value:
             try:
@@ -554,6 +765,42 @@ def test_configured_ai_provider(config_path: str, provider_id: str | None = None
     return result
 
 
+def review_behavior_incident(
+    config_path: str, incident_id: str, question: str = ""
+) -> Dict[str, Any]:
+    config = load_runtime_config(config_path)
+    if not config["behavior_audit"]["enabled"]:
+        raise ValueError("完整连接元数据审计未启用")
+    if not config["behavior_audit"]["ai_include_full_metadata"]:
+        raise ValueError("当前配置不允许将完整连接元数据发送给 AI")
+    provider_id, provider = _selected_ai_provider(config)
+    api_key = _read_secret(str(provider["api_key_file"]), f"AI provider {provider_id} API key")
+    archive = Path(str(config["behavior_audit"]["archive_dir"]))
+    incident = load_incident(archive, incident_id)
+    user = str(incident.get("user", "unknown"))
+    report = {
+        "summary": {"event_count": len(incident.get("evidence", [])), "finding_count": 1},
+        "users": [
+            {
+                "user": user,
+                "risk_score": int(incident.get("score", 0)),
+                "severity": incident.get("severity", "medium"),
+                "finding_count": 1,
+            }
+        ],
+        "findings": [incident],
+        "policy": {
+            "automatic_enforcement": False,
+            "note": "管理员主动发起完整连接元数据审计；不包含 TLS 解密内容。",
+        },
+    }
+    review = review_with_provider(report, provider, api_key, redact=False, question=question)
+    save_incident_ai_review(archive, incident_id, review, question)
+    review["provider_id"] = provider_id
+    review["model"] = provider["model"]
+    return review
+
+
 def run_cycle(config_path: str) -> Dict[str, Any]:
     config = load_runtime_config(config_path)
     state_dir = Path(config["state_dir"])
@@ -574,6 +821,13 @@ def run_cycle(config_path: str) -> Dict[str, Any]:
         state = _load_state(state_path)
         new_events: List[Dict[str, Any]] = []
         parse_errors = 0
+        inbox_value = str(config["node_reporting"].get("inbox_file", "")).strip()
+        inbox_path = Path(inbox_value) if inbox_value else state_dir / "node-inbox.jsonl"
+        processing_inbox = _claim_node_inbox(inbox_path)
+        now = datetime.now(timezone.utc)
+        behavior_config = config["behavior_audit"]
+        behavior_archive = Path(str(behavior_config["archive_dir"]))
+        behavior_events: List[Dict[str, Any]] = []
         with GeoIPEnricher(config) as enricher:
             for value in config.get("auth_logs", []):
                 lines = _read_incremental(Path(value), state, int(config["initial_scan_bytes"]))
@@ -601,18 +855,74 @@ def run_cycle(config_path: str) -> Dict[str, Any]:
                 )
                 new_events.extend(parsed)
                 parse_errors += errors
+            if processing_inbox:
+                with processing_inbox.open(encoding="utf-8") as handle:
+                    parsed, errors = _parse_proxy_activity_lines(handle, enricher)
+                new_events.extend(parsed)
+                parse_errors += errors
 
-        now = datetime.now(timezone.utc)
+            if behavior_config["enabled"]:
+                behavior_cutoff = now - timedelta(
+                    minutes=int(config["rules"]["thresholds"]["node_window_minutes"])
+                )
+                archived = read_recent_connections(
+                    behavior_archive,
+                    behavior_cutoff,
+                    now,
+                    int(behavior_config["max_analysis_events"]),
+                )
+                raw_connections = [
+                    *archived,
+                    *(event for event in new_events if event.get("event_type") == "proxy_connection"),
+                ]
+                unique_connections: Dict[str, Dict[str, Any]] = {}
+                for event in raw_connections:
+                    event_id = str(event.get("event_id", ""))
+                    if not event_id:
+                        continue
+                    enriched = dict(event)
+                    for key, value in enricher.enrich(str(event.get("source_ip", ""))).items():
+                        enriched.setdefault(key, value)
+                    unique_connections[event_id] = enriched
+                behavior_events = sorted(
+                    unique_connections.values(), key=lambda item: str(item.get("timestamp", ""))
+                )
+
         cutoff = now - timedelta(days=float(config["retention_days"]))
         retained_events, needs_rewrite = _load_retained(events_path, cutoff)
-        events = _merge_events(retained_events, new_events)
+        persistent_new_events = [
+            event for event in new_events if event.get("event_type") != "proxy_connection"
+        ]
+        persistent_new_events.extend(_connection_activity_events(behavior_events))
+        events = _merge_events(retained_events, persistent_new_events)
         if not events_path.exists() or needs_rewrite or events != retained_events:
             _write_events(events_path, events)
         event_models = [Event.from_dict(event, index) for index, event in enumerate(events, 1)]
+        event_models.extend(
+            Event.from_dict(event, len(event_models) + index)
+            for index, event in enumerate(behavior_events, 1)
+        )
         analyzed_events = _filter_monitored_events(event_models, config)
         report = analyze(analyzed_events, config["rules"])
+        generated_at = now.isoformat().replace("+00:00", "Z")
+        if behavior_config["enabled"]:
+            save_incidents(behavior_archive, report["findings"], generated_at)
+            archive_status = maintain_archive(
+                behavior_archive,
+                int(behavior_config["retention_days"]),
+                int(behavior_config["incident_retention_days"]),
+                int(behavior_config["max_disk_mb"]),
+                now,
+            )
+        else:
+            archive_status = {
+                "removed_files": 0,
+                "removed_incidents": 0,
+                "compressed_files": 0,
+                "archive_bytes": 0,
+            }
         report["runtime"] = {
-            "generated_at": now.isoformat().replace("+00:00", "Z"),
+            "generated_at": generated_at,
             "new_event_count": len(new_events),
             "parse_error_count": parse_errors,
             "retention_days": config["retention_days"],
@@ -620,6 +930,19 @@ def run_cycle(config_path: str) -> Dict[str, Any]:
                 "enabled": bool(config["subscription_monitoring"].get("enabled")),
                 "mode": config["subscription_monitoring"].get("mode"),
                 "configured_user_count": len(config["subscription_monitoring"].get("users", [])),
+            },
+            "node_reporting": {
+                "mode": config["node_reporting"]["mode"],
+                "received_event_count": sum(
+                    1
+                    for event in new_events
+                    if event.get("event_type") in {"proxy_activity", "proxy_connection"}
+                ),
+            },
+            "behavior_audit": {
+                "enabled": bool(behavior_config["enabled"]),
+                "analyzed_connection_count": len(behavior_events),
+                **archive_status,
             },
         }
         candidates = _notification_candidates(report, state, config, now)
@@ -677,6 +1000,11 @@ def run_cycle(config_path: str) -> Dict[str, Any]:
         _atomic_json(state_path, state)
         if delivery_error:
             raise RuntimeError(delivery_error)
+        if processing_inbox:
+            try:
+                processing_inbox.unlink()
+            except FileNotFoundError:
+                pass
         return report
 
 
@@ -697,6 +1025,15 @@ def health(config_path: str) -> Dict[str, Any]:
         "telegram_enabled": bool(config["telegram"].get("enabled")),
         "telegram_management_enabled": bool(config["telegram"].get("bot_management_enabled")),
         "subscription_monitoring": config["subscription_monitoring"],
+        "node_reporting": {
+            "mode": config["node_reporting"]["mode"],
+            "public_base_url": config["node_reporting"].get("public_base_url", ""),
+        },
+        "web": {
+            "enabled": bool(config["web"].get("enabled")),
+            "listen_host": config["web"].get("listen_host"),
+            "listen_port": int(config["web"].get("listen_port", 8787)),
+        },
         "openai_review_enabled": bool(config["openai_review"].get("enabled")),
         "openai_active_provider": config["openai_review"].get("active_provider", ""),
         "last_run": state.get("last_run"),

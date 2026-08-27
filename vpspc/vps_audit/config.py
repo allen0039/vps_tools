@@ -26,6 +26,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "subscription_asn_count": 4,
         "subscription_device_count": 6,
         "subscription_shared_source_user_count": 8,
+        "node_window_minutes": 10,
+        "node_ip_count": 5,
+        "node_region_count": 2,
+        "node_city_count": 3,
+        "node_asn_count": 3,
+        "behavior_connection_count": 200,
+        "behavior_unique_destination_count": 30,
+        "behavior_account_service_count": 20,
     },
     "automation_indicators": {
         "browser_automation": [

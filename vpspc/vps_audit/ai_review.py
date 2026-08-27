@@ -214,11 +214,33 @@ def _parse_review_json(text: str) -> Any:
     return json.loads(candidate)
 
 
-def review_with_provider(report: Dict[str, Any], provider: Dict[str, Any], api_key: str) -> Dict[str, Any]:
+def review_with_provider(
+    report: Dict[str, Any],
+    provider: Dict[str, Any],
+    api_key: str,
+    *,
+    redact: bool = True,
+    question: str = "",
+) -> Dict[str, Any]:
     if not api_key:
         raise ValueError("AI provider API key is required")
-    evidence_bundle, reverse_aliases = _redact_for_ai(report)
+    if redact:
+        evidence_bundle, reverse_aliases = _redact_for_ai(report)
+    else:
+        evidence_bundle = {
+            "summary": report["summary"],
+            "users": report["users"],
+            "findings": report["findings"],
+            "policy": report["policy"],
+        }
+        reverse_aliases = {
+            str(item["user"]): str(item["user"])
+            for item in report.get("users", [])
+            if item.get("user")
+        }
     user_prompt = "复核以下规则引擎证据并输出审计意见：\n" + json.dumps(evidence_bundle, ensure_ascii=False)
+    if question:
+        user_prompt += "\n\n管理员追加问题：" + question[:1000]
     if provider["api_mode"] == "responses":
         payload = {
             "model": provider["model"],

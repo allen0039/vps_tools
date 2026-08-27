@@ -184,7 +184,8 @@ is_configured_storage_path() {
   local directory="$1"
   [[ -f "$CONFIG_FILE" ]] || return 1
   [[ "$directory" == "$(existing_config_value state_dir "")" \
-    || "$directory" == "$(existing_config_value report_dir "")" ]]
+    || "$directory" == "$(existing_config_value report_dir "")" \
+    || "$directory" == "$(existing_config_value behavior_audit.archive_dir "")" ]]
 }
 
 prepare_managed_directory() {
@@ -431,6 +432,7 @@ detect_subscription_jsonl() {
     return
   fi
   for candidate in \
+    /var/log/vpspc/subscription-access.jsonl \
     /var/log/miaomiaowu/subscription-access.jsonl \
     /var/log/miaomiaowux/subscription-access.jsonl; do
     if [[ -f "$candidate" ]]; then
@@ -521,6 +523,8 @@ copy_application() {
   install -m 0755 "$SCRIPT_DIR/deploy/bin/vps-audit-runner" "$INSTALL_ROOT/venv/bin/vps-audit-runner"
   install -m 0755 "$SCRIPT_DIR/deploy/bin/vps-audit-bot" "$INSTALL_ROOT/venv/bin/vps-audit-bot"
   install -m 0755 "$SCRIPT_DIR/deploy/bin/vpspc" "$INSTALL_ROOT/venv/bin/vpspc"
+  install -m 0755 "$SCRIPT_DIR/deploy/bin/vps-audit-nodes" "$INSTALL_ROOT/venv/bin/vps-audit-nodes"
+  install -m 0755 "$SCRIPT_DIR/deploy/bin/vps-audit-web" "$INSTALL_ROOT/venv/bin/vps-audit-web"
 }
 
 install_cli_shortcut() {
@@ -874,6 +878,7 @@ create_settings_snapshot() {
   install -m 0600 "$CONFIG_FILE" "$staging/config.json"
   [[ -f "$CONFIG_DIR/telegram.token" ]] && install -m 0600 "$CONFIG_DIR/telegram.token" "$staging/telegram.token"
   [[ -f "$CONFIG_DIR/openai.key" ]] && install -m 0600 "$CONFIG_DIR/openai.key" "$staging/openai.key"
+  [[ -f "$CONFIG_DIR/web.token" ]] && install -m 0600 "$CONFIG_DIR/web.token" "$staging/web.token"
   if [[ -d "$CONFIG_DIR/ai-providers" ]]; then
     cp -a "$CONFIG_DIR/ai-providers" "$staging/ai-providers"
     chmod 0700 "$staging/ai-providers"
@@ -882,6 +887,8 @@ create_settings_snapshot() {
   [[ -f "$SYSTEMD_DIR/vps-audit.service" ]] && install -m 0644 "$SYSTEMD_DIR/vps-audit.service" "$staging/vps-audit.service"
   [[ -f "$SYSTEMD_DIR/vps-audit.timer" ]] && install -m 0644 "$SYSTEMD_DIR/vps-audit.timer" "$staging/vps-audit.timer"
   [[ -f "$SYSTEMD_DIR/vps-audit-bot.service" ]] && install -m 0644 "$SYSTEMD_DIR/vps-audit-bot.service" "$staging/vps-audit-bot.service"
+  [[ -f "$SYSTEMD_DIR/vps-audit-node-receiver.service" ]] && install -m 0644 "$SYSTEMD_DIR/vps-audit-node-receiver.service" "$staging/vps-audit-node-receiver.service"
+  [[ -f "$SYSTEMD_DIR/vps-audit-web.service" ]] && install -m 0644 "$SYSTEMD_DIR/vps-audit-web.service" "$staging/vps-audit-web.service"
   falco_component_is_managed package && : > "$staging/falco-managed-before"
   find "$staging" -type d -exec chmod 0700 {} +
   find "$staging" -type f -exec chmod 0600 {} +
@@ -899,7 +906,7 @@ rollback_settings_app() {
     uninstall_managed_falco || die "回滚新增 Falco 组件失败"
   fi
 
-  systemctl stop vps-audit-bot.service vps-audit.timer vps-audit.service >/dev/null 2>&1 || true
+  systemctl stop vps-audit-web.service vps-audit-node-receiver.service vps-audit-bot.service vps-audit.timer vps-audit.service >/dev/null 2>&1 || true
   install -d -m 0700 "$CONFIG_DIR"
   install -m 0600 "$snapshot/config.json" "$CONFIG_FILE"
   if [[ -f "$snapshot/telegram.token" ]]; then
@@ -911,6 +918,9 @@ rollback_settings_app() {
     install -m 0600 "$snapshot/openai.key" "$CONFIG_DIR/openai.key"
   else
     rm -f -- "$CONFIG_DIR/openai.key"
+  fi
+  if [[ -f "$snapshot/web.token" ]]; then
+    install -m 0600 "$snapshot/web.token" "$CONFIG_DIR/web.token"
   fi
   rm -rf -- "$CONFIG_DIR/ai-providers"
   if [[ -d "$snapshot/ai-providers" ]]; then
@@ -933,6 +943,16 @@ rollback_settings_app() {
   else
     rm -f -- "$SYSTEMD_DIR/vps-audit-bot.service"
   fi
+  if [[ -f "$snapshot/vps-audit-node-receiver.service" ]]; then
+    install -m 0644 "$snapshot/vps-audit-node-receiver.service" "$SYSTEMD_DIR/vps-audit-node-receiver.service"
+  else
+    rm -f -- "$SYSTEMD_DIR/vps-audit-node-receiver.service"
+  fi
+  if [[ -f "$snapshot/vps-audit-web.service" ]]; then
+    install -m 0644 "$snapshot/vps-audit-web.service" "$SYSTEMD_DIR/vps-audit-web.service"
+  else
+    rm -f -- "$SYSTEMD_DIR/vps-audit-web.service"
+  fi
   systemctl daemon-reload
   if [[ -f "$SYSTEMD_DIR/vps-audit.timer" ]]; then
     systemctl enable --now vps-audit.timer
@@ -942,6 +962,8 @@ rollback_settings_app() {
     fi
   fi
   configure_bot_service
+  configure_node_receiver_service
+  configure_web_service
   echo "已恢复上一次配置、密钥引用和 systemd 单元；审计事件数据未删除。"
 }
 
@@ -957,6 +979,11 @@ write_runtime_config() {
   local monitor_mode monitor_users
   local telegram_bot_enabled telegram_admin_ids telegram_admin_default
   local falco_install_requested falco_skipped
+  local node_reporting_mode node_public_base_url node_listen_host node_listen_port
+  local web_enabled web_host web_port web_token web_token_file
+  local behavior_enabled behavior_archive_dir behavior_retention behavior_incident_retention behavior_max_disk
+  local node_window node_ip_count node_region_count node_city_count node_asn_count
+  local behavior_connection_count behavior_destination_count behavior_account_count
 
   auth_default="$(existing_config_value auth_logs "$(detect_auth_log)")"
   timezone_default="$(existing_config_value auth_timezone "$(detect_host_timezone_offset)")"
@@ -982,6 +1009,78 @@ write_runtime_config() {
   fi
   prepare_managed_directory "$state_dir" "审计数据保存目录"
   prepare_managed_directory "$report_dir" "报告保存目录"
+
+  echo
+  echo "配置 Web 管理台"
+  web_enabled="false"
+  web_host="$(existing_config_value web.listen_host 127.0.0.1)"
+  web_port="$(existing_config_value web.listen_port 8787)"
+  web_token_file="$(existing_config_value web.token_file "$CONFIG_DIR/web.token")"
+  if ask_yes_no "启用 Web 管理台" "$(existing_config_value web.enabled no)"; then
+    web_enabled="true"
+    web_host="$(ask "Web 监听地址（公网建议放在 HTTPS 反代后）" "$web_host")"
+    web_port="$(ask "Web 监听端口" "$web_port")"
+    [[ "$web_port" =~ ^[0-9]+$ ]] && (( web_port >= 1 && web_port <= 65535 )) || die "Web 端口应为 1 到 65535"
+    [[ "$web_host" != *$'\n'* && -n "$web_host" ]] || die "Web 监听地址无效"
+    web_token_file="$CONFIG_DIR/web.token"
+    local web_token_default
+    web_token_default=""
+    [[ -s "$web_token_file" ]] && web_token_default="KEEP"
+    web_token="$(ask_secret "Web Token（输入 KEEP 保留，留空自动生成）" "$web_token_default")"
+    if [[ "$web_token" == "KEEP" && -s "$web_token_file" ]]; then
+      :
+    else
+      [[ -n "$web_token" ]] || web_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+      install -d -m 0700 "$CONFIG_DIR"
+      printf '%s\n' "$web_token" > "$web_token_file"
+      chmod 0600 "$web_token_file"
+    fi
+  fi
+
+  echo
+  echo "配置主控 / 节点上报模式"
+  node_reporting_mode="$(ask "采集模式 controller_only=仅主控 / node_reporting=允许节点轻量上报" "$(existing_config_value node_reporting.mode controller_only)")"
+  case "$node_reporting_mode" in controller_only|node_reporting) ;; *) die "采集模式只能是 controller_only 或 node_reporting" ;; esac
+  node_public_base_url="$(existing_config_value node_reporting.public_base_url "")"
+  node_listen_host="$(existing_config_value node_reporting.listen_host "127.0.0.1")"
+  node_listen_port="$(existing_config_value node_reporting.listen_port "8766")"
+  behavior_enabled="false"
+  behavior_archive_dir="$(existing_config_value behavior_audit.archive_dir "$state_dir/behavior-audit")"
+  behavior_retention="$(existing_config_value behavior_audit.retention_days 7)"
+  behavior_incident_retention="$(existing_config_value behavior_audit.incident_retention_days 30)"
+  behavior_max_disk="$(existing_config_value behavior_audit.max_disk_mb 20480)"
+  if [[ "$node_reporting_mode" == "node_reporting" ]]; then
+    node_public_base_url="$(ask "节点访问的主控 HTTPS Base URL（例如 https://monitor.example.com）" "$node_public_base_url")"
+    node_listen_host="$(ask "接收服务监听地址（反代部署建议 127.0.0.1）" "$node_listen_host")"
+    node_listen_port="$(ask "接收服务监听端口" "$node_listen_port")"
+    [[ "$node_public_base_url" =~ ^https:// ]] \
+      || [[ "$node_public_base_url" =~ ^http://(127\.0\.0\.1|localhost)(:[0-9]+)?$ ]] \
+      || die "远程节点上报必须使用 HTTPS 公网地址"
+    [[ "$node_listen_port" =~ ^[0-9]+$ ]] && (( node_listen_port >= 1 && node_listen_port <= 65535 )) \
+      || die "节点接收端口应为 1 到 65535"
+    echo "提示：接收服务本身使用 HTTP，请由 Nginx/Caddy 在该地址前终止 HTTPS。"
+    echo
+    echo "完整连接元数据审计可记录用户、节点、完整来源 IP/端口、目标域名或 IP/端口、协议和时间。"
+    echo "它不解密 TLS，因此看不到 URL 路径、请求正文、密码、Cookie 或注册是否成功。"
+    echo "管理员手动触发外部 AI 审计时，上述完整元数据会发送给当前 AI 供应商。"
+    if ask_yes_no "启用完整连接元数据与行为规则审计" "$(existing_config_value behavior_audit.enabled no)"; then
+      behavior_enabled="true"
+      behavior_archive_dir="$(ask "完整连接与事件归档目录" "$behavior_archive_dir")"
+      behavior_archive_dir="$(validate_storage_path "$behavior_archive_dir" "完整连接归档目录")"
+      [[ "$behavior_archive_dir" != "$state_dir" && "$behavior_archive_dir" != "$report_dir" ]] \
+        || die "完整连接归档目录不能与状态目录或报告目录完全相同"
+      behavior_retention="$(ask "完整连接日志保存天数" "$behavior_retention")"
+      behavior_incident_retention="$(ask "行为事件保存天数" "$behavior_incident_retention")"
+      behavior_max_disk="$(ask "完整连接归档容量上限（MB）" "$behavior_max_disk")"
+      [[ "$behavior_retention" =~ ^[0-9]+$ ]] && (( behavior_retention >= 1 && behavior_retention <= 365 )) \
+        || die "完整连接日志保存天数应为 1 到 365"
+      [[ "$behavior_incident_retention" =~ ^[0-9]+$ ]] && (( behavior_incident_retention >= 1 && behavior_incident_retention <= 3650 )) \
+        || die "行为事件保存天数应为 1 到 3650"
+      [[ "$behavior_max_disk" =~ ^[0-9]+$ ]] && (( behavior_max_disk >= 100 && behavior_max_disk <= 1048576 )) \
+        || die "完整连接归档容量应为 100 到 1048576 MB"
+      prepare_managed_directory "$behavior_archive_dir" "完整连接归档目录"
+    fi
+  fi
 
   falco_install_requested="false"
   falco_skipped="false"
@@ -1028,17 +1127,21 @@ write_runtime_config() {
   fi
   if [[ -n "$miaomiaowux_default" ]]; then
     miaomiaowux_log="$miaomiaowux_default"
-    subscription_log=""
+    subscription_log="$subscription_default"
     miaomiaowux_timezone="$(detect_miaomiaowux_timezone "$miaomiaowux_log" "$(existing_config_value miaomiaowux_timezone "")")"
     echo "妙妙屋 X 日志：已自动检测原生日志 $miaomiaowux_log"
     echo "mmwx.log 时区：已根据现有配置、日志时间或容器时间自动检测 $miaomiaowux_timezone"
-    echo "已跳过额外 JSONL；这里不需要填写订阅 URL。"
+    if [[ -n "$subscription_log" ]]; then
+      echo "通用订阅访问 JSONL：同时使用 $subscription_log"
+    else
+      echo "未配置额外通用 JSONL；这里不需要填写订阅 URL。"
+    fi
   else
     if [[ -n "$subscription_default" ]]; then
       subscription_log="$subscription_default"
-      echo "妙妙屋 X JSONL：已自动检测 $subscription_log"
+      echo "通用订阅访问 JSONL：已自动检测 $subscription_log"
     else
-      subscription_log="$(ask "妙妙屋 X 本地订阅访问 JSONL 文件，留空则不采集" "")"
+      subscription_log="$(ask "通用本地订阅访问 JSONL 文件，留空则不采集" "")"
     fi
     if [[ "$subscription_log" =~ ^https?:// ]]; then
       echo "提示: 已忽略订阅 URL；该项目只读取本地日志文件，不会请求或保存订阅内容。" >&2
@@ -1063,7 +1166,7 @@ write_runtime_config() {
     echo "警告: $falco_log 当前不存在；进程/网络审计在 Falco 写入后生效。" >&2
   fi
   if [[ -n "$subscription_log" && ! -f "$subscription_log" ]]; then
-    echo "提示: $subscription_log 当前不存在；请让妙妙屋 X 或适配器按文档格式写入。" >&2
+    echo "提示: $subscription_log 当前不存在；请让面板或适配器按文档格式写入。" >&2
   fi
   if [[ -n "$miaomiaowux_log" && ! -f "$miaomiaowux_log" ]]; then
     echo "提示: $miaomiaowux_log 当前不存在；妙妙屋 X 原生日志采集暂不会产生事件。" >&2
@@ -1093,6 +1196,30 @@ write_runtime_config() {
   for value in "$sub_window" "$sub_ip_count" "$sub_region_count" "$sub_city_count" "$sub_asn_count" "$sub_device_count" "$sub_shared_source_count" "$travel_distance" "$travel_speed"; do
     [[ "$value" =~ ^[0-9]+$ ]] || die "订阅审计阈值必须是正整数"
     (( value >= 1 )) || die "订阅审计阈值必须大于 0"
+  done
+  node_window="$(existing_config_value rules.thresholds.node_window_minutes 10)"
+  node_ip_count="$(existing_config_value rules.thresholds.node_ip_count 5)"
+  node_region_count="$(existing_config_value rules.thresholds.node_region_count 2)"
+  node_city_count="$(existing_config_value rules.thresholds.node_city_count 3)"
+  node_asn_count="$(existing_config_value rules.thresholds.node_asn_count 3)"
+  behavior_connection_count="$(existing_config_value rules.thresholds.behavior_connection_count 200)"
+  behavior_destination_count="$(existing_config_value rules.thresholds.behavior_unique_destination_count 30)"
+  behavior_account_count="$(existing_config_value rules.thresholds.behavior_account_service_count 20)"
+  if [[ "$behavior_enabled" == "true" ]]; then
+    echo
+    echo "配置单用户、单节点行为审计阈值"
+    node_window="$(ask "节点行为统计窗口（分钟）" "$node_window")"
+    node_ip_count="$(ask "单用户单节点多少个来源 IP 时告警" "$node_ip_count")"
+    node_region_count="$(ask "单用户单节点跨多少个省/地区时告警" "$node_region_count")"
+    node_city_count="$(ask "单用户单节点跨多少个城市时告警" "$node_city_count")"
+    node_asn_count="$(ask "单用户单节点跨多少个 ASN 时告警" "$node_asn_count")"
+    behavior_connection_count="$(ask "窗口内多少条连接视为连接爆发" "$behavior_connection_count")"
+    behavior_destination_count="$(ask "窗口内多少个不同目标视为目标爆发" "$behavior_destination_count")"
+    behavior_account_count="$(ask "窗口内多少条账号/认证类连接视为疑似自动化" "$behavior_account_count")"
+  fi
+  for value in "$node_window" "$node_ip_count" "$node_region_count" "$node_city_count" "$node_asn_count" \
+    "$behavior_connection_count" "$behavior_destination_count" "$behavior_account_count"; do
+    [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 )) || die "节点行为审计阈值必须是正整数"
   done
 
   telegram_enabled="false"
@@ -1233,6 +1360,15 @@ PY
   SUB_CITY_COUNT="$sub_city_count" SUB_ASN_COUNT="$sub_asn_count" SUB_DEVICE_COUNT="$sub_device_count" \
   SUB_SHARED_SOURCE_COUNT="$sub_shared_source_count" \
   TRAVEL_DISTANCE="$travel_distance" TRAVEL_SPEED="$travel_speed" \
+  NODE_REPORTING_MODE="$node_reporting_mode" NODE_PUBLIC_BASE_URL="$node_public_base_url" \
+  NODE_LISTEN_HOST="$node_listen_host" NODE_LISTEN_PORT="$node_listen_port" \
+  WEB_ENABLED="$web_enabled" WEB_HOST="$web_host" WEB_PORT="$web_port" WEB_TOKEN_FILE="$web_token_file" \
+  BEHAVIOR_ENABLED="$behavior_enabled" BEHAVIOR_ARCHIVE_DIR="$behavior_archive_dir" \
+  BEHAVIOR_RETENTION="$behavior_retention" BEHAVIOR_INCIDENT_RETENTION="$behavior_incident_retention" \
+  BEHAVIOR_MAX_DISK="$behavior_max_disk" NODE_WINDOW="$node_window" NODE_IP_COUNT="$node_ip_count" \
+  NODE_REGION_COUNT="$node_region_count" NODE_CITY_COUNT="$node_city_count" NODE_ASN_COUNT="$node_asn_count" \
+  BEHAVIOR_CONNECTION_COUNT="$behavior_connection_count" BEHAVIOR_DESTINATION_COUNT="$behavior_destination_count" \
+  BEHAVIOR_ACCOUNT_COUNT="$behavior_account_count" \
   python3 - "$CONFIG_FILE" <<'PY'
 import json
 import os
@@ -1254,6 +1390,9 @@ if not isinstance(providers, dict):
     providers = {}
 providers = dict(providers)
 active_provider = str(existing_ai.get("active_provider", ""))
+existing_node_reporting = existing.get("node_reporting", {})
+if not isinstance(existing_node_reporting, dict):
+    existing_node_reporting = {}
 if not providers and existing_ai.get("model"):
     providers["legacy"] = {
         "display_name": "Legacy OpenAI",
@@ -1277,6 +1416,12 @@ if new_provider_id:
     active_provider = new_provider_id
 
 config = {
+    "web": {
+        "enabled": os.environ["WEB_ENABLED"] == "true",
+        "listen_host": os.environ["WEB_HOST"],
+        "listen_port": int(os.environ["WEB_PORT"]),
+        "token_file": os.environ["WEB_TOKEN_FILE"],
+    },
     "auth_logs": [os.environ["AUTH_LOG"]] if os.environ["AUTH_LOG"] else [],
     "auth_timezone": os.environ["AUTH_TIMEZONE"],
     "journal": {
@@ -1292,6 +1437,27 @@ config = {
     "report_dir": os.environ["REPORT_PATH"],
     "retention_days": int(os.environ["RETENTION"]),
     "scan_interval_minutes": int(os.environ["INTERVAL_VALUE"]),
+    "node_reporting": {
+        "mode": os.environ["NODE_REPORTING_MODE"],
+        "listen_host": os.environ["NODE_LISTEN_HOST"],
+        "listen_port": int(os.environ["NODE_LISTEN_PORT"]),
+        "public_base_url": os.environ["NODE_PUBLIC_BASE_URL"],
+        "registry_file": str(existing_node_reporting.get("registry_file", "")),
+        "inbox_file": str(existing_node_reporting.get("inbox_file", "")),
+        "agent_asset_path": "/opt/vps-audit/manager/deploy/node/vpspc-node.py",
+        "enrollment_ttl_minutes": int(existing_node_reporting.get("enrollment_ttl_minutes", 15)),
+        "replay_window_seconds": int(existing_node_reporting.get("replay_window_seconds", 300)),
+        "max_batch_events": int(existing_node_reporting.get("max_batch_events", 500)),
+    },
+    "behavior_audit": {
+        "enabled": os.environ["BEHAVIOR_ENABLED"] == "true",
+        "archive_dir": os.environ["BEHAVIOR_ARCHIVE_DIR"],
+        "retention_days": int(os.environ["BEHAVIOR_RETENTION"]),
+        "incident_retention_days": int(os.environ["BEHAVIOR_INCIDENT_RETENTION"]),
+        "max_disk_mb": int(os.environ["BEHAVIOR_MAX_DISK"]),
+        "max_analysis_events": 100000,
+        "ai_include_full_metadata": True,
+    },
     "subscription_monitoring": {
         "enabled": True,
         "mode": os.environ["MONITOR_MODE"],
@@ -1310,6 +1476,14 @@ config = {
             "subscription_shared_source_user_count": int(os.environ["SUB_SHARED_SOURCE_COUNT"]),
             "impossible_travel_min_km": int(os.environ["TRAVEL_DISTANCE"]),
             "impossible_travel_kmh": int(os.environ["TRAVEL_SPEED"]),
+            "node_window_minutes": int(os.environ["NODE_WINDOW"]),
+            "node_ip_count": int(os.environ["NODE_IP_COUNT"]),
+            "node_region_count": int(os.environ["NODE_REGION_COUNT"]),
+            "node_city_count": int(os.environ["NODE_CITY_COUNT"]),
+            "node_asn_count": int(os.environ["NODE_ASN_COUNT"]),
+            "behavior_connection_count": int(os.environ["BEHAVIOR_CONNECTION_COUNT"]),
+            "behavior_unique_destination_count": int(os.environ["BEHAVIOR_DESTINATION_COUNT"]),
+            "behavior_account_service_count": int(os.environ["BEHAVIOR_ACCOUNT_COUNT"]),
         }
     },
     "geoip": {"city_db": os.environ["CITY_DB"], "asn_db": os.environ["ASN_DB"]},
@@ -1347,12 +1521,18 @@ PY
   INTERVAL="$interval"
   CONFIGURED_STATE_DIR="$state_dir"
   CONFIGURED_REPORT_DIR="$report_dir"
+  if [[ "$behavior_enabled" == "true" ]]; then
+    CONFIGURED_BEHAVIOR_ARCHIVE_DIR="$behavior_archive_dir"
+  else
+    CONFIGURED_BEHAVIOR_ARCHIVE_DIR="$state_dir"
+  fi
 }
 
 install_systemd_units() {
   local interval="$1"
   local state_dir="$2"
   local report_dir="$3"
+  local behavior_archive_dir="$4"
   local service_read_access supplementary_groups requires_dac_read_search
   local supplementary_groups_directive capability_bounding_set_directive
   service_read_access="$(detect_service_read_access)"
@@ -1367,7 +1547,7 @@ install_systemd_units() {
     capability_bounding_set_directive="CapabilityBoundingSet=CAP_DAC_READ_SEARCH"
   fi
   SERVICE_TEMPLATE="$SCRIPT_DIR/deploy/systemd/vps-audit.service" SERVICE_OUTPUT="$SYSTEMD_DIR/vps-audit.service" \
-  STATE_PATH="$state_dir" REPORT_PATH="$report_dir" SUPPLEMENTARY_GROUPS_DIRECTIVE="$supplementary_groups_directive" \
+  STATE_PATH="$state_dir" REPORT_PATH="$report_dir" BEHAVIOR_ARCHIVE_PATH="$behavior_archive_dir" SUPPLEMENTARY_GROUPS_DIRECTIVE="$supplementary_groups_directive" \
   CAPABILITY_BOUNDING_SET_DIRECTIVE="$capability_bounding_set_directive" python3 <<'PY'
 import os
 from pathlib import Path
@@ -1375,6 +1555,7 @@ from pathlib import Path
 template = Path(os.environ["SERVICE_TEMPLATE"]).read_text(encoding="utf-8")
 template = template.replace("@STATE_DIR@", os.environ["STATE_PATH"])
 template = template.replace("@REPORT_DIR@", os.environ["REPORT_PATH"])
+template = template.replace("@BEHAVIOR_ARCHIVE_DIR@", os.environ["BEHAVIOR_ARCHIVE_PATH"])
 template = template.replace("@SUPPLEMENTARY_GROUPS@", os.environ["SUPPLEMENTARY_GROUPS_DIRECTIVE"])
 template = template.replace("@CAPABILITY_BOUNDING_SET@", os.environ["CAPABILITY_BOUNDING_SET_DIRECTIVE"])
 Path(os.environ["SERVICE_OUTPUT"]).write_text(template, encoding="utf-8")
@@ -1382,16 +1563,38 @@ PY
   chmod 0644 "$SYSTEMD_DIR/vps-audit.service"
   sed "s/@INTERVAL@/$interval/g" "$SCRIPT_DIR/deploy/systemd/vps-audit.timer" > "$SYSTEMD_DIR/vps-audit.timer"
   chmod 0644 "$SYSTEMD_DIR/vps-audit.timer"
-  STATE_PATH="$state_dir" BOT_TEMPLATE="$SCRIPT_DIR/deploy/systemd/vps-audit-bot.service" \
+  STATE_PATH="$state_dir" BEHAVIOR_ARCHIVE_PATH="$behavior_archive_dir" BOT_TEMPLATE="$SCRIPT_DIR/deploy/systemd/vps-audit-bot.service" \
   BOT_OUTPUT="$SYSTEMD_DIR/vps-audit-bot.service" python3 <<'PY'
 import os
 from pathlib import Path
 
 template = Path(os.environ["BOT_TEMPLATE"]).read_text(encoding="utf-8")
 template = template.replace("@STATE_DIR@", os.environ["STATE_PATH"])
+template = template.replace("@BEHAVIOR_ARCHIVE_DIR@", os.environ["BEHAVIOR_ARCHIVE_PATH"])
 Path(os.environ["BOT_OUTPUT"]).write_text(template, encoding="utf-8")
 PY
   chmod 0644 "$SYSTEMD_DIR/vps-audit-bot.service"
+  STATE_PATH="$state_dir" BEHAVIOR_ARCHIVE_PATH="$behavior_archive_dir" RECEIVER_TEMPLATE="$SCRIPT_DIR/deploy/systemd/vps-audit-node-receiver.service" \
+  RECEIVER_OUTPUT="$SYSTEMD_DIR/vps-audit-node-receiver.service" python3 <<'PY'
+import os
+from pathlib import Path
+
+template = Path(os.environ["RECEIVER_TEMPLATE"]).read_text(encoding="utf-8")
+template = template.replace("@STATE_DIR@", os.environ["STATE_PATH"])
+template = template.replace("@BEHAVIOR_ARCHIVE_DIR@", os.environ["BEHAVIOR_ARCHIVE_PATH"])
+Path(os.environ["RECEIVER_OUTPUT"]).write_text(template, encoding="utf-8")
+PY
+  chmod 0644 "$SYSTEMD_DIR/vps-audit-node-receiver.service"
+  STATE_PATH="$state_dir" REPORT_PATH="$report_dir" BEHAVIOR_ARCHIVE_PATH="$behavior_archive_dir" WEB_TEMPLATE="$SCRIPT_DIR/deploy/systemd/vps-audit-web.service" WEB_OUTPUT="$SYSTEMD_DIR/vps-audit-web.service" python3 <<'PY'
+import os
+from pathlib import Path
+template = Path(os.environ["WEB_TEMPLATE"]).read_text(encoding="utf-8")
+template = template.replace("@STATE_DIR@", os.environ["STATE_PATH"])
+template = template.replace("@REPORT_DIR@", os.environ["REPORT_PATH"])
+template = template.replace("@BEHAVIOR_ARCHIVE_DIR@", os.environ["BEHAVIOR_ARCHIVE_PATH"])
+Path(os.environ["WEB_OUTPUT"]).write_text(template, encoding="utf-8")
+PY
+  chmod 0644 "$SYSTEMD_DIR/vps-audit-web.service"
   systemctl daemon-reload
 }
 
@@ -1402,6 +1605,25 @@ configure_bot_service() {
     systemctl restart vps-audit-bot.service
   else
     systemctl disable --now vps-audit-bot.service >/dev/null 2>&1 || true
+  fi
+}
+
+configure_node_receiver_service() {
+  if [[ -f "$CONFIG_FILE" && "$(existing_config_value node_reporting.mode controller_only)" == "node_reporting" \
+    && -f "$SYSTEMD_DIR/vps-audit-node-receiver.service" ]]; then
+    systemctl enable vps-audit-node-receiver.service
+    systemctl restart vps-audit-node-receiver.service
+  else
+    systemctl disable --now vps-audit-node-receiver.service >/dev/null 2>&1 || true
+  fi
+}
+
+configure_web_service() {
+  if [[ -f "$CONFIG_FILE" && "$(existing_config_value web.enabled no)" == "yes" && -f "$SYSTEMD_DIR/vps-audit-web.service" ]]; then
+    systemctl enable vps-audit-web.service
+    systemctl restart vps-audit-web.service
+  else
+    systemctl disable --now vps-audit-web.service >/dev/null 2>&1 || true
   fi
 }
 
@@ -1430,14 +1652,16 @@ install_app() {
   install_os_packages
   copy_application
   create_settings_snapshot
-  systemctl stop vps-audit-bot.service vps-audit.timer >/dev/null 2>&1 || true
+  systemctl stop vps-audit-web.service vps-audit-node-receiver.service vps-audit-bot.service vps-audit.timer >/dev/null 2>&1 || true
   INTERVAL="5"
   write_runtime_config
-  install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR"
+  install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR" "$CONFIGURED_BEHAVIOR_ARCHIVE_DIR"
   test_ai_if_requested
   run_initial_audit_and_enable_timer
   install_cli_shortcut
   configure_bot_service
+  configure_node_receiver_service
+  configure_web_service
   if [[ "$(existing_config_value telegram.enabled no)" == "yes" ]] && ask_yes_no "发送 Telegram 测试消息" "yes"; then
     "$INSTALL_ROOT/venv/bin/vps-audit-runner" --config "$CONFIG_FILE" test-telegram
   fi
@@ -1455,14 +1679,16 @@ configure_app() {
   check_cli_shortcut_available
   [[ -x "$INSTALL_ROOT/venv/bin/vps-audit-runner" ]] || die "尚未安装"
   create_settings_snapshot
-  systemctl stop vps-audit-bot.service vps-audit.timer >/dev/null 2>&1 || true
+  systemctl stop vps-audit-web.service vps-audit-node-receiver.service vps-audit-bot.service vps-audit.timer >/dev/null 2>&1 || true
   INTERVAL="5"
   write_runtime_config
-  install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR"
+  install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR" "$CONFIGURED_BEHAVIOR_ARCHIVE_DIR"
   test_ai_if_requested
   run_initial_audit_and_enable_timer
   install_cli_shortcut
   configure_bot_service
+  configure_node_receiver_service
+  configure_web_service
   echo "配置已更新。"
 }
 
@@ -1471,6 +1697,12 @@ status_app() {
   systemctl status vps-audit.timer --no-pager || true
   if [[ "$(existing_config_value telegram.bot_management_enabled no)" == "yes" ]]; then
     systemctl status vps-audit-bot.service --no-pager || true
+  fi
+  if [[ "$(existing_config_value node_reporting.mode controller_only)" == "node_reporting" ]]; then
+    systemctl status vps-audit-node-receiver.service --no-pager || true
+  fi
+  if [[ "$(existing_config_value web.enabled no)" == "yes" ]]; then
+    systemctl status vps-audit-web.service --no-pager || true
   fi
   echo
   if [[ -x "$INSTALL_ROOT/venv/bin/vps-audit-runner" && -f "$CONFIG_FILE" ]]; then
@@ -1490,12 +1722,17 @@ uninstall_app() {
   need_root
   local purge_state_dir=""
   local purge_report_dir=""
+  local purge_behavior_dir=""
   if [[ "${1:-}" == "--purge" && -f "$CONFIG_FILE" ]]; then
     purge_state_dir="$(validate_storage_path "$(existing_config_value state_dir "$STATE_DIR")" "已配置的审计数据目录")"
     purge_report_dir="$(validate_storage_path "$(existing_config_value report_dir "$REPORT_DIR")" "已配置的报告目录")"
+    if [[ "$(existing_config_value behavior_audit.enabled no)" == "yes" ]]; then
+      purge_behavior_dir="$(validate_storage_path "$(existing_config_value behavior_audit.archive_dir "$STATE_DIR/behavior-audit")" "已配置的完整连接归档目录")"
+    fi
   elif [[ "${1:-}" == "--purge" ]]; then
     [[ -f "$STATE_DIR/$DATA_MARKER" ]] && purge_state_dir="$STATE_DIR"
     [[ -f "$REPORT_DIR/$DATA_MARKER" ]] && purge_report_dir="$REPORT_DIR"
+    [[ -f "$STATE_DIR/behavior-audit/$DATA_MARKER" ]] && purge_behavior_dir="$STATE_DIR/behavior-audit"
   fi
   if [[ "${1:-}" == "--purge" ]]; then
     uninstall_managed_falco || die "Falco 清理未完成；为便于重试，尚未删除 vpspc 配置"
@@ -1503,14 +1740,21 @@ uninstall_app() {
     systemctl stop falco-modern-bpf.service >/dev/null 2>&1 || true
     echo "已停止本工具管理的 Falco；配置保留，重新安装 vpspc 后可恢复。"
   fi
-  systemctl disable --now vps-audit-bot.service vps-audit.timer >/dev/null 2>&1 || true
+  systemctl disable --now vps-audit-web.service vps-audit-node-receiver.service vps-audit-bot.service vps-audit.timer >/dev/null 2>&1 || true
   systemctl stop vps-audit.service >/dev/null 2>&1 || true
-  rm -f "$SYSTEMD_DIR/vps-audit.service" "$SYSTEMD_DIR/vps-audit.timer" "$SYSTEMD_DIR/vps-audit-bot.service"
+  rm -f "$SYSTEMD_DIR/vps-audit.service" "$SYSTEMD_DIR/vps-audit.timer" "$SYSTEMD_DIR/vps-audit-bot.service" \
+    "$SYSTEMD_DIR/vps-audit-node-receiver.service" "$SYSTEMD_DIR/vps-audit-web.service"
   systemctl daemon-reload
   remove_cli_shortcut
   rm -rf "$INSTALL_ROOT"
   if [[ "${1:-}" == "--purge" ]]; then
     local deleted=()
+    if [[ -n "$purge_behavior_dir" && -f "$purge_behavior_dir/$DATA_MARKER" ]]; then
+      rm -rf -- "$purge_behavior_dir"
+      deleted+=("$purge_behavior_dir")
+    elif [[ -n "$purge_behavior_dir" ]]; then
+      echo "安全保留未带管理标记的完整连接归档目录: $purge_behavior_dir" >&2
+    fi
     if [[ -n "$purge_report_dir" && -f "$purge_report_dir/$DATA_MARKER" ]]; then
       rm -rf -- "$purge_report_dir"
       deleted+=("$purge_report_dir")

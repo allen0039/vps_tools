@@ -41,7 +41,24 @@ curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/rem
 
 `destroy` 只删除带有 vpspc 管理标记的路径。若 Falco 在安装后出现其他规则或配置修改，会将它视为共享服务：只删除 vpspc 规则、输出和日志，保留 Falco 软件包与官方仓库，避免影响其他使用方。
 
-Docker 部署方式尚未提供，后续会作为第二种独立部署方式加入；当前版本不会自动安装 Docker。
+Docker 部署也已提供，主控可通过 Compose 启动审计循环、Web 管理台、Telegram Bot 和节点接收器；被控端仍只需执行生成的一键注册链接，不需要安装 Docker。
+
+### Web 管理台
+
+一键安装器在主控端会交互询问是否启用 Web、监听地址、端口和 Web Token。默认关闭并监听 `127.0.0.1:8787`；启用后由 `vps-audit-web.service` 独立运行，访问需要 `X-Web-Token` 或 `Authorization: Bearer`。页面提供运行状态、最新报告、行为事件详情、立即巡查和人工 AI 复核，不提供远程 Shell、自动封禁或 HTTPS 解密。
+
+Docker 使用 `docker/config.json` 直接配置：
+
+```bash
+cp docker/config.json.example docker/config.json
+mkdir -p docker/secrets
+openssl rand -base64 32 > docker/secrets/web_token
+chmod 600 docker/secrets/web_token
+docker compose up -d
+docker compose --profile web up -d
+```
+
+将 `web.listen_port` 设置为容器端口（默认 `8787`），宿主机映射可通过 `WEB_PORT` 调整。生产环境建议把 Web 放在 Caddy/Nginx/Traefik 后终止 HTTPS；`docker compose down` 不会删除审计卷，显式 `down -v` 才会清理持久化数据。
 
 ## 使用本地源码交互安装
 
@@ -55,7 +72,8 @@ sudo ./install.sh install
 安装器会先自动检测环境，再只询问无法确定或需要管理员选择的项目：
 
 - SSH 日志来源和主机时区；找不到 `auth.log/secure` 时自动使用 journald 游标；
-- 妙妙屋 X 原生 `mmwx.log`、Docker 数据挂载和独立的应用日志时区；
+- 通用订阅访问 JSONL，以及妙妙屋 X 原生 `mmwx.log`、Docker 数据挂载和独立时区；
+- `controller_only` 仅主控模式，或带 HTTPS 公网入口的 `node_reporting` 轻量节点上报模式；
 - 审计数据目录、报告目录、数据保留时间、扫描间隔和可选 Falco JSON 日志；
 - 检测 Falco；未安装时解释用途并询问是否使用 modern eBPF 自动安装；
 - Telegram Bot Token、Chat ID、最低推送等级和冷却时间；
@@ -90,7 +108,7 @@ sudo ./install.sh destroy
 
 每次重新安装或执行 `configure` 前会保存一份 root-only 的“上一次配置”快照，包括运行配置、Telegram/OpenAI 密钥文件以及 systemd 单元。`rollback` 恢复这些设置但不删除审计事件；若本次配置新增了由 vpspc 管理的 Falco，回滚也会撤销该 Falco 安装。快照只用于配置回滚，不负责降级程序源码版本。
 
-运行架构如下：SSH/Falco 日志由增量采集器读取并保存在本机，规则引擎每隔几分钟生成报告。只有首次出现或超过冷却时间的告警才会触发可选 AI 复核和 Telegram 推送。Telegram 采用出站 Bot API，不需要给 VPS 开放入站端口。启用双向管理时会额外运行 `vps-audit-bot.service` 长轮询服务；它与巡查 timer 相互独立，Bot 暂时离线不会中断本地巡查。
+运行架构如下：SSH/Falco 日志由增量采集器读取并保存在本机，规则引擎每隔几分钟生成报告。只有首次出现或超过冷却时间的告警才会触发可选 AI 复核和 Telegram 推送。Telegram 采用出站 Bot API，不需要给 VPS 开放入站端口。启用双向管理时会额外运行 `vps-audit-bot.service`；启用节点上报时会运行 `vps-audit-node-receiver.service`，默认只监听 `127.0.0.1:8766` 并由 Nginx/Caddy 终止 HTTPS。三个服务相互独立。
 
 核心巡查只使用 Python 标准库，没有数据库或额外守护进程。保留事件在内存中解析一次后直接进入规则引擎；无新增/过期事件时不重写 JSONL，写入时逐行原子替换；同一轮的 MaxMind 数据库和重复 IP 查询会复用。以上优化不会减少规则、保留时间、报告或 Telegram 功能。
 
@@ -124,9 +142,9 @@ Telegram 默认只展示 IP 前两段、地理位置、ASN、规则和建议，�
 
 在服务器 SSH 终端运行 `sudo vpspc`，可直接选择“查询重点用户活跃 IP”；Telegram 主菜单可点击“🌐 查询重点用户活跃 IP”，也可发送 `/ips` 后点选用户，或发送 `/ips 用户名`。查询对象限定为已经添加到重点名单的用户。
 
-查询复用 `subscription_window_minutes`，默认统计最近 15 分钟内出现过的订阅访问来源，并按 IP 去重展示国家、地区、城市、ASN、ISP/网络类型、最近时间和设备标识数量。本机终端显示完整 IP；Telegram 继续服从“推送完整来源 IP”设置，默认脱敏。
+查询复用 `subscription_window_minutes`，默认统计最近 15 分钟内出现过的订阅访问或节点代理活动来源，并按 IP 去重展示国家、地区、城市、ASN、ISP/网络类型、最近时间、设备标识和节点名称。本机终端显示完整 IP；Telegram 继续服从“推送完整来源 IP”设置，默认脱敏。
 
-这里的“活跃 IP”不是代理节点的严格 TCP 同时在线数：它只反映妙妙屋 X 或接入日志实际记录到的订阅拉取。定时巡查默认每 5 分钟采集一次，因此刚发生的访问可能要等到下一轮巡查才出现；需要立即更新时可先点击“立即巡查”，再查询。Sub-Store 代取订阅时仍只能看到聚合器出口，无法借此还原终端 IP。
+这里的“活跃 IP”仍不是严格 TCP 同时在线数：仅主控模式反映面板实际记录到的订阅拉取；节点上报模式还会加入 Xray access log 中的真实代理活动。定时巡查默认每 5 分钟采集一次，因此刚发生的访问可能要等到下一轮巡查才出现。Sub-Store 或前置 CDN/NAT 遮蔽的终端 IP仍不能被还原。
 
 Telegram 长轮询遇到网络超时、限流或服务端 5xx 时会在进程内以 1–30 秒退避重试，不再退出后等待 systemd 重启；Token 无效或重复 Bot 实例造成的冲突仍会立即报错，便于发现配置问题。
 
@@ -134,7 +152,7 @@ Bot 同时校验配置的 Chat ID 和消息发送者 `from.id`。即使 Bot 位�
 
 AI 的 Base URL 与 API Key 也只能在 VPS 本机通过 `vpspc` 新增或修改。Telegram 只允许在已信任端点之间切换、修改模型名称和运行测试，避免 API Key 进入聊天记录，也防止聊天账号失陷后把现有密钥导向任意端点。
 
-## 妙妙屋 X 个人订阅接入
+## 通用订阅与妙妙屋 X 接入
 
 可以实现“同一份个人订阅在短时间内由全国多个 IP 使用就向 Telegram 预警”。安装器会交互询问：
 
@@ -164,7 +182,7 @@ AI 的 Base URL 与 API Key 也只能在 VPS 本机通过 `vpspc` 新增或修�
 
 `mode` 为 `allowlist` 时，`users` 可包含多个用户名、订阅 ID 或用户 ID；空名单的含义是暂不对任何订阅用户产生告警，而不是隐式选择某一个用户。
 
-妙妙屋 X 或旁路适配器需要把每次有效订阅访问追加为一行 JSON，至少包含时间、稳定的订阅标识和客户端来源 IP：
+任意面板、订阅系统或旁路适配器都可以把每次有效订阅访问追加为一行 JSON，至少包含时间、稳定的订阅标识和客户端来源 IP：
 
 ```json
 {"timestamp":"2026-08-26T01:00:00Z","subscription_id":"personal-plan-001","source_ip":"198.51.100.1","device_id":"device-a","session_id":"session-a"}
@@ -173,10 +191,10 @@ AI 的 Base URL 与 API Key 也只能在 VPS 本机通过 `vpspc` 新增或修�
 也接受用 `user` 或 `user_id` 代替 `subscription_id`，用 `ip` 代替 `source_ip`。文件必须是只追加的 JSONL，建议路径：
 
 ```text
-/var/log/miaomiaowu/subscription-access.jsonl
+/var/log/vpspc/subscription-access.jsonl
 ```
 
-如果妙妙屋 X 能直接记录这些字段，配置日志路径即可。若它只有数据库、HTTP API、Nginx 日志或其他格式，需要再写一个很小的适配器；其中最重要的是找到能将请求关联到订阅的字段。仅有 Nginx 来源 IP、没有订阅 ID 时，无法可靠判断哪些 IP 在共享同一个订阅。
+如果面板能直接记录这些字段，配置日志路径即可。若它只有数据库、HTTP API、Nginx 日志或其他格式，需要一个小型适配器；其中最重要的是找到能将请求关联到用户的稳定字段。仅有 Nginx 来源 IP、没有用户/订阅 ID 时，无法可靠判断哪些 IP 在共享同一个身份。
 
 当前版本也可以直接解析妙妙屋 X 原生 `mmwx.log` 中的“用户获取订阅”记录，包括 IPv4 和 IPv6。常见路径是：
 
@@ -202,6 +220,83 @@ AI 的 Base URL 与 API Key 也只能在 VPS 本机通过 `vpspc` 新增或修�
 
 当同一个来源 IP 在订阅窗口内拉取至少 `subscription_shared_source_user_count` 个不同订阅用户时，报告会生成 `SUB_SHARED_FETCH_SOURCE` 观测范围警告，并按 Telegram 最低等级与冷却时间推送。它不会增加任何用户的风险分数，也不会送给 AI 定性，因为这既可能是 Sub-Store，也可能是合法监控器或共享 NAT；它只提醒你当前源站证据可能已经被聚合。
 
+### 仅主控与轻量节点上报
+
+默认 `node_reporting.mode=controller_only`：所有规则、报告、Telegram 和 AI 都在主控运行，被控节点零安装。该模式可以读取面板订阅拉取和面板已经上报的数据，但不能凭静态节点配置推断真实客户端 IP。
+
+需要节点实际连接证据时，在完整重新配置中选择 `node_reporting`，填写节点访问的 HTTPS Base URL，并让 Nginx/Caddy 把该地址反代到默认的 `127.0.0.1:8766`。接收端自身不会管理证书，也不允许对远程节点使用明文 HTTP。
+
+Caddy 可以使用最小配置：
+
+```caddyfile
+monitor.example.com {
+    reverse_proxy 127.0.0.1:8766
+}
+```
+
+Nginx 的 HTTPS `server` 块中可以使用：
+
+```nginx
+client_max_body_size 1m;
+location / {
+    proxy_pass http://127.0.0.1:8766;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+}
+```
+
+反代不应将 `8766` 直接暴露到公网；公网入口只开 HTTPS，并将 `client_max_body_size` 保持在 1 MiB 左右。
+
+随后运行 `sudo vpspc`，进入“节点上报与注册链接”：
+
+- 普通链接用于新装或同一主控原位修复；检测到另一主控时拒绝覆盖；
+- 覆盖链接显式允许重新绑定，普通注册码不能通过手工追加参数提升为覆盖权限；
+- 注册码默认 15 分钟过期且只成功使用一次，注册后换取每节点独立密钥；
+- 每次上报包含时间戳、随机数和 HMAC，主控拒绝过期请求和 nonce 重放；
+- 默认关闭完整连接审计时，主控把节点事件保存为 `proxy_activity`，只保留时间、稳定用户、来源 IP、协议、节点与事件 ID；即使节点刚好缓存了完整事件，接收端也会先删除目标信息再降级入库。
+- 显式开启 `behavior_audit.enabled` 后，主控额外接受 `proxy_connection`，记录完整来源 IP/端口、目标域名或目标 IP/端口、TCP/UDP、Xray 入站标识、节点、用户和精确时间。主控用注册表中的节点 ID/名称覆盖上报值，节点不能冒充另一节点。
+- 两种模式都不接收 UUID、订阅 token、密码、Cookie、TLS 正文或任意远程命令输出。
+
+一键链接形如：
+
+```bash
+curl -fsSL 'https://monitor.example.com/join/一次性注册码' | sudo sh
+```
+
+节点端只安装标准库单文件采集器和 systemd oneshot timer，每轮增量读取 Xray access log 后退出。关闭完整审计时按 `用户+来源IP+协议` 去重；开启时保留每条连接及目标元数据。网络故障时最多缓存 10,000 条或 10 MiB，避免无限占盘。它不开放入站端口、不安装数据库，也不提供远程 shell。
+
+本机可随时精确清理：
+
+```bash
+sudo vpspc-node uninstall --purge
+```
+
+主控还可排队唯一固定的 `self_uninstall` 命令；节点验签并确认后删除自己的受管 unit、程序、密钥和状态，主控随即撤销凭据。卸载逻辑不会删除或修改 Xray、sing-box、V2Board 及其日志。
+
+### 完整连接元数据与行为事件
+
+在 `node_reporting` 模式重新配置时可选择开启完整连接审计，并设置独立归档目录、连接日志保留天数、行为事件保留天数和容量上限。连接按 UTC 日期写入 `connections-YYYY-MM-DD.jsonl`，旧日文件使用 gzip 压缩；目录和文件分别为 `0700`、`0600`。容量清理、接收写入共用文件锁，避免轮转时破坏正在写入的日志。`uninstall --purge` 只删除配置中记录且带 vpspc 管理标记的归档目录。
+
+所有节点规则都严格按 `用户 + 节点 + 时间窗口` 分组。默认窗口为 10 分钟，主要规则包括：
+
+- 单用户单节点达到 5 个来源 IP，或跨多个省/地区、城市、ASN；
+- 单用户单节点连接数或不同目标数突增；
+- 账号、登录、认证、验证码/挑战类域名连接达到阈值，并同时覆盖多个相关服务或伴随总体连接爆发时，产生 `BEHAVIOR_ACCOUNT_AUTOMATION`。
+
+用户 A、用户 B 不合并；同一用户在两个节点的数据也不合并。告警会带用户名、节点名、事件 ID、主要目标和连接证据。Telegram 双向管理支持：
+
+```text
+/incidents
+/incident INC-XXXXXXXXXXXXXXXX
+/incidentai INC-XXXXXXXXXXXXXXXX
+/ask INC-XXXXXXXXXXXXXXXX 这里输入针对该事件的问题
+```
+
+`/incident` 显示完整来源 IP/端口、完整目标/端口、网络、协议、入站标识和精确时间。事件详情和主控本地归档不受普通告警的 IP 掩码选项影响。Bot 没有封禁按钮，AI 结果也不会自动触发封禁。
+
+此功能不做 HTTPS MITM、不安装 CA，也不解密第三方 TLS。它通常能看到 `accounts.google.com:443`、`auth.openai.com:443` 等连接，但看不到 URL path、HTTP 方法、POST 正文、验证码内容或注册结果。因此“疑似批量注册/认证自动化”只表示完整连接元数据和频率达到行为阈值，不能证明某次请求调用了 `/register`，也不能统计成功注册了多少账号。
+
 地理字段可以由应用直接写入：
 
 ```json
@@ -221,6 +316,8 @@ AI 的 Base URL 与 API Key 也只能在 VPS 本机通过 `vpspc` 新增或修�
 | VPN/Tor/机房 IP | IP 情报标记 | 低，不能单独定性 |
 | 自动化工具链 | 命令同时命中浏览器自动化、账号流程、批量参数等两类特征 | 高 |
 | 高频进程/目标爆发 | 同命令重复启动，或短时连接大量不同目标 | 中 |
+| 节点短时多 IP/跨地区 | 单用户、单节点、默认 10 分钟窗口 | 中/高 |
+| 账号服务连接自动化 | 多个账号/认证/验证码目标高频连接；不含 TLS 正文 | 高 |
 
 “北京有服务器”可以解释机房 IP，但如果该来源实际是家庭宽带/移动网络、与广州登录发生不可能旅行、且有并发或重复使用轨迹，这些是彼此独立的反证。系统会分别展示它们，而不是只看城市名下结论。
 
@@ -249,7 +346,7 @@ vps-audit normalize-auth /var/log/auth.log \
 
 ## AI 复核
 
-AI 是可选的，只复核已命中的结构化证据。调用前会：
+AI 是可选的。定时巡查的自动 AI 仍只复核已命中的结构化证据，调用前会：
 
 - 把用户名换成临时编号，返回后再映射；
 - 对 IP 和目标域名做一次性哈希，并清理摘要字符串中重复出现的原值；
@@ -271,6 +368,8 @@ sudo /opt/vps-audit/venv/bin/vps-audit-runner \
 
 Telegram 中发送 `/ai` 后可切换供应商、修改当前模型名、开关 AI 及测试当前模型；也支持 `/aiuse`、`/aimodel`、`/aitest`、`/aion` 和 `/aioff`。Base URL 和 API Key 必须在 VPS 本机管理。
 
+完整行为事件的 `/incidentai` 和 `/ask` 是管理员主动操作，不使用上述自动脱敏流程；当 `behavior_audit.ai_include_full_metadata=true` 时，会把该事件证据中的完整用户名、来源 IP/端口、目标域名或 IP/端口、节点名称、协议和时间发送给当前外部 AI 供应商。请求仍不包含 TLS 正文、密码、Cookie、UUID 或订阅 token。若不接受第三方供应商处理这些元数据，应关闭该选项或不要使用事件 AI 命令；本地规则、归档和 Telegram 详情不受影响。
+
 独立 CLI 仍支持环境变量，并可选择兼容模式：
 
 ```bash
@@ -285,12 +384,14 @@ AI 输出只提供“已证实事实、正常解释、缺失证据、处置建�
 
 ## 统一事件格式
 
-每行一个 JSON 对象，时间必须带时区。支持四种 `event_type`：
+每行一个 JSON 对象，时间必须带时区。除登录、进程和网络事件外，还区分订阅拉取 `subscription_access`、轻量节点活动 `proxy_activity` 与完整连接 `proxy_connection`：
 
 ```json
 {"timestamp":"2026-08-26T01:00:00Z","event_type":"login_success","user":"alice","source_ip":"198.51.100.11","city":"Guangzhou","country":"CN","lat":23.1291,"lon":113.2644,"asn":64511,"network_type":"residential"}
 {"timestamp":"2026-08-26T02:00:00Z","event_type":"process_start","user":"alice","pid":2101,"executable":"/usr/bin/python3","command":"python3 task.py --headless","parent_executable":"/usr/bin/bash"}
 {"timestamp":"2026-08-26T02:01:00Z","event_type":"network_connection","user":"alice","pid":2101,"destination_host":"target.example","destination_port":443}
+{"timestamp":"2026-08-26T02:02:00Z","event_type":"proxy_activity","user":"panel-user-1","source_ip":"198.51.100.20","node_id":"node_...","protocol":"xray"}
+{"timestamp":"2026-08-26T02:02:01Z","event_type":"proxy_connection","user":"panel-user-1","source_ip":"198.51.100.20","source_port":54321,"destination_host":"accounts.google.com","destination_port":443,"network":"tcp","inbound_tag":"vless-in","node_id":"node_...","node_name":"vmiss hk","protocol":"xray"}
 ```
 
 生产环境建议用以下来源落成这个格式：

@@ -234,25 +234,80 @@ class InstallerTests(unittest.TestCase):
             env["MOCK_SYSTEMCTL_LOG"] = str(systemctl_log)
             completed = run_bash(
                 f'SYSTEMD_DIR="{systemd_dir}"\n'
-                'install_systemd_units 7 "/data/vps-audit" "/data/vps-audit/reports"',
+                'install_systemd_units 7 "/data/vps-audit" "/data/vps-audit/reports" "/archive/vpspc-connections"',
                 env=env,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             service = (systemd_dir / "vps-audit.service").read_text(encoding="utf-8")
             timer = (systemd_dir / "vps-audit.timer").read_text(encoding="utf-8")
             bot_service = (systemd_dir / "vps-audit-bot.service").read_text(encoding="utf-8")
+            receiver_service = (systemd_dir / "vps-audit-node-receiver.service").read_text(
+                encoding="utf-8"
+            )
             self.assertIn(
-                "ReadWritePaths=/data/vps-audit /data/vps-audit/reports",
+                "ReadWritePaths=/data/vps-audit /data/vps-audit/reports /archive/vpspc-connections",
                 service,
             )
             self.assertNotIn("@STATE_DIR@", service)
             self.assertNotIn("@REPORT_DIR@", service)
+            self.assertNotIn("@BEHAVIOR_ARCHIVE_DIR@", service)
             self.assertNotIn("@SUPPLEMENTARY_GROUPS@", service)
             self.assertNotIn("@CAPABILITY_BOUNDING_SET@", service)
             self.assertNotIn("@INTERVAL@", timer)
-            self.assertIn("ReadWritePaths=/etc/vps-audit /data/vps-audit", bot_service)
+            self.assertIn("ReadWritePaths=/etc/vps-audit /data/vps-audit /archive/vpspc-connections", bot_service)
             self.assertNotIn("@STATE_DIR@", bot_service)
+            self.assertIn("ReadWritePaths=/data/vps-audit /archive/vpspc-connections", receiver_service)
+            self.assertIn("/opt/vps-audit/manager/deploy/node", receiver_service)
+            self.assertNotIn("@STATE_DIR@", receiver_service)
             self.assertNotIn("enable", systemctl_log.read_text(encoding="utf-8"))
+
+    def test_node_receiver_service_follows_configured_mode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "config.json"
+            systemd_dir = root / "systemd"
+            systemd_dir.mkdir()
+            (systemd_dir / "vps-audit-node-receiver.service").write_text(
+                "fixture\n", encoding="utf-8"
+            )
+            mock_bin = root / "bin"
+            mock_bin.mkdir()
+            systemctl_log = root / "systemctl.log"
+            (mock_bin / "systemctl").write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$*" >> "$MOCK_SYSTEMCTL_LOG"\nexit 0\n',
+                encoding="utf-8",
+            )
+            (mock_bin / "systemctl").chmod(0o755)
+            env = dict(os.environ)
+            env["PATH"] = f"{mock_bin}:{env['PATH']}"
+            env["MOCK_SYSTEMCTL_LOG"] = str(systemctl_log)
+            variables = f'CONFIG_FILE="{config}"\nSYSTEMD_DIR="{systemd_dir}"\n'
+
+            config.write_text(
+                json.dumps({"node_reporting": {"mode": "node_reporting"}}),
+                encoding="utf-8",
+            )
+            completed = run_bash(variables + "configure_node_receiver_service", env=env)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                systemctl_log.read_text(encoding="utf-8").splitlines(),
+                [
+                    "enable vps-audit-node-receiver.service",
+                    "restart vps-audit-node-receiver.service",
+                ],
+            )
+
+            systemctl_log.write_text("", encoding="utf-8")
+            config.write_text(
+                json.dumps({"node_reporting": {"mode": "controller_only"}}),
+                encoding="utf-8",
+            )
+            completed = run_bash(variables + "configure_node_receiver_service", env=env)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                systemctl_log.read_text(encoding="utf-8").splitlines(),
+                ["disable --now vps-audit-node-receiver.service"],
+            )
 
     def test_cli_shortcut_is_removed_only_when_managed(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -303,7 +358,7 @@ class InstallerTests(unittest.TestCase):
             completed = run_bash(
                 f'SYSTEMD_DIR="{systemd_dir}"\n'
                 f'CONFIG_FILE="{config}"\n'
-                'install_systemd_units 5 "/data/vps-audit" "/data/vps-audit/reports"',
+                'install_systemd_units 5 "/data/vps-audit" "/data/vps-audit/reports" "/data/vps-audit/behavior-audit"',
                 env=env,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -337,7 +392,7 @@ class InstallerTests(unittest.TestCase):
             completed = run_bash(
                 f'SYSTEMD_DIR="{systemd_dir}"\n'
                 f'CONFIG_FILE="{config}"\n'
-                'install_systemd_units 5 "/data/vps-audit" "/data/vps-audit/reports"',
+                'install_systemd_units 5 "/data/vps-audit" "/data/vps-audit/reports" "/data/vps-audit/behavior-audit"',
                 env=env,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -428,6 +483,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(written["subscription_monitoring"]["mode"], "allowlist")
             self.assertEqual(written["subscription_monitoring"]["users"], ["alice", "bob"])
             self.assertEqual(written["openai_review"]["active_provider"], "vendor")
+            self.assertEqual(written["node_reporting"]["mode"], "controller_only")
             self.assertEqual(
                 written["openai_review"]["providers"]["vendor"]["model"], "vendor-model"
             )
@@ -711,12 +767,14 @@ class InstallerTests(unittest.TestCase):
             service = systemd_dir / "vps-audit.service"
             timer = systemd_dir / "vps-audit.timer"
             bot_service = systemd_dir / "vps-audit-bot.service"
+            receiver_service = systemd_dir / "vps-audit-node-receiver.service"
             config.write_text('{"retention_days": 7}\n', encoding="utf-8")
             token.write_text("old-token\n", encoding="utf-8")
             first_ai_key.write_text("old-ai-key\n", encoding="utf-8")
             service.write_text("old-service\n", encoding="utf-8")
             timer.write_text("old-timer\n", encoding="utf-8")
             bot_service.write_text("old-bot-service\n", encoding="utf-8")
+            receiver_service.write_text("old-receiver-service\n", encoding="utf-8")
 
             mock_bin = root / "bin"
             mock_bin.mkdir()
@@ -742,6 +800,7 @@ class InstallerTests(unittest.TestCase):
             service.write_text("new-service\n", encoding="utf-8")
             timer.write_text("new-timer\n", encoding="utf-8")
             bot_service.write_text("new-bot-service\n", encoding="utf-8")
+            receiver_service.write_text("new-receiver-service\n", encoding="utf-8")
             completed = run_bash(variables + "rollback_settings_app", env=env)
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(config.read_text(encoding="utf-8"), '{"retention_days": 7}\n')
@@ -752,6 +811,9 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(service.read_text(encoding="utf-8"), "old-service\n")
             self.assertEqual(timer.read_text(encoding="utf-8"), "old-timer\n")
             self.assertEqual(bot_service.read_text(encoding="utf-8"), "old-bot-service\n")
+            self.assertEqual(
+                receiver_service.read_text(encoding="utf-8"), "old-receiver-service\n"
+            )
 
     def test_purge_deletes_only_marked_configured_directories(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -761,17 +823,23 @@ class InstallerTests(unittest.TestCase):
             systemd_dir = root / "systemd"
             state_dir = root / "custom-state"
             report_dir = state_dir / "reports"
+            behavior_dir = root / "connection-archive"
             original_log = root / "mmwx.log"
             unrelated = root / "keep-me.txt"
-            for directory in (config_dir, install_root, systemd_dir, state_dir, report_dir):
+            for directory in (config_dir, install_root, systemd_dir, state_dir, report_dir, behavior_dir):
                 directory.mkdir(exist_ok=True)
             (state_dir / ".vps-audit-managed").write_text("", encoding="utf-8")
             (report_dir / ".vps-audit-managed").write_text("", encoding="utf-8")
+            (behavior_dir / ".vps-audit-managed").write_text("", encoding="utf-8")
             original_log.write_text("original application log", encoding="utf-8")
             unrelated.write_text("unrelated", encoding="utf-8")
             config = config_dir / "config.json"
             config.write_text(
-                json.dumps({"state_dir": str(state_dir), "report_dir": str(report_dir)}),
+                json.dumps({
+                    "state_dir": str(state_dir),
+                    "report_dir": str(report_dir),
+                    "behavior_audit": {"enabled": True, "archive_dir": str(behavior_dir)},
+                }),
                 encoding="utf-8",
             )
             mock_bin = root / "bin"
@@ -793,6 +861,7 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertFalse(state_dir.exists())
+            self.assertFalse(behavior_dir.exists())
             self.assertFalse(config_dir.exists())
             self.assertFalse(install_root.exists())
             self.assertEqual(original_log.read_text(encoding="utf-8"), "original application log")

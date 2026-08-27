@@ -9,6 +9,8 @@ VALID_EVENT_TYPES = {
     "login_success",
     "login_failure",
     "subscription_access",
+    "proxy_activity",
+    "proxy_connection",
     "process_start",
     "network_connection",
 }

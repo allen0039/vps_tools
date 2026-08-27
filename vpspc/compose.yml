@@ -1,0 +1,43 @@
+services:
+  audit:
+    build: .
+    image: ${AUDIT_IMAGE:-vpspc:local}
+    environment:
+      VPS_AUDIT_CONFIG: /etc/vps-audit/config.json
+      AUDIT_INTERVAL_SECONDS: ${AUDIT_INTERVAL_SECONDS:-300}
+    volumes:
+      - ./docker/config.json:/etc/vps-audit/config.json:ro
+      - vpspc-state:/var/lib/vps-audit
+    restart: unless-stopped
+  web:
+    image: ${AUDIT_IMAGE:-vpspc:local}
+    command: ["/usr/local/bin/vps-audit-web", "--config", "/etc/vps-audit/config.json"]
+    profiles: [web]
+    volumes:
+      - ./docker/config.json:/etc/vps-audit/config.json:ro
+      - vpspc-state:/var/lib/vps-audit
+      - ./docker/secrets/web_token:/run/secrets/web_token:ro
+    ports:
+      - "${WEB_PORT:-8787}:8787"
+    restart: unless-stopped
+  bot:
+    image: ${AUDIT_IMAGE:-vpspc:local}
+    command: ["/usr/local/bin/vps-audit-bot", "--config", "/etc/vps-audit/config.json"]
+    profiles: [bot]
+    volumes:
+      - ./docker/config.json:/etc/vps-audit/config.json:ro
+      - vpspc-state:/var/lib/vps-audit
+      - ./docker/secrets/telegram_token:/run/secrets/telegram_token:ro
+    restart: unless-stopped
+  receiver:
+    image: ${AUDIT_IMAGE:-vpspc:local}
+    command: ["/usr/local/bin/vps-audit-nodes", "--config", "/etc/vps-audit/config.json", "serve"]
+    profiles: [receiver]
+    volumes:
+      - ./docker/config.json:/etc/vps-audit/config.json:ro
+      - vpspc-state:/var/lib/vps-audit
+    ports:
+      - "${RECEIVER_PORT:-8766}:8766"
+    restart: unless-stopped
+volumes:
+  vpspc-state:

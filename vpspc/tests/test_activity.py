@@ -37,6 +37,13 @@ class ActivityTests(unittest.TestCase):
                     "device_id": "laptop",
                 },
                 {
+                    "timestamp": "2026-08-27T01:24:00Z",
+                    "event_type": "proxy_activity",
+                    "user": "alice",
+                    "source_ip": "198.51.100.1",
+                    "node_name": "edge-1",
+                },
+                {
                     "timestamp": "2026-08-27T01:25:00Z",
                     "event_type": "subscription_access",
                     "user": "alice",
@@ -79,10 +86,12 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(result["ip_count"], 2)
         self.assertEqual(result["ips"][0]["source_ip"], "203.0.113.8")
         first_ip = next(item for item in result["ips"] if item["source_ip"] == "198.51.100.1")
-        self.assertEqual(first_ip["access_count"], 2)
+        self.assertEqual(first_ip["access_count"], 3)
         self.assertEqual(first_ip["device_count"], 2)
         self.assertEqual(first_ip["region"], "Guangdong")
         self.assertEqual(first_ip["asn"], 64511)
+        self.assertEqual(first_ip["nodes"], ["edge-1"])
+        self.assertTrue(result["includes_proxy_activity"])
         self.assertGreaterEqual(result["parse_error_count"], 1)
 
     def test_render_masks_telegram_ip_and_marks_non_concurrent_semantics(self):

@@ -10,11 +10,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from .activity import query_active_subscription_ips, render_active_ip_query
+from .behavior_audit import list_incidents, load_incident, render_ai_review, render_incident
 from .runtime import (
     _atomic_json,
     _read_secret,
     health,
     load_runtime_config,
+    review_behavior_incident,
     test_configured_ai_provider,
 )
 from .settings import (
@@ -50,6 +52,7 @@ def _main_keyboard() -> Dict[str, Any]:
     return {"inline_keyboard": [
         [_button("📊 状态", "menu:status"), _button("👥 订阅用户", "menu:users")],
         [_button("🌐 查询重点用户活跃 IP", "activeips:0")],
+        [_button("🧾 行为事件", "incident:list")],
         [_button("⚙️ 检测参数", "menu:thresholds"), _button("🔔 推送参数", "menu:telegram")],
         [_button("🤖 AI 复核", "menu:ai")],
         [_button("▶️ 立即巡查", "menu:run"), _button("❓ 帮助", "menu:help")],
@@ -98,6 +101,48 @@ def _ai_keyboard(config: Dict[str, Any]) -> Dict[str, Any]:
         [_button("⬅️ 主菜单", "menu:main")],
     ])
     return {"inline_keyboard": rows}
+
+
+def _incident_ai_available(config: Dict[str, Any]) -> bool:
+    ai = config["openai_review"]
+    active = str(ai.get("active_provider", ""))
+    return bool(active and active in ai.get("providers", {}))
+
+
+def _incident_list_view(config: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    behavior = config["behavior_audit"]
+    if not behavior["enabled"]:
+        return (
+            "完整连接元数据审计尚未启用。",
+            {"inline_keyboard": [[_button("⬅️ 主菜单", "menu:main")]]},
+        )
+    records = list_incidents(Path(str(behavior["archive_dir"])), limit=10)
+    if not records:
+        return (
+            "尚无行为事件。完成一次巡查并命中节点或行为规则后会显示在这里。",
+            {"inline_keyboard": [[_button("🔄 刷新", "incident:list")], [_button("⬅️ 主菜单", "menu:main")]]},
+        )
+    lines = [f"最近行为事件（{len(records)} 条）："]
+    rows: List[List[Dict[str, str]]] = []
+    for record in records:
+        identifier = str(record.get("incident_id", ""))
+        lines.append(
+            f"{identifier} | {record.get('severity', '-')} | {record.get('user', '-')} | "
+            f"{record.get('title', record.get('rule_id', '-'))}"
+        )
+        rows.append([_button(f"查看 {identifier}", f"incident:view:{identifier}")])
+    rows.extend([[_button("🔄 刷新", "incident:list")], [_button("⬅️ 主菜单", "menu:main")]])
+    return "\n".join(lines)[:3900], {"inline_keyboard": rows}
+
+
+def _incident_detail_view(config: Dict[str, Any], identifier: str) -> Tuple[str, Dict[str, Any]]:
+    record = load_incident(Path(str(config["behavior_audit"]["archive_dir"])), identifier.upper())
+    rows: List[List[Dict[str, str]]] = []
+    if _incident_ai_available(config):
+        rows.append([_button("🤖 AI 审计", f"incident:ai:{identifier.upper()}")])
+        rows.append([_button("💬 向 AI 追问", f"incident:ask:{identifier.upper()}")])
+    rows.extend([[_button("⬅️ 事件列表", "incident:list")], [_button("⬅️ 主菜单", "menu:main")]])
+    return render_incident(record), {"inline_keyboard": rows}
 
 
 def _monitoring_text(config: Dict[str, Any]) -> str:
@@ -305,6 +350,10 @@ def _help_text() -> str:
         "/users - 查看监测名单\n"
         "/discover - 从本地日志点选用户\n"
         "/ips [用户名] - 查询已添加用户的活跃 IP 与位置\n"
+        "/incidents - 查看最近行为事件\n"
+        "/incident <INC-ID> - 查看完整连接时间线\n"
+        "/incidentai <INC-ID> - 使用 AI 复核单个事件\n"
+        "/ask <INC-ID> <问题> - 针对单个事件向 AI 追问\n"
         "/mode all|allowlist - 全部用户或重点名单\n"
         "/monitor on|off - 启用或暂停订阅监测\n"
         "/adduser <用户名或订阅ID>\n"
@@ -388,11 +437,14 @@ def _apply_pending(config_path: str, pending: Dict[str, Any], sender_id: int, te
     if action == "ai_model":
         config = set_ai_provider_model(config_path, str(entry["provider_id"]), text)
         return "AI 模型已更新。\n\n" + _ai_text(config)
+    if action == "incident_question":
+        review = review_behavior_incident(config_path, str(entry["incident_id"]), text)
+        return render_ai_review(review)
     raise ValueError("未知的待处理操作")
 
 
 def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any]) -> Tuple[str, Dict[str, Any] | None]:
-    if not value.startswith("/") and not value.startswith(("menu:", "mode:", "prompt:", "toggle:", "discover:", "activeips:", "ai:")):
+    if not value.startswith("/") and not value.startswith(("menu:", "mode:", "prompt:", "toggle:", "discover:", "activeips:", "ai:", "incident:")):
         result = _apply_pending(config_path, pending, sender_id, value)
         if result:
             return result, _main_keyboard()
@@ -417,6 +469,22 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
         return _telegram_text(config), _telegram_keyboard()
     if command in {"/ai", "menu:ai"}:
         return _ai_text(config), _ai_keyboard(config)
+    if command in {"/incidents", "incident:list"}:
+        return _incident_list_view(config)
+    if command == "/incident":
+        if not arguments:
+            raise ValueError("用法：/incident <INC-ID>")
+        return _incident_detail_view(config, arguments[0])
+    if command == "/incidentai":
+        if not arguments:
+            raise ValueError("用法：/incidentai <INC-ID>")
+        review = review_behavior_incident(config_path, arguments[0].upper())
+        return render_ai_review(review), _main_keyboard()
+    if command == "/ask":
+        if len(arguments) != 2:
+            raise ValueError("用法：/ask <INC-ID> <问题>")
+        review = review_behavior_incident(config_path, arguments[0].upper(), arguments[1])
+        return render_ai_review(review), _main_keyboard()
     if command in {"/help", "menu:help"}:
         return _help_text(), _main_keyboard()
     if command in {"/run", "menu:run"}:
@@ -509,6 +577,19 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
     if command.startswith("ai:use:"):
         config = set_active_ai_provider(config_path, command.split(":", 2)[2])
         return "AI 供应商已切换。\n\n" + _ai_text(config), _ai_keyboard(config)
+    if command.startswith("incident:view:"):
+        return _incident_detail_view(config, command.split(":", 2)[2])
+    if command.startswith("incident:ai:"):
+        identifier = command.split(":", 2)[2].upper()
+        review = review_behavior_incident(config_path, identifier)
+        return render_ai_review(review), _incident_detail_view(config, identifier)[1]
+    if command.startswith("incident:ask:"):
+        identifier = command.split(":", 2)[2].upper()
+        load_incident(Path(str(config["behavior_audit"]["archive_dir"])), identifier)
+        if not _incident_ai_available(config):
+            raise ValueError("请先在 VPS 本机配置 AI 供应商")
+        pending[str(sender_id)] = {"action": "incident_question", "incident_id": identifier}
+        return f"请发送针对事件 {identifier} 的问题。发送 /cancel 可取消。", None
     if command.startswith("activeips:"):
         parts = command.split(":")
         if len(parts) == 2:

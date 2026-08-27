@@ -1,0 +1,18 @@
+{
+  "web": {"enabled": true, "listen_host": "0.0.0.0", "listen_port": 8787, "token_file": "/run/secrets/web_token"},
+  "state_dir": "/var/lib/vps-audit",
+  "report_dir": "/var/lib/vps-audit/reports",
+  "scan_interval_minutes": 5,
+  "retention_days": 7,
+  "auth_logs": [],
+  "subscription_logs": [],
+  "miaomiaowux_logs": [],
+  "falco_logs": [],
+  "node_reporting": {"mode": "controller_only", "listen_host": "0.0.0.0", "listen_port": 8766, "public_base_url": ""},
+  "behavior_audit": {"enabled": true, "archive_dir": "/var/lib/vps-audit/behavior-audit", "retention_days": 7, "incident_retention_days": 30, "max_disk_mb": 20480, "max_analysis_events": 100000, "ai_include_full_metadata": true},
+  "subscription_monitoring": {"enabled": true, "mode": "all", "users": []},
+  "rules": {"thresholds": {"subscription_window_minutes": 15, "subscription_ip_count": 10, "subscription_region_count": 3, "subscription_city_count": 5, "subscription_asn_count": 4, "subscription_device_count": 5, "subscription_shared_source_user_count": 5, "node_window_minutes": 10, "node_ip_count": 5, "node_region_count": 2, "node_city_count": 3, "node_asn_count": 3, "behavior_connection_count": 200, "behavior_unique_destination_count": 30, "behavior_account_service_count": 20, "impossible_travel_min_km": 500, "impossible_travel_kmh": 900}},
+  "telegram": {"enabled": false, "token_file": "/run/secrets/telegram_token", "chat_id": "", "minimum_severity": "high", "cooldown_hours": 6, "include_source_ip": false, "bot_management_enabled": false, "admin_user_ids": [], "poll_timeout_seconds": 30},
+  "openai_review": {"enabled": false, "active_provider": "", "providers": {}},
+  "geoip": {"city_db": "", "asn_db": ""}
+}

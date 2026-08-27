@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from vps_audit.behavior_audit import save_incidents
 from vps_audit.bot import _DISCOVERY_CACHE, _authorized, _handle, _update_context, run_bot
 from vps_audit.runtime import load_runtime_config
 from vps_audit.settings import upsert_ai_provider
@@ -206,6 +207,75 @@ class BotTests(unittest.TestCase):
             path = self._config(Path(temporary))
             with self.assertRaisesRegex(ValueError, "已经添加"):
                 _handle(str(path), 12345, "/ips outsider", {})
+
+    def test_behavior_incident_list_detail_ai_and_question_flow(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = self._config(root)
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            archive = root / "behavior-audit"
+            raw["behavior_audit"] = {
+                "enabled": True,
+                "archive_dir": str(archive),
+                "ai_include_full_metadata": True,
+            }
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            record = save_incidents(
+                archive,
+                [{
+                    "rule_id": "BEHAVIOR_ACCOUNT_AUTOMATION",
+                    "user": "user-a",
+                    "severity": "high",
+                    "score": 60,
+                    "title": "疑似批量账号注册或认证自动化",
+                    "summary": "fixture",
+                    "evidence": [{
+                        "timestamp": "2026-08-27T01:00:00Z",
+                        "source_ip": "198.51.100.9",
+                        "destination_host": "accounts.google.com",
+                        "destination_port": 443,
+                        "destination_category": "account_service",
+                        "node_id": "node_1234567890abcdef12345678",
+                        "node_name": "vmiss hk",
+                    }],
+                }],
+                "2026-08-27T01:01:00Z",
+            )[0]
+            identifier = record["incident_id"]
+
+            response, keyboard = _handle(str(path), 12345, "/incidents", {})
+            self.assertIn(identifier, response)
+            callbacks = [button["callback_data"] for row in keyboard["inline_keyboard"] for button in row]
+            detail_callback = next(item for item in callbacks if item.startswith("incident:view:"))
+            response, keyboard = _handle(str(path), 12345, detail_callback, {})
+            self.assertIn("198.51.100.9", response)
+            self.assertIn("accounts.google.com:443", response)
+            self.assertNotIn("incident:ai:", json.dumps(keyboard))
+
+            key_file = root / "audit.key"
+            key_file.write_text("secret\n", encoding="utf-8")
+            upsert_ai_provider(
+                str(path), "audit", "Audit AI", "https://ai.example/v1", "responses",
+                str(key_file), "audit-model", 15,
+            )
+            _, keyboard = _handle(str(path), 12345, f"/incident {identifier}", {})
+            callbacks = [button["callback_data"] for row in keyboard["inline_keyboard"] for button in row]
+            self.assertIn(f"incident:ai:{identifier}", callbacks)
+            pending = {}
+            response, no_keyboard = _handle(
+                str(path), 12345, f"incident:ask:{identifier}", pending
+            )
+            self.assertIn("请发送", response)
+            self.assertIsNone(no_keyboard)
+            with patch(
+                "vps_audit.bot.review_behavior_incident",
+                return_value={"overall_assessment": "需要复核", "cases": []},
+            ) as review:
+                response, _ = _handle(str(path), 12345, "请判断是否为客户端重试", pending)
+            self.assertIn("需要复核", response)
+            review.assert_called_once_with(
+                str(path), identifier, "请判断是否为客户端重试"
+            )
 
 
 if __name__ == "__main__":

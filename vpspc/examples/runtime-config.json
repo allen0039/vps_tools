@@ -1,4 +1,10 @@
 {
+  "web": {
+    "enabled": false,
+    "listen_host": "127.0.0.1",
+    "listen_port": 8787,
+    "token_file": "/etc/vps-audit/web.token"
+  },
   "auth_logs": ["/var/log/auth.log"],
   "auth_timezone": "+08:00",
   "journal": {
@@ -14,6 +20,24 @@
   "report_dir": "/var/lib/vps-audit/reports",
   "scan_interval_minutes": 5,
   "retention_days": 7,
+  "node_reporting": {
+    "mode": "controller_only",
+    "listen_host": "127.0.0.1",
+    "listen_port": 8766,
+    "public_base_url": "",
+    "enrollment_ttl_minutes": 15,
+    "replay_window_seconds": 300,
+    "max_batch_events": 500
+  },
+  "behavior_audit": {
+    "enabled": false,
+    "archive_dir": "/var/lib/vps-audit/behavior-audit",
+    "retention_days": 7,
+    "incident_retention_days": 30,
+    "max_disk_mb": 20480,
+    "max_analysis_events": 100000,
+    "ai_include_full_metadata": true
+  },
   "subscription_monitoring": {
     "enabled": true,
     "mode": "allowlist",
@@ -26,6 +50,14 @@
       "subscription_region_count": 3,
       "subscription_city_count": 5,
       "subscription_asn_count": 4,
+      "node_window_minutes": 10,
+      "node_ip_count": 5,
+      "node_region_count": 2,
+      "node_city_count": 3,
+      "node_asn_count": 3,
+      "behavior_connection_count": 200,
+      "behavior_unique_destination_count": 30,
+      "behavior_account_service_count": 20,
       "impossible_travel_min_km": 500,
       "impossible_travel_kmh": 900
     }
@@ -43,8 +75,8 @@
   },
   "openai_review": {
     "enabled": false,
-    "api_key_file": "/etc/vps-audit/openai.key",
-    "model": ""
+    "active_provider": "",
+    "providers": {}
   },
   "geoip": {
     "city_db": "/var/lib/GeoIP/GeoLite2-City.mmdb",

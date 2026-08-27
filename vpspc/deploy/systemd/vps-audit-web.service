@@ -1,25 +1,24 @@
 [Unit]
-Description=VPS user behavior audit cycle
+Description=VPSPC Web management console
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
+Type=simple
 User=root
 Group=root
-@SUPPLEMENTARY_GROUPS@
 UMask=0077
-ExecStart=/opt/vps-audit/venv/bin/vps-audit-runner --config /etc/vps-audit/config.json run
-TimeoutStartSec=180
-Nice=10
-IOSchedulingClass=idle
+ExecStart=/opt/vps-audit/venv/bin/vps-audit-web --config /etc/vps-audit/config.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadOnlyPaths=/etc/vps-audit /var/log
+ReadOnlyPaths=/etc/vps-audit
 ReadWritePaths=@STATE_DIR@ @REPORT_DIR@ @BEHAVIOR_ARCHIVE_DIR@
-@CAPABILITY_BOUNDING_SET@
+CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

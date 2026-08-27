@@ -29,6 +29,14 @@ THRESHOLD_SPECS: Dict[str, Tuple[str, int, int]] = {
     "subscription_asn_count": ("同订阅 ASN 数", 2, 1000),
     "subscription_device_count": ("同订阅设备标识数", 2, 1000),
     "subscription_shared_source_user_count": ("同来源拉取的订阅用户数", 2, 1000),
+    "node_window_minutes": ("节点行为窗口（分钟）", 1, 1440),
+    "node_ip_count": ("单用户单节点不同 IP 数", 2, 1000),
+    "node_region_count": ("单用户单节点地区数", 2, 1000),
+    "node_city_count": ("单用户单节点城市数", 2, 1000),
+    "node_asn_count": ("单用户单节点 ASN 数", 2, 1000),
+    "behavior_connection_count": ("单用户单节点连接数", 1, 1000000),
+    "behavior_unique_destination_count": ("单用户单节点不同目标数", 1, 100000),
+    "behavior_account_service_count": ("账号/验证服务连接数", 1, 100000),
 }
 
 

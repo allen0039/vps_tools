@@ -15,7 +15,7 @@ _DETAIL_FIELDS = ("country", "region", "city", "asn", "isp", "network_type")
 def query_active_subscription_ips(
     config: Dict[str, Any], user: str, now: datetime | None = None
 ) -> Dict[str, Any]:
-    """Return unique subscription source IPs seen in the configured active window."""
+    """Return unique subscription-fetch or proxy-activity IPs in the active window."""
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     window_minutes = int(config["rules"]["thresholds"]["subscription_window_minutes"])
     cutoff = current - timedelta(minutes=window_minutes)
@@ -34,7 +34,8 @@ def query_active_subscription_ips(
                     event = json.loads(line)
                     if not isinstance(event, dict):
                         raise ValueError("event must be an object")
-                    if event.get("event_type") != "subscription_access" or str(event.get("user", "")) != user:
+                    event_type = str(event.get("event_type", ""))
+                    if event_type not in {"subscription_access", "proxy_activity"} or str(event.get("user", "")) != user:
                         continue
                     timestamp = parse_timestamp(str(event["timestamp"]))
                 except (KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -57,9 +58,15 @@ def query_active_subscription_ips(
                         "last_seen": timestamp,
                         "access_count": 0,
                         "devices": set(),
+                        "evidence_types": set(),
+                        "nodes": set(),
                     }
                     by_ip[source_ip] = existing
                 existing["access_count"] += 1
+                existing["evidence_types"].add(event_type)
+                node_name = str(event.get("node_name") or event.get("node_id") or "").strip()
+                if node_name:
+                    existing["nodes"].add(node_name)
                 device_id = str(event.get("device_id", "")).strip()
                 if device_id:
                     existing["devices"].add(device_id)
@@ -80,6 +87,8 @@ def query_active_subscription_ips(
         item = dict(item)
         item["last_seen"] = item["last_seen"].isoformat().replace("+00:00", "Z")
         item["device_count"] = len(item.pop("devices"))
+        item["evidence_types"] = sorted(item["evidence_types"])
+        item["nodes"] = sorted(item["nodes"])
         items.append(item)
     items.sort(key=lambda item: item["last_seen"], reverse=True)
     return {
@@ -89,6 +98,9 @@ def query_active_subscription_ips(
         "ip_count": len(items),
         "ips": items,
         "parse_error_count": parse_error_count,
+        "includes_proxy_activity": any(
+            "proxy_activity" in item.get("evidence_types", []) for item in items
+        ),
     }
 
 
@@ -108,7 +120,11 @@ def render_active_ip_query(
     lines = [
         f"用户：{result['user']}",
         f"最近 {result['window_minutes']} 分钟活跃 IP：{result['ip_count']} 个",
-        "说明：这是订阅访问活跃窗口，不是严格 TCP/节点同时在线数。",
+        (
+            "说明：包含节点实际连接与订阅拉取的活跃证据，不是严格并发连接数。"
+            if result.get("includes_proxy_activity")
+            else "说明：这是订阅访问活跃窗口，不是严格 TCP/节点同时在线数。"
+        ),
     ]
     ips = list(result.get("ips", []))
     if not ips:
@@ -134,6 +150,8 @@ def render_active_ip_query(
         detail = f"最近：{item['last_seen']} | 访问记录：{item['access_count']}"
         if item.get("device_count"):
             detail += f" | 设备标识：{item['device_count']}"
+        if item.get("nodes"):
+            detail += " | 节点：" + ", ".join(_safe_text(value, 40) for value in item["nodes"][:3])
         lines.append("   " + detail)
     if len(ips) > max_items:
         lines.append(f"……另有 {len(ips) - max_items} 个 IP，请缩短窗口或在 VPS 本机查看。")

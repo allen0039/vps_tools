@@ -7,6 +7,7 @@ from unittest.mock import patch
 from vps_audit.management import (
     _active_ips_menu,
     _configure_ai_provider,
+    _nodes_menu,
     _threshold_menu,
     _users_menu,
     interactive_menu,
@@ -98,6 +99,51 @@ class ManagementTests(unittest.TestCase):
             ) as query:
                 _active_ips_menu(str(path))
             self.assertEqual(query.call_args.args[1], "alice")
+
+    def test_nodes_menu_distinguishes_normal_and_replacement_links(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._config(Path(temporary))
+            with patch("vps_audit.management.list_registered_nodes", return_value=[]), patch(
+                "vps_audit.management.create_install_command", return_value="install-command"
+            ) as create, patch("builtins.input", side_effect=["1", "edge-normal", "0"]):
+                _nodes_menu(str(path))
+            create.assert_called_once_with(str(path), "edge-normal", replace=False)
+
+            with patch("vps_audit.management.list_registered_nodes", return_value=[]), patch(
+                "vps_audit.management.create_install_command", return_value="replace-command"
+            ) as create, patch("builtins.input", side_effect=["2", "edge-replace", "0"]):
+                _nodes_menu(str(path))
+            create.assert_called_once_with(str(path), "edge-replace", replace=True)
+
+    def test_nodes_menu_exposes_revoke_and_fixed_uninstall_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._config(Path(temporary))
+            node = {
+                "node_id": "node_1234567890abcdef12345678",
+                "name": "edge",
+                "revoked": False,
+                "last_seen": None,
+            }
+            with patch(
+                "vps_audit.management.list_registered_nodes", return_value=[node]
+            ), patch("vps_audit.management.revoke_registered_node") as revoke, patch(
+                "builtins.input",
+                side_effect=["3", node["node_id"], "0"],
+            ):
+                _nodes_menu(str(path))
+            revoke.assert_called_once_with(str(path), node["node_id"])
+
+            with patch(
+                "vps_audit.management.list_registered_nodes", return_value=[node]
+            ), patch(
+                "vps_audit.management.request_registered_node_uninstall",
+                return_value={"id": "command-id"},
+            ) as uninstall, patch(
+                "builtins.input",
+                side_effect=["4", node["node_id"], "0"],
+            ):
+                _nodes_menu(str(path))
+            uninstall.assert_called_once_with(str(path), node["node_id"])
 
 
 if __name__ == "__main__":

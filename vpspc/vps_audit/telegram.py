@@ -39,6 +39,12 @@ def _evidence_line(evidence: Dict[str, Any], include_source_ip: bool) -> str:
         parts.append(f"ASN {evidence['asn']}")
     if evidence.get("network_type"):
         parts.append(str(evidence["network_type"]))
+    target = evidence.get("destination_host") or evidence.get("destination_ip")
+    if target:
+        destination = str(target)
+        if evidence.get("destination_port"):
+            destination += f":{evidence['destination_port']}"
+        parts.append("目标=" + destination)
     if evidence.get("executable"):
         parts.append(Path(str(evidence["executable"])).name)
     if evidence.get("indicators"):
@@ -56,6 +62,36 @@ def _safe_summary(finding: Dict[str, Any], include_source_ip: bool) -> str:
                 raw = str(evidence[key])
                 summary = summary.replace(raw, _mask_address(raw))
     return summary
+
+
+def _finding_nodes(finding: Dict[str, Any], limit: int = 5) -> List[str]:
+    nodes: List[str] = []
+    for evidence in finding.get("evidence", []):
+        value = str(evidence.get("node_name") or evidence.get("node_id") or "").strip()
+        value = "".join(
+            char if 32 <= ord(char) < 127 or ord(char) >= 160 else "?" for char in value
+        )
+        if value and value not in nodes:
+            nodes.append(value[:80])
+        if len(nodes) >= limit:
+            break
+    return nodes
+
+
+def _finding_targets(finding: Dict[str, Any], limit: int = 5) -> List[str]:
+    counts: Dict[str, int] = {}
+    for evidence in finding.get("evidence", []):
+        target = evidence.get("destination_host") or evidence.get("destination_ip")
+        if not target:
+            continue
+        rendered = str(target)
+        if evidence.get("destination_port"):
+            rendered += f":{evidence['destination_port']}"
+        counts[rendered] = counts.get(rendered, 0) + 1
+    return [
+        target if count == 1 else f"{target} ({count})"
+        for target, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    ]
 
 
 def build_alert_message(
@@ -81,6 +117,15 @@ def build_alert_message(
     for finding in selected:
         lines.append(f"[{finding['severity'].upper()}] {finding['user']} - {finding['title']}")
         lines.append(_safe_summary(finding, include_source_ip))
+        nodes = _finding_nodes(finding)
+        if nodes:
+            lines.append("涉及节点：" + ", ".join(nodes))
+        if finding.get("incident_id"):
+            lines.append("事件 ID：" + str(finding["incident_id"]))
+        if str(finding.get("rule_id", "")).startswith("BEHAVIOR_"):
+            targets = _finding_targets(finding)
+            if targets:
+                lines.append("主要目标：" + ", ".join(targets))
         if finding.get("evidence"):
             evidence = _evidence_line(finding["evidence"][0], include_source_ip)
             if evidence:

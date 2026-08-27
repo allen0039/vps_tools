@@ -268,6 +268,150 @@ def _subscription_findings(user: str, events: Sequence[Event], config: Dict[str,
     return findings
 
 
+def _node_identity(event: Event) -> str:
+    return str(event.data.get("node_id") or event.data.get("node_name") or "unknown-node")
+
+
+def _node_display(events: Sequence[Event]) -> str:
+    for event in events:
+        value = str(event.data.get("node_name") or event.data.get("node_id") or "").strip()
+        if value:
+            return value
+    return "unknown-node"
+
+
+def _proxy_activity_findings(user: str, events: Sequence[Event], config: Dict[str, Any]) -> List[Finding]:
+    findings: List[Finding] = []
+    thresholds = config["thresholds"]
+    accesses = [
+        event for event in events if event.event_type in {"proxy_activity", "proxy_connection"}
+    ]
+    if not accesses:
+        return findings
+    trusted_ips = set(config.get("trusted", {}).get("ips", []))
+    accesses = [event for event in accesses if event.data.get("source_ip") not in trusted_ips]
+    by_node: Dict[str, List[Event]] = defaultdict(list)
+    for event in accesses:
+        by_node[_node_identity(event)].append(event)
+    window_minutes = int(thresholds["node_window_minutes"])
+    evidence_fields = (
+        "source_ip", "region", "city", "country", "asn", "node_id", "node_name", "protocol"
+    )
+    dimensions = [
+        ("region", "node_region_count", "NODE_MULTI_REGION", "节点连接跨省/地区", 45),
+        ("city", "node_city_count", "NODE_MULTI_CITY", "节点连接跨城市", 35),
+        ("asn", "node_asn_count", "NODE_MULTI_ASN", "节点连接跨多个网络运营商", 45),
+    ]
+    for node_events in by_node.values():
+        node_name = _node_display(node_events)
+        ip_window, ips = _max_unique_window(
+            node_events, window_minutes, lambda event: event.data.get("source_ip")
+        )
+        if len(ips) >= int(thresholds["node_ip_count"]):
+            findings.append(Finding(
+                "NODE_ACTIVE_IPS", user, "high", 55, "单用户单节点短时活跃 IP 过多",
+                f"用户 {user} 在节点 {node_name} 的 {window_minutes} 分钟窗口内出现 "
+                f"{len(ips)} 个不同来源 IP；不同用户和其他节点未计入该窗口。",
+                [_event_evidence(event, evidence_fields) for event in ip_window[:20]],
+            ))
+        for field, threshold_key, rule_id, title, score in dimensions:
+            dimension_window, values = _max_unique_window(
+                node_events,
+                window_minutes,
+                lambda event, name=field: str(event.data.get(name, "")).strip(),
+            )
+            if len(values) >= int(thresholds[threshold_key]):
+                label = "省/地区" if field == "region" else "城市" if field == "city" else "ASN"
+                findings.append(Finding(
+                    rule_id,
+                    user,
+                    "high" if score >= 45 else "medium",
+                    score,
+                    title,
+                    f"用户 {user} 在节点 {node_name} 的 {window_minutes} 分钟窗口内覆盖 "
+                    f"{len(values)} 个不同{label}：{', '.join(sorted(values)[:10])}。",
+                    [_event_evidence(event, evidence_fields) for event in dimension_window[:20]],
+                ))
+        for previous, current in zip(node_events, node_events[1:]):
+            distance = _haversine_km(
+                previous.data.get("geo") or previous.data,
+                current.data.get("geo") or current.data,
+            )
+            hours = (current.timestamp - previous.timestamp).total_seconds() / 3600
+            if distance is None or hours <= 0:
+                continue
+            speed = distance / hours
+            if (
+                distance >= float(thresholds["impossible_travel_min_km"])
+                and speed >= float(thresholds["impossible_travel_kmh"])
+            ):
+                findings.append(Finding(
+                    "NODE_IMPOSSIBLE_TRAVEL", user, "high", 50, "节点连接出现不可能旅行",
+                    f"用户 {user} 在节点 {node_name} 的连续活动相距约 {distance:.0f} km，"
+                    f"间隔 {hours:.2f} 小时，推算速度 {speed:.0f} km/h。",
+                    [_event_evidence(previous, evidence_fields), _event_evidence(current, evidence_fields)],
+                ))
+    return findings
+
+
+def _proxy_behavior_findings(user: str, events: Sequence[Event], config: Dict[str, Any]) -> List[Finding]:
+    findings: List[Finding] = []
+    thresholds = config["thresholds"]
+    connections = [event for event in events if event.event_type == "proxy_connection"]
+    by_node: Dict[str, List[Event]] = defaultdict(list)
+    for event in connections:
+        by_node[_node_identity(event)].append(event)
+    window_minutes = int(thresholds["node_window_minutes"])
+    fields = (
+        "source_ip", "source_port", "destination_host", "destination_ip", "destination_port",
+        "destination_category", "network", "inbound_tag", "node_id", "node_name", "protocol",
+        "region", "city", "country", "asn",
+    )
+    for node_events in by_node.values():
+        node_name = _node_display(node_events)
+        count_window = _max_count_window(node_events, window_minutes)
+        destination_window, destinations = _max_unique_window(
+            node_events,
+            window_minutes,
+            lambda event: event.data.get("destination_host") or event.data.get("destination_ip"),
+        )
+        account_events = [
+            event for event in node_events if event.data.get("destination_category") == "account_service"
+        ]
+        account_window = _max_count_window(account_events, window_minutes) if account_events else []
+        _, account_destinations = _max_unique_window(
+            account_events,
+            window_minutes,
+            lambda event: event.data.get("destination_host") or event.data.get("destination_ip"),
+        ) if account_events else ([], set())
+        if len(count_window) >= int(thresholds["behavior_connection_count"]):
+            findings.append(Finding(
+                "BEHAVIOR_CONNECTION_BURST", user, "medium", 30, "单用户单节点连接频率异常",
+                f"用户 {user} 在节点 {node_name} 的 {window_minutes} 分钟窗口内产生 "
+                f"{len(count_window)} 条代理连接。",
+                [_event_evidence(event, fields) for event in count_window[:50]],
+            ))
+        if len(destinations) >= int(thresholds["behavior_unique_destination_count"]):
+            findings.append(Finding(
+                "BEHAVIOR_DESTINATION_BURST", user, "medium", 30, "短时访问大量不同目标",
+                f"用户 {user} 在节点 {node_name} 的 {window_minutes} 分钟窗口内访问 "
+                f"{len(destinations)} 个不同目标。",
+                [_event_evidence(event, fields) for event in destination_window[:50]],
+            ))
+        if (
+            len(account_window) >= int(thresholds["behavior_account_service_count"])
+            and (len(account_destinations) >= 3 or len(count_window) >= int(thresholds["behavior_connection_count"]))
+        ):
+            findings.append(Finding(
+                "BEHAVIOR_ACCOUNT_AUTOMATION", user, "high", 60, "疑似批量账号注册或认证自动化",
+                f"用户 {user} 在节点 {node_name} 的 {window_minutes} 分钟窗口内产生 "
+                f"{len(account_window)} 条账号、认证或验证码类目标连接，涉及 "
+                f"{len(account_destinations)} 个目标；这是连接元数据判断，不代表已确认注册成功。",
+                [_event_evidence(event, fields) for event in account_window[:100]],
+            ))
+    return findings
+
+
 def _subscription_coverage_warnings(events: Sequence[Event], config: Dict[str, Any]) -> List[Dict[str, Any]]:
     accesses = [event for event in events if event.event_type == "subscription_access"]
     by_source: Dict[str, List[Event]] = defaultdict(list)
@@ -312,6 +456,8 @@ def analyze(events: Iterable[Event], config: Dict[str, Any]) -> Dict[str, Any]:
             continue
         findings.extend(_login_findings(user, user_events, config))
         findings.extend(_subscription_findings(user, user_events, config))
+        findings.extend(_proxy_activity_findings(user, user_events, config))
+        findings.extend(_proxy_behavior_findings(user, user_events, config))
         findings.extend(_behavior_findings(user, user_events, config))
     coverage_warnings = _subscription_coverage_warnings(all_events, config)
 

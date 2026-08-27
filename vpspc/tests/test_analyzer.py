@@ -5,6 +5,7 @@ from pathlib import Path
 
 from vps_audit.ai_review import _redact_for_ai
 from vps_audit.analyzer import analyze
+from vps_audit.behavior_audit import classify_destination
 from vps_audit.config import load_config
 from vps_audit.io import read_events
 from vps_audit.report import render_markdown
@@ -15,6 +16,34 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AnalyzerTests(unittest.TestCase):
+    def _analyze_rows(self, rows, thresholds=None):
+        config = load_config()
+        config["thresholds"].update(thresholds or {})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "events.jsonl"
+            path.write_text(
+                "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+            )
+            return analyze(read_events([str(path)]), config)
+
+    @staticmethod
+    def _connection(index, user="user-a", node="node-a", destination="example.com"):
+        return {
+            "timestamp": f"2026-08-27T01:{index // 60:02d}:{index % 60:02d}Z",
+            "event_type": "proxy_connection",
+            "user": user,
+            "source_ip": f"198.51.{index // 250}.{index % 250 + 1}",
+            "source_port": 40000 + index,
+            "destination_host": destination,
+            "destination_port": 443,
+            "destination_category": classify_destination(destination),
+            "network": "tcp",
+            "node_id": node,
+            "node_name": node,
+            "protocol": "xray",
+            "event_id": f"evt_{index:016d}_{user}_{node}",
+        }
+
     def test_example_detects_cross_network_and_automation(self):
         report = analyze(
             read_events([str(ROOT / "examples" / "events.jsonl")]),
@@ -148,6 +177,52 @@ class AnalyzerTests(unittest.TestCase):
             report = analyze(read_events([str(path)]), load_config())
 
         self.assertEqual(report["coverage_warnings"], [])
+
+    def test_node_ip_window_isolated_by_user_and_node(self):
+        split_users = [
+            self._connection(index, user="user-a" if index < 4 else "user-b")
+            for index in range(8)
+        ]
+        report = self._analyze_rows(split_users)
+        self.assertNotIn("NODE_ACTIVE_IPS", {item["rule_id"] for item in report["findings"]})
+
+        split_nodes = [
+            self._connection(index, node="node-a" if index < 4 else "node-b")
+            for index in range(8)
+        ]
+        report = self._analyze_rows(split_nodes)
+        self.assertNotIn("NODE_ACTIVE_IPS", {item["rule_id"] for item in report["findings"]})
+
+        report = self._analyze_rows([self._connection(index) for index in range(5)])
+        finding = next(item for item in report["findings"] if item["rule_id"] == "NODE_ACTIVE_IPS")
+        self.assertEqual(finding["user"], "user-a")
+        self.assertTrue(all(item["node_id"] == "node-a" for item in finding["evidence"]))
+
+    def test_node_region_and_account_automation_rules_use_connection_metadata(self):
+        regional = [self._connection(0), self._connection(1)]
+        regional[0].update({"region": "Guangdong", "city": "Guangzhou"})
+        regional[1].update({"region": "Beijing", "city": "Beijing"})
+        report = self._analyze_rows(regional)
+        self.assertIn("NODE_MULTI_REGION", {item["rule_id"] for item in report["findings"]})
+
+        domains = ["accounts.google.com", "auth.openai.com", "login.microsoftonline.com"]
+        automated = [
+            self._connection(index, destination=domains[index % len(domains)])
+            for index in range(20)
+        ]
+        report = self._analyze_rows(automated)
+        automation = next(
+            item for item in report["findings"] if item["rule_id"] == "BEHAVIOR_ACCOUNT_AUTOMATION"
+        )
+        self.assertIn("不代表已确认注册成功", automation["summary"])
+        self.assertIn("destination_host", automation["evidence"][0])
+
+    def test_general_connection_burst_is_not_mislabeled_as_account_automation(self):
+        rows = [self._connection(index, destination=f"cdn-{index}.example.com") for index in range(200)]
+        report = self._analyze_rows(rows)
+        rule_ids = {item["rule_id"] for item in report["findings"]}
+        self.assertIn("BEHAVIOR_CONNECTION_BURST", rule_ids)
+        self.assertNotIn("BEHAVIOR_ACCOUNT_AUTOMATION", rule_ids)
 
 
 if __name__ == "__main__":

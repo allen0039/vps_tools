@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .activity import query_active_subscription_ips, render_active_ip_query
+from .node_reporting import (
+    create_install_command,
+    list_registered_nodes,
+    request_registered_node_uninstall,
+    revoke_registered_node,
+)
 from .runtime import health, load_runtime_config, test_configured_ai_provider
 from .settings import (
     THRESHOLD_SPECS,
@@ -46,6 +52,7 @@ def _print_status(config_path: str) -> None:
     print(f"重点用户名单：{len(monitoring['users'])} 个")
     print(f"Telegram 推送：{'开启' if result['telegram_enabled'] else '关闭'}")
     print(f"Telegram 双向管理：{'开启' if result['telegram_management_enabled'] else '关闭'}")
+    print(f"节点上报：{result['node_reporting']['mode']}")
     print(
         f"AI 复核：{'开启' if result['openai_review_enabled'] else '关闭'}"
         f" / {result.get('openai_active_provider') or '未配置'}"
@@ -108,7 +115,7 @@ def _active_ips_menu(config_path: str) -> None:
         users = list(config["subscription_monitoring"]["users"])
         window = config["rules"]["thresholds"]["subscription_window_minutes"]
         print("\n重点用户活跃 IP 查询")
-        print(f"统计口径：最近 {window} 分钟订阅访问；不是严格 TCP/节点同时在线数。")
+        print(f"统计口径：最近 {window} 分钟订阅拉取或节点活动；不是严格同时在线数。")
         if not users:
             print("重点用户名单为空，请先添加用户。")
             _pause()
@@ -302,6 +309,49 @@ def _ai_menu(config_path: str) -> None:
             print("无效选择。")
 
 
+def _nodes_menu(config_path: str) -> None:
+    while True:
+        config = load_runtime_config(config_path)
+        node_reporting = config["node_reporting"]
+        print("\n节点上报与注册链接")
+        print(f"当前模式：{node_reporting['mode']}")
+        if node_reporting["mode"] != "node_reporting":
+            print("当前仅主控监控；请通过“完整重新配置”启用节点上报并设置 HTTPS 公网地址。")
+        nodes = list_registered_nodes(config_path)
+        for index, node in enumerate(nodes, 1):
+            state = "已撤销" if node.get("revoked") else "等待卸载" if node.get("pending_command") else "有效"
+            print(
+                f"  {index}. {node['node_id']} | {node.get('name', '-')} | {state} | "
+                f"最后上报 {node.get('last_seen') or '从未'}"
+            )
+        if not nodes:
+            print("  尚无注册节点")
+        print("1. 生成普通安装/修复链接")
+        print("2. 生成允许覆盖重绑的链接")
+        print("3. 撤销节点凭据")
+        print("4. 请求节点自卸载并撤销")
+        print("0. 返回")
+        choice = _ask("请选择", "0")
+        if choice == "0":
+            return
+        if choice in {"1", "2"}:
+            command = create_install_command(
+                config_path,
+                _ask("节点显示名称"),
+                replace=choice == "2",
+            )
+            print("\n请在被控端执行以下一次性命令：")
+            print(command)
+        elif choice == "3":
+            revoke_registered_node(config_path, _ask("节点 ID"))
+            print("节点凭据已立即撤销。")
+        elif choice == "4":
+            command = request_registered_node_uninstall(config_path, _ask("节点 ID"))
+            print(f"固定自卸载命令已排队：{command['id']}")
+        else:
+            print("无效选择。")
+
+
 def _run_installer(installer: str, action: str, *extra: str) -> None:
     path = Path(installer)
     if not path.is_file():
@@ -323,9 +373,10 @@ def interactive_menu(config_path: str, installer: str) -> None:
         print("5. 检测阈值管理")
         print("6. Telegram 参数管理")
         print("7. AI 供应商与模型")
-        print("8. 完整重新配置")
-        print("9. 回滚上一次配置")
-        print("10. 卸载 / 彻底清理")
+        print("8. 节点上报与注册链接")
+        print("9. 完整重新配置")
+        print("10. 回滚上一次配置")
+        print("11. 卸载 / 彻底清理")
         print("0. 退出")
         choice = _ask("请选择", "0")
         try:
@@ -348,11 +399,13 @@ def interactive_menu(config_path: str, installer: str) -> None:
             elif choice == "7":
                 _ai_menu(config_path)
             elif choice == "8":
-                _run_installer(installer, "configure")
+                _nodes_menu(config_path)
             elif choice == "9":
+                _run_installer(installer, "configure")
+            elif choice == "10":
                 if _ask("确认回滚上一次配置？输入 yes", "no").lower() == "yes":
                     _run_installer(installer, "rollback")
-            elif choice == "10":
+            elif choice == "11":
                 mode = _ask("输入 uninstall 保留数据，或 destroy 彻底清理", "uninstall").lower()
                 if mode == "destroy" and _ask("彻底清理不可恢复，输入 DESTROY 确认", "").upper() == "DESTROY":
                     _run_installer(installer, "destroy")

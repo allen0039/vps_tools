@@ -1,0 +1,5 @@
+#!/bin/sh
+# managed-by=vpspc
+set -eu
+cd /opt/vps-audit
+exec /opt/vps-audit/venv/bin/python -m vps_audit.node_reporting "$@"

@@ -91,6 +91,33 @@ class AiReviewTests(unittest.TestCase):
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertEqual(result["cases"][0]["assessment"], "needs_review")
 
+    def test_manual_incident_review_sends_full_metadata_and_question(self):
+        provider = {
+            "base_url": "https://ai.example.test/v1",
+            "api_mode": "responses",
+            "model": "audit-model",
+            "timeout_seconds": 15,
+        }
+        full_report = report()
+        full_report["findings"][0]["evidence"][0].update(
+            {"destination_host": "accounts.google.com", "node_name": "vmiss hk"}
+        )
+        response = {"output_text": review_json("alice")}
+        with patch("vps_audit.ai_review.urllib.request.urlopen", return_value=FakeResponse(response)) as urlopen:
+            result = review_with_provider(
+                full_report,
+                provider,
+                "secret-key",
+                redact=False,
+                question="是否像批量注册？",
+            )
+        serialized = urlopen.call_args.args[0].data.decode("utf-8")
+        self.assertIn("198.51.100.9", serialized)
+        self.assertIn("accounts.google.com", serialized)
+        self.assertIn("vmiss hk", serialized)
+        self.assertIn("是否像批量注册", serialized)
+        self.assertEqual(result["cases"][0]["user"], "alice")
+
     def test_unknown_account_alias_is_rejected(self):
         provider = {
             "base_url": "https://ai.example/v1",
