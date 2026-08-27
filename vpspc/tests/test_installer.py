@@ -216,6 +216,28 @@ class InstallerTests(unittest.TestCase):
             self.assertNotEqual(completed.returncode, 0)
             self.assertEqual((unmanaged / "user-data.txt").read_text(encoding="utf-8"), "preserve")
 
+    def test_managed_directory_does_not_trust_mocked_id_for_chown(self):
+        if os.geteuid() == 0:
+            self.skipTest("requires an unprivileged process like the GitHub Actions runner")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mock_bin = root / "bin"
+            mock_bin.mkdir()
+            (mock_bin / "id").write_text("#!/bin/sh\necho 0\n", encoding="utf-8")
+            (mock_bin / "chown").write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
+            for executable in mock_bin.iterdir():
+                executable.chmod(0o755)
+            env = dict(os.environ)
+            env["PATH"] = f"{mock_bin}:{env['PATH']}"
+
+            managed = root / "vps-audit"
+            completed = run_bash(
+                f'prepare_managed_directory "{managed}" "测试目录"', env=env
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue((managed / ".vps-audit-managed").is_file())
+
     def test_existing_configured_directory_is_adopted_on_upgrade(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -221,9 +221,11 @@ prepare_managed_directory() {
       echo "沿用已有审计目录并补充安全标记: $directory" >&2
     fi
   fi
-  # 安装器只允许 root 运行，因此 Linux 上新目录自然归 root:root 所有。
+  # Production installation runs as root. Tests may mock `id -u` while the
+  # shell itself remains unprivileged, so use Bash's actual effective UID
+  # before changing ownership.
   install -d -m 0700 "$directory"
-  if [[ "$(uname -s)" == "Linux" ]]; then
+  if (( EUID == 0 )); then
     chown root:root "$directory"
   fi
   : > "$directory/$DATA_MARKER"
