@@ -24,9 +24,11 @@ from .behavior_audit import append_connections, classify_destination
 from .models import parse_timestamp
 
 
-REGISTRY_VERSION = 1
+REGISTRY_VERSION = 2
+LEGACY_REGISTRY_VERSION = 1
 AGENT_VERSION = "0.1.0"
 MAX_REQUEST_BYTES = 1_048_576
+COMMAND_ONLINE_SECONDS = 120
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 SAFE_NODE_ID = re.compile(r"^node_[a-f0-9]{24}$")
 SAFE_NONCE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
@@ -91,10 +93,22 @@ class NodeRegistry:
         try:
             with self.path.open(encoding="utf-8") as handle:
                 value = json.load(handle)
-            if not isinstance(value, dict) or value.get("version") != REGISTRY_VERSION:
+            if not isinstance(value, dict) or value.get("version") not in {
+                LEGACY_REGISTRY_VERSION,
+                REGISTRY_VERSION,
+            }:
                 raise ValueError("unsupported node registry format")
             if not isinstance(value.get("enrollments"), dict) or not isinstance(value.get("nodes"), dict):
                 raise ValueError("invalid node registry structure")
+            if value["version"] == LEGACY_REGISTRY_VERSION:
+                # v1 only tracked event delivery.  Keep it readable until the
+                # next mutation, when the existing atomic write persists v2.
+                value["version"] = REGISTRY_VERSION
+            for node in value["nodes"].values():
+                if not isinstance(node, dict):
+                    raise ValueError("invalid node registry structure")
+                node.setdefault("command_last_seen", None)
+                node.setdefault("agent_protocol", 1)
             return value
         except FileNotFoundError:
             return {"version": REGISTRY_VERSION, "enrollments": {}, "nodes": {}}
@@ -105,6 +119,21 @@ class NodeRegistry:
         os.chmod(self.lock_path, 0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         return lock
+
+    @staticmethod
+    def _public(node_id: str, node: Dict[str, Any]) -> Dict[str, Any]:
+        public = dict(node)
+        public["node_id"] = node_id
+        public.pop("credential", None)
+        public.pop("recent_nonces", None)
+        return public
+
+    @staticmethod
+    def _active_node(state: Dict[str, Any], node_id: str) -> Dict[str, Any]:
+        node = state["nodes"].get(node_id)
+        if not isinstance(node, dict) or node.get("revoked"):
+            raise ValueError("active node does not exist")
+        return node
 
     @staticmethod
     def _expire_enrollments(state: Dict[str, Any], now: datetime) -> None:
@@ -193,7 +222,9 @@ class NodeRegistry:
                 "created_at": previous.get("created_at", _iso(current)),
                 "registered_at": _iso(current),
                 "last_seen": previous.get("last_seen"),
+                "command_last_seen": previous.get("command_last_seen"),
                 "agent_version": agent_version,
+                "agent_protocol": previous.get("agent_protocol", 1),
                 "revoked": False,
                 "recent_nonces": [],
                 "pending_command": previous.get("pending_command"),
@@ -253,21 +284,62 @@ class NodeRegistry:
             state["nodes"][node_id] = node
             _atomic_json(self.path, state)
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-        public = dict(node)
-        public.pop("credential", None)
-        public.pop("recent_nonces", None)
-        return public
+        return self._public(node_id, node)
+
+    def record_command_heartbeat(
+        self,
+        node_id: str,
+        agent_version: str,
+        agent_protocol: int,
+        now: datetime | None = None,
+    ) -> Dict[str, Any]:
+        if isinstance(agent_protocol, bool):
+            raise ValueError("agent protocol is invalid")
+        try:
+            protocol = int(agent_protocol)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("agent protocol is invalid") from exc
+        if protocol < 1:
+            raise ValueError("agent protocol is invalid")
+        version = str(agent_version).strip()
+        if not version or len(version) > 64 or any(ord(char) < 32 for char in version):
+            raise ValueError("agent version is invalid")
+        current = now or _utc_now()
+        with self._locked() as lock:
+            state = self._load()
+            node = self._active_node(state, node_id)
+            node["command_last_seen"] = _iso(current)
+            node["agent_version"] = version
+            node["agent_protocol"] = protocol
+            state["nodes"][node_id] = node
+            _atomic_json(self.path, state)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        return self._public(node_id, node)
 
     def list_nodes(self) -> List[Dict[str, Any]]:
         with self._locked() as lock:
             state = self._load()
             result = []
             for node_id, node in sorted(state["nodes"].items()):
-                item = dict(node)
-                item["node_id"] = node_id
-                item.pop("credential", None)
-                item.pop("recent_nonces", None)
-                result.append(item)
+                result.append(self._public(node_id, node))
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        return result
+
+    def list_online_nodes(self, now: datetime | None = None) -> List[Dict[str, Any]]:
+        current = now or _utc_now()
+        with self._locked() as lock:
+            state = self._load()
+            result = []
+            for node_id, node in sorted(state["nodes"].items()):
+                if node.get("revoked"):
+                    continue
+                try:
+                    heartbeat_at = parse_timestamp(str(node.get("command_last_seen")))
+                except (TypeError, ValueError):
+                    continue
+                elapsed = (current - heartbeat_at).total_seconds()
+                if 0 <= elapsed <= COMMAND_ONLINE_SECONDS:
+                    result.append(self._public(node_id, node))
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         return result
 

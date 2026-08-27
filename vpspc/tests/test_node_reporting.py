@@ -150,6 +150,64 @@ class NodeReportingTests(unittest.TestCase):
         self.assertIn("--replace", replacement)
         self.assertNotIn("node.key", normal)
 
+    def test_command_heartbeat_defines_online_window_without_event_upload(self):
+        now = datetime(2026, 8, 27, 8, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temporary:
+            registry = NodeRegistry(Path(temporary) / "nodes.json")
+            link = registry.create_enrollment("vmiss hk", now=now)
+            node = registry.enroll(
+                link["token"],
+                {"installation_id": "install_heartbeat123", "node_name": "host"},
+                now,
+            )
+
+            registry.record_command_heartbeat(node["node_id"], "0.2.0", 2, now)
+
+            self.assertEqual(
+                [item["node_id"] for item in registry.list_online_nodes(now + timedelta(seconds=119))],
+                [node["node_id"]],
+            )
+            self.assertEqual(registry.list_online_nodes(now + timedelta(seconds=121)), [])
+            listed = registry.list_nodes()[0]
+            self.assertEqual(listed["agent_version"], "0.2.0")
+            self.assertEqual(listed["agent_protocol"], 2)
+            self.assertEqual(listed["last_seen"], None)
+
+    def test_registry_v1_loads_with_offline_command_defaults_then_writes_v2(self):
+        now = datetime(2026, 8, 27, 8, 0, tzinfo=timezone.utc)
+        node_id = "node_" + "a" * 24
+        legacy = {
+            "version": 1,
+            "enrollments": {},
+            "nodes": {
+                node_id: {
+                    "name": "legacy hk",
+                    "reported_name": "legacy",
+                    "installation_id": "install_legacy123",
+                    "credential": "credential",
+                    "created_at": "2026-08-27T08:00:00Z",
+                    "registered_at": "2026-08-27T08:00:00Z",
+                    "last_seen": None,
+                    "agent_version": "0.1.0",
+                    "revoked": False,
+                    "recent_nonces": [],
+                    "pending_command": None,
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "nodes.json"
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            registry = NodeRegistry(path)
+
+            node = registry.list_nodes()[0]
+            self.assertIsNone(node["command_last_seen"])
+            self.assertEqual(node["agent_protocol"], 1)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["version"], 1)
+
+            registry.record_command_heartbeat(node_id, "0.2.0", 2, now)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["version"], 2)
+
     def test_runtime_claims_remote_inbox_and_emits_node_rule(self):
         now = datetime.now(timezone.utc).replace(microsecond=0)
         with tempfile.TemporaryDirectory() as temporary:
