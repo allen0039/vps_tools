@@ -712,7 +712,7 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
             if config["node_reporting"]["mode"] != "node_reporting":
                 raise ValueError("请先在主控执行完整重新配置并选择允许节点轻量上报")
             pending[str(sender_id)] = {"action": "node_create", "replace": parts[2] == "replace"}
-            return "请发送被控端显示名称，例如：vmiss hk。发送 /cancel 可取消。", None
+            return "请发送 被控端 名称，例如：服务商+地区。发送 /cancel 可取消。", None
         if len(parts) == 3 and parts[1] in {"threshold", "telegram"}:
             pending[str(sender_id)] = {"action": parts[1], "key": parts[2]}
             return f"请发送 {parts[2]} 的新值。发送 /cancel 可取消。", None

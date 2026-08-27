@@ -117,7 +117,10 @@ class BotTests(unittest.TestCase):
             self.assertIn("prompt:node:normal", callbacks)
             pending = {}
             response, _ = _handle(str(path), 12345, "prompt:node:normal", pending)
-            self.assertIn("显示名称", response)
+            self.assertEqual(
+                response,
+                "请发送 被控端 名称，例如：服务商+地区。发送 /cancel 可取消。",
+            )
             response, _ = _handle(str(path), 12345, "vmiss hk", pending)
             self.assertIn("curl -fsSL", response)
 
