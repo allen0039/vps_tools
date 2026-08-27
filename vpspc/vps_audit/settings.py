@@ -27,6 +27,8 @@ THRESHOLD_SPECS: Dict[str, Tuple[str, int, int]] = {
     "subscription_region_count": ("同订阅地区数", 2, 1000),
     "subscription_city_count": ("同订阅城市数", 2, 1000),
     "subscription_asn_count": ("同订阅 ASN 数", 2, 1000),
+    "subscription_device_count": ("同订阅设备标识数", 2, 1000),
+    "subscription_shared_source_user_count": ("同来源拉取的订阅用户数", 2, 1000),
 }
 
 
@@ -140,3 +142,79 @@ def set_telegram_option(config_path: str, key: str, value: Any) -> Dict[str, Any
         config_path,
         lambda config: config["telegram"].update({key: normalized}),
     )
+
+
+def set_ai_enabled(config_path: str, enabled: bool) -> Dict[str, Any]:
+    return update_runtime_config(
+        config_path,
+        lambda config: config["openai_review"].update({"enabled": bool(enabled)}),
+    )
+
+
+def set_active_ai_provider(config_path: str, provider_id: str) -> Dict[str, Any]:
+    selected = provider_id.strip()
+
+    def mutate(config: Dict[str, Any]) -> None:
+        if selected not in config["openai_review"]["providers"]:
+            raise ValueError(f"AI 供应商不存在：{selected}")
+        config["openai_review"]["active_provider"] = selected
+
+    return update_runtime_config(config_path, mutate)
+
+
+def set_ai_provider_model(config_path: str, provider_id: str, model: str) -> Dict[str, Any]:
+    selected = provider_id.strip()
+    model_name = model.strip()
+
+    def mutate(config: Dict[str, Any]) -> None:
+        providers = config["openai_review"]["providers"]
+        if selected not in providers:
+            raise ValueError(f"AI 供应商不存在：{selected}")
+        providers[selected]["model"] = model_name
+
+    return update_runtime_config(config_path, mutate)
+
+
+def upsert_ai_provider(
+    config_path: str,
+    provider_id: str,
+    display_name: str,
+    base_url: str,
+    api_mode: str,
+    api_key_file: str,
+    model: str,
+    timeout_seconds: int | str = 30,
+) -> Dict[str, Any]:
+    selected = provider_id.strip()
+    provider = {
+        "display_name": display_name.strip(),
+        "base_url": base_url.strip(),
+        "api_mode": api_mode.strip(),
+        "api_key_file": api_key_file.strip(),
+        "model": model.strip(),
+        "timeout_seconds": timeout_seconds,
+    }
+
+    def mutate(config: Dict[str, Any]) -> None:
+        ai = config["openai_review"]
+        ai["providers"][selected] = provider
+        if not ai.get("active_provider"):
+            ai["active_provider"] = selected
+
+    return update_runtime_config(config_path, mutate)
+
+
+def remove_ai_provider(config_path: str, provider_id: str) -> Dict[str, Any]:
+    selected = provider_id.strip()
+
+    def mutate(config: Dict[str, Any]) -> None:
+        ai = config["openai_review"]
+        if selected not in ai["providers"]:
+            raise ValueError(f"AI 供应商不存在：{selected}")
+        del ai["providers"][selected]
+        if ai.get("active_provider") == selected:
+            ai["active_provider"] = next(iter(ai["providers"]), "")
+        if not ai["providers"]:
+            ai["enabled"] = False
+
+    return update_runtime_config(config_path, mutate)

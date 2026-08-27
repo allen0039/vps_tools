@@ -92,6 +92,8 @@ sudo ./install.sh destroy
 
 运行架构如下：SSH/Falco 日志由增量采集器读取并保存在本机，规则引擎每隔几分钟生成报告。只有首次出现或超过冷却时间的告警才会触发可选 AI 复核和 Telegram 推送。Telegram 采用出站 Bot API，不需要给 VPS 开放入站端口。启用双向管理时会额外运行 `vps-audit-bot.service` 长轮询服务；它与巡查 timer 相互独立，Bot 暂时离线不会中断本地巡查。
 
+核心巡查只使用 Python 标准库，没有数据库或额外守护进程。保留事件在内存中解析一次后直接进入规则引擎；无新增/过期事件时不重写 JSONL，写入时逐行原子替换；同一轮的 MaxMind 数据库和重复 IP 查询会复用。以上优化不会减少规则、保留时间、报告或 Telegram 功能。
+
 所有 systemd 任务均使用 root 读取安全日志，并启用只读系统目录、私有临时目录和最小可写路径。安装器会根据已配置日志的实际权限，仅补充读取所需的日志组（例如 Ubuntu 的 `adm`；启用 journald 时为 `systemd-journal`）。capability 集默认为空；只有遇到 `0600` 且属于应用用户的日志时，才保留只读的 `CAP_DAC_READ_SEARCH`，不会授予写入、改属主或其他管理 capability。首次巡查成功后才启用定时器，失败时不会留下周期性重试任务。Token/API Key 位于 `/etc/vps-audit/`；状态和报告默认位于 `/var/lib/vps-audit/`，也可使用安装时指定的目录，权限均为 root-only。
 
 ## Telegram 准备
@@ -112,6 +114,7 @@ Telegram 默认只展示 IP 前两段、地理位置、ASN、规则和建议，�
 - 也可手工添加、删除多个用户名或订阅 ID，暂停或恢复订阅监测；
 - 查看并修改 SSH、登录失败、不可能旅行、Falco 行为和订阅共享的全部规则阈值；
 - 修改最低推送等级、冷却时间和完整 IP 显示；
+- 在本机已配置的多个 AI 供应商之间切换、修改模型名、开关 AI，并用合成数据测试接口；
 - 立即执行一次巡查。
 
 在“订阅用户”中点击“从日志发现并点选”，或直接发送 `/discover`，Bot 会读取 root-only 的 `events.jsonl`，按最近出现顺序展示候选用户。按钮只携带用户名的稳定哈希，不携带原始用户名；列表不会调用妙妙屋 X API，也不会请求或保存订阅内容。若尚未产生订阅访问事件，需要先完成一次巡查。
@@ -119,6 +122,8 @@ Telegram 默认只展示 IP 前两段、地理位置、ASN、规则和建议，�
 Telegram 长轮询遇到网络超时、限流或服务端 5xx 时会在进程内以 1–30 秒退避重试，不再退出后等待 systemd 重启；Token 无效或重复 Bot 实例造成的冲突仍会立即报错，便于发现配置问题。
 
 Bot 同时校验配置的 Chat ID 和消息发送者 `from.id`。即使 Bot 位于群组，未列入 `admin_user_ids` 的成员也不能查看名单或修改配置。配置通过 root-only 文件锁和原子替换保存；Bot 没有封禁、踢下线、iptables 或妙妙屋 X 管理接口能力。Falco 安装、日志路径、Token 和管理员授权等高权限部署项仍只能通过 VPS 本机的完整重新配置完成。
+
+AI 的 Base URL 与 API Key 也只能在 VPS 本机通过 `vpspc` 新增或修改。Telegram 只允许在已信任端点之间切换、修改模型名称和运行测试，避免 API Key 进入聊天记录，也防止聊天账号失陷后把现有密钥导向任意端点。
 
 ## 妙妙屋 X 个人订阅接入
 
@@ -129,6 +134,8 @@ Bot 同时校验配置的 Chat ID 和消息发送者 `from.id`。即使 Bot 位�
 - 省/地区数，默认 3；
 - 城市数，默认 5；
 - ASN/运营商数，默认 4；
+- 设备标识数，默认 6（上游日志带 `device_id` 时生效）；
+- 同一来源在窗口内拉取的不同订阅用户数，默认 8（提示 Sub-Store、监控器或 NAT 观测边界）；
 - 不可能旅行的距离和速度阈值；
 - Telegram 最低等级以及同类告警冷却时间。
 
@@ -172,7 +179,19 @@ Bot 同时校验配置的 Chat ID 和消息发送者 `from.id`。即使 Bot 位�
 
 `mmwx.log` 时区不会盲目沿用宿主机：安装器会比较末尾日志时间与文件写入时间，并以容器当前时区作为后备。例如宿主机是 `+08:00`、容器使用 UTC 时，会分别识别为主机 `+08:00` 和应用日志 `+00:00`。只有无法定位原生日志时才询问本地 JSONL 或手动日志路径。
 
-“订阅访问 JSONL”必须是 VPS 上的本地文件，不是用户订阅 URL。粘贴 `http://` 或 `https://` 地址会被安全忽略，巡查器不会请求、下载或保存订阅内容。解析器只读取 `time`、`username` 和 `ip`，忽略其他应用日志，不修改妙妙屋 X 配置或访问权限。
+“订阅访问 JSONL”必须是 VPS 上的本地文件，不是用户订阅 URL。粘贴 `http://` 或 `https://` 地址会被安全忽略，巡查器不会请求、下载或保存订阅内容。妙妙屋 X 原生日志解析器只取 `time`、`username` 和 `ip`；通用 JSONL 会保留 `device_id`、`session_id`、`user_agent`、地理信息等附加字段，不修改妙妙屋 X 配置或访问权限。
+
+### Sub-Store 与其他订阅聚合器
+
+检测依据是“日志采集点实际看到的订阅拉取请求”，不是代理节点的真实并发连接。直接使用妙妙屋 X 链接时，源站通常能看到每次拉取的账号和来源 IP；把链接交给 Sub-Store 后存在三种情况：
+
+- Sub-Store 服务器代取原始订阅：妙妙屋 X 只能看到 Sub-Store 出口 IP，客户端真实 IP和后续节点流量不可见；
+- 每个用户仍使用独立上游链接：账号归属仍在，但多 IP 规则看到的是聚合器出口，不能据此证明终端共享；
+- 多个用户共用同一个上游链接：源站只能审计该上游订阅标识，无法可靠拆分最终用户。
+
+要补齐这段证据，应让 Sub-Store 或它前面的 Nginx/Caddy 把最终分发访问转换成上述 JSONL，并保留稳定的最终用户/设备 ID 与上游订阅 ID 映射。若聚合器没有这类映射，VPSPC 会明确保持“不可观测”，不会让 AI 猜测真实用户或 IP。
+
+当同一个来源 IP 在订阅窗口内拉取至少 `subscription_shared_source_user_count` 个不同订阅用户时，报告会生成 `SUB_SHARED_FETCH_SOURCE` 观测范围警告，并按 Telegram 最低等级与冷却时间推送。它不会增加任何用户的风险分数，也不会送给 AI 定性，因为这既可能是 Sub-Store，也可能是合法监控器或共享 NAT；它只提醒你当前源站证据可能已经被聚合。
 
 地理字段可以由应用直接写入：
 
@@ -224,19 +243,36 @@ vps-audit normalize-auth /var/log/auth.log \
 AI 是可选的，只复核已命中的结构化证据。调用前会：
 
 - 把用户名换成临时编号，返回后再映射；
-- 对 IP 和目标域名做一次性哈希；
+- 对 IP 和目标域名做一次性哈希，并清理摘要字符串中重复出现的原值；
 - 删除经纬度、原始日志行号和完整命令行；
-- 使用 Responses API 的结构化输出并设置 `store: false`。
+- 验证模型返回的字段、枚举、置信度和账号别名，拒绝模型虚构的新账号；
+- 仅在确定性规则达到通知条件且不在冷却期时调用，模型失败不阻断基础报告和 Telegram 规则告警。
 
-显式选择你账号可用的模型：
+运行 `sudo vpspc` 进入“AI 供应商与模型”，可以保存最多 16 个供应商。每个供应商独立配置显示名、OpenAI 兼容 Base URL、接口模式、API Key 文件、模型名称和超时：
+
+- `responses`：调用 `<base_url>/responses`，使用严格 JSON Schema，并为 OpenAI 设置 `store: false`；
+- `chat_completions`：调用 `<base_url>/chat/completions`，使用 JSON Object 输出，兼容更多第三方模型服务。
+
+API Key 分别保存在 `/etc/vps-audit/ai-providers/*.key`，权限为 `0600 root:root`，不会进入 JSON 配置、Telegram、命令行或日志。新增供应商后，本机菜单默认询问是否立即测试；测试只发送一个合成账号和合成规则，不包含真实日志。也可以运行：
+
+```bash
+sudo /opt/vps-audit/venv/bin/vps-audit-runner \
+  --config /etc/vps-audit/config.json test-ai --provider 供应商ID
+```
+
+Telegram 中发送 `/ai` 后可切换供应商、修改当前模型名、开关 AI 及测试当前模型；也支持 `/aiuse`、`/aimodel`、`/aitest`、`/aion` 和 `/aioff`。Base URL 和 API Key 必须在 VPS 本机管理。
+
+独立 CLI 仍支持环境变量，并可选择兼容模式：
 
 ```bash
 export OPENAI_API_KEY='...'
 export OPENAI_MODEL='你的模型 ID'
+export OPENAI_BASE_URL='https://api.openai.com/v1'
+export OPENAI_API_MODE='responses'  # 或 chat_completions
 vps-audit analyze events.jsonl --ai-review
 ```
 
-API 用法基于[官方 OpenAI Responses API 文档](https://developers.openai.com/api/reference/resources/responses/methods/create/)。AI 输出只提供“已证实事实、正常解释、缺失证据、处置建议”，禁止把模型置信度直接转换成永久封禁。
+AI 输出只提供“已证实事实、正常解释、缺失证据、处置建议”，禁止把模型置信度直接转换成永久封禁。所谓“OpenAI 兼容”并不代表所有服务都支持相同的结构化输出能力，因此保存模型后必须用测试功能验证；测试通过才说明该 Base URL、鉴权、模型名、接口模式及 JSON 输出路径能被当前审计器实际使用。
 
 ## 统一事件格式
 

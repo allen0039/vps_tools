@@ -32,6 +32,17 @@ def _parser() -> argparse.ArgumentParser:
     inspect.add_argument("--markdown-output", default="audit-report.md")
     inspect.add_argument("--ai-review", action="store_true", help="send only the evidence bundle to OpenAI Responses API")
     inspect.add_argument("--model", default=os.environ.get("OPENAI_MODEL"), help="OpenAI model; defaults to OPENAI_MODEL")
+    inspect.add_argument(
+        "--base-url",
+        default=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        help="OpenAI-compatible API base URL; defaults to OPENAI_BASE_URL",
+    )
+    inspect.add_argument(
+        "--api-mode",
+        choices=["responses", "chat_completions"],
+        default=os.environ.get("OPENAI_API_MODE", "responses"),
+        help="OpenAI-compatible API style",
+    )
     return parser
 
 
@@ -55,7 +66,7 @@ def _analyze(args: argparse.Namespace) -> int:
     if args.ai_review:
         if not args.model:
             raise ValueError("--model or OPENAI_MODEL is required for --ai-review")
-        ai_result = review_with_openai(report, args.model)
+        ai_result = review_with_openai(report, args.model, base_url=args.base_url, api_mode=args.api_mode)
         report["ai_review"] = ai_result
     write_json(args.json_output, report)
     markdown_path = Path(args.markdown_output)

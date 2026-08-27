@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import subprocess
@@ -8,15 +9,20 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
-from .runtime import health, load_runtime_config
+from .runtime import health, load_runtime_config, test_configured_ai_provider
 from .settings import (
     THRESHOLD_SPECS,
     add_monitored_user,
+    remove_ai_provider,
     remove_monitored_user,
+    set_active_ai_provider,
+    set_ai_enabled,
+    set_ai_provider_model,
     set_monitoring_mode,
     set_subscription_monitoring_enabled,
     set_telegram_option,
     set_threshold,
+    upsert_ai_provider,
 )
 
 
@@ -39,6 +45,10 @@ def _print_status(config_path: str) -> None:
     print(f"重点用户名单：{len(monitoring['users'])} 个")
     print(f"Telegram 推送：{'开启' if result['telegram_enabled'] else '关闭'}")
     print(f"Telegram 双向管理：{'开启' if result['telegram_management_enabled'] else '关闭'}")
+    print(
+        f"AI 复核：{'开启' if result['openai_review_enabled'] else '关闭'}"
+        f" / {result.get('openai_active_provider') or '未配置'}"
+    )
     print(f"最近巡查：{(result.get('last_run') or {}).get('generated_at', '尚未运行')}")
     if result.get("last_error"):
         print(f"最近错误：{result['last_error']}")
@@ -139,6 +149,126 @@ def _telegram_menu(config_path: str) -> None:
             print("无效选择。")
 
 
+def _atomic_secret(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    temporary = path.with_name(path.name + f".tmp.{os.getpid()}")
+    try:
+        temporary.write_text(value.strip() + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _configure_ai_provider(config_path: str) -> str:
+    config = load_runtime_config(config_path)
+    providers = config["openai_review"]["providers"]
+    provider_id = _ask("供应商 ID（小写字母/数字/._-，例如 openai）").lower()
+    existing = providers.get(provider_id, {})
+    display_name = _ask("显示名称", str(existing.get("display_name", provider_id)))
+    base_url = _ask("OpenAI 兼容 Base URL", str(existing.get("base_url", "https://api.openai.com/v1")))
+    if base_url.startswith("http://"):
+        print("警告：HTTP 会明文传输 API Key，仅应对可信内网或本机端点使用。")
+    api_mode = _ask("接口模式 responses/chat_completions", str(existing.get("api_mode", "chat_completions")))
+    model = _ask("模型名称", str(existing.get("model", "")))
+    timeout = _ask("测试/复核超时秒数", str(existing.get("timeout_seconds", 30)))
+    key_path = Path(
+        str(existing.get("api_key_file", Path(config_path).parent / "ai-providers" / f"{provider_id}.key"))
+    )
+    prompt = "API Key（留空保留现有密钥）" if key_path.is_file() else "API Key（输入内容不回显）"
+    api_key = getpass.getpass(prompt + ": ").strip()
+    if not api_key and not key_path.is_file():
+        raise ValueError("新增 AI 供应商时 API Key 不能为空")
+    previous = key_path.read_bytes() if key_path.is_file() else None
+    if api_key:
+        _atomic_secret(key_path, api_key)
+    try:
+        upsert_ai_provider(
+            config_path,
+            provider_id,
+            display_name,
+            base_url,
+            api_mode,
+            str(key_path),
+            model,
+            timeout,
+        )
+    except (OSError, ValueError):
+        if api_key:
+            if previous is None:
+                try:
+                    key_path.unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                temporary = key_path.with_name(key_path.name + f".restore.{os.getpid()}")
+                temporary.write_bytes(previous)
+                os.chmod(temporary, 0o600)
+                os.replace(temporary, key_path)
+        raise
+    return provider_id
+
+
+def _ai_menu(config_path: str) -> None:
+    while True:
+        config = load_runtime_config(config_path)
+        ai = config["openai_review"]
+        active = ai["active_provider"]
+        print("\nAI 复核供应商")
+        print(f"AI 复核：{'开启' if ai['enabled'] else '关闭'}")
+        for provider_id, provider in ai["providers"].items():
+            marker = "*" if provider_id == active else " "
+            print(f" {marker} {provider_id}: {provider['display_name']} / {provider['model']} / {provider['api_mode']}")
+        if not ai["providers"]:
+            print("  尚未配置供应商")
+        print("1. 切换当前供应商")
+        print("2. 新增或修改供应商（含 API Key）")
+        print("3. 修改当前模型名称")
+        print("4. 测试当前模型")
+        print("5. 启用 / 暂停 AI 复核")
+        print("6. 删除供应商")
+        print("0. 返回")
+        choice = _ask("请选择", "0")
+        if choice == "0":
+            return
+        if choice == "1":
+            set_active_ai_provider(config_path, _ask("供应商 ID", active))
+        elif choice == "2":
+            provider_id = _configure_ai_provider(config_path)
+            if _ask("是否立即测试该模型？yes/no", "yes").lower() == "yes":
+                result = test_configured_ai_provider(config_path, provider_id)
+                print(f"测试成功：{result['display_name']} / {result['model']} / {result['latency_ms']} ms")
+        elif choice == "3":
+            if not active:
+                raise ValueError("请先配置 AI 供应商")
+            set_ai_provider_model(config_path, active, _ask("新模型名称", ai["providers"][active]["model"]))
+        elif choice == "4":
+            result = test_configured_ai_provider(config_path)
+            print(f"测试成功：{result['display_name']} / {result['model']} / {result['latency_ms']} ms")
+        elif choice == "5":
+            set_ai_enabled(config_path, not ai["enabled"])
+        elif choice == "6":
+            provider_id = _ask("要删除的供应商 ID", active)
+            provider = ai["providers"].get(provider_id)
+            if not provider:
+                raise ValueError(f"AI 供应商不存在：{provider_id}")
+            updated = remove_ai_provider(config_path, provider_id)
+            key_path = Path(str(provider["api_key_file"]))
+            managed_root = Path(config_path).parent / "ai-providers"
+            still_referenced = any(
+                str(item["api_key_file"]) == str(key_path)
+                for item in updated["openai_review"]["providers"].values()
+            )
+            if not still_referenced and key_path.parent == managed_root and key_path.is_file():
+                key_path.unlink()
+        else:
+            print("无效选择。")
+
+
 def _run_installer(installer: str, action: str, *extra: str) -> None:
     path = Path(installer)
     if not path.is_file():
@@ -158,9 +288,10 @@ def interactive_menu(config_path: str, installer: str) -> None:
         print("3. 多订阅用户管理")
         print("4. 检测阈值管理")
         print("5. Telegram 参数管理")
-        print("6. 完整重新配置")
-        print("7. 回滚上一次配置")
-        print("8. 卸载 / 彻底清理")
+        print("6. AI 供应商与模型")
+        print("7. 完整重新配置")
+        print("8. 回滚上一次配置")
+        print("9. 卸载 / 彻底清理")
         print("0. 退出")
         choice = _ask("请选择", "0")
         try:
@@ -179,11 +310,13 @@ def interactive_menu(config_path: str, installer: str) -> None:
             elif choice == "5":
                 _telegram_menu(config_path)
             elif choice == "6":
-                _run_installer(installer, "configure")
+                _ai_menu(config_path)
             elif choice == "7":
+                _run_installer(installer, "configure")
+            elif choice == "8":
                 if _ask("确认回滚上一次配置？输入 yes", "no").lower() == "yes":
                     _run_installer(installer, "rollback")
-            elif choice == "8":
+            elif choice == "9":
                 mode = _ask("输入 uninstall 保留数据，或 destroy 彻底清理", "uninstall").lower()
                 if mode == "destroy" and _ask("彻底清理不可恢复，输入 DESTROY 确认", "").upper() == "DESTROY":
                     _run_installer(installer, "destroy")

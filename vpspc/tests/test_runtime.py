@@ -9,7 +9,14 @@ from unittest.mock import patch
 
 from vps_audit.falco_parser import parse_falco_event
 from vps_audit.miaomiaowux_parser import parse_miaomiaowux_line
-from vps_audit.runtime import _collect_journal, _notification_candidates, _parse_miaomiaowux_lines, _parse_subscription_lines, run_cycle
+from vps_audit.runtime import (
+    _collect_journal,
+    _notification_candidates,
+    _parse_miaomiaowux_lines,
+    _parse_subscription_lines,
+    run_cycle,
+    test_configured_ai_provider as run_configured_ai_test,
+)
 from vps_audit.telegram import build_alert_message
 
 
@@ -58,9 +65,12 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(second["runtime"]["new_event_count"], 3)
             self.assertIn("AUTH_MULTI_IP", {finding["rule_id"] for finding in second["findings"]})
 
+            events_path = directory / "state" / "events.jsonl"
+            previous_mtime = events_path.stat().st_mtime_ns
             third = run_cycle(str(config))
             self.assertEqual(third["summary"]["event_count"], 4)
             self.assertEqual(third["runtime"]["new_event_count"], 0)
+            self.assertEqual(events_path.stat().st_mtime_ns, previous_mtime)
 
     def test_allowlist_filters_subscription_report_but_retains_normalized_events(self):
         with tempfile.TemporaryDirectory() as value:
@@ -176,6 +186,31 @@ class RuntimeTests(unittest.TestCase):
         candidates = _notification_candidates(report, {"notifications": {}}, config, datetime.now(timezone.utc))
         self.assertEqual(len(candidates), 2)
 
+    def test_coverage_warning_obeys_telegram_severity_and_cooldown(self):
+        warning = {
+            "user": "订阅可见性",
+            "rule_id": "SUB_SHARED_FETCH_SOURCE",
+            "severity": "medium",
+        }
+        now = datetime.now(timezone.utc)
+        medium = {"telegram": {"minimum_severity": "medium", "cooldown_hours": 6}}
+        selected = _notification_candidates(
+            {"findings": [warning], "users": []}, {"notifications": {}}, medium, now
+        )
+        self.assertEqual(len(selected), 1)
+        key = selected[0]["notification_key"]
+
+        cooling_down = {"notifications": {key: now.isoformat().replace("+00:00", "Z")}}
+        self.assertEqual(
+            _notification_candidates({"findings": [warning], "users": []}, cooling_down, medium, now),
+            [],
+        )
+        high = {"telegram": {"minimum_severity": "high", "cooldown_hours": 6}}
+        self.assertEqual(
+            _notification_candidates({"findings": [warning], "users": []}, {"notifications": {}}, high, now),
+            [],
+        )
+
     def test_subscription_adapter_accepts_subscription_id(self):
         class NoopEnricher:
             def enrich(self, _source_ip):
@@ -192,6 +227,41 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(events[0]["event_type"], "subscription_access")
         self.assertEqual(events[0]["user"], "personal-plan-001")
         self.assertEqual(events[0]["region"], "Guangdong")
+
+    def test_configured_ai_test_reads_selected_provider_secret(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            key = root / "vendor.key"
+            key.write_text("private-key\n", encoding="utf-8")
+            config = root / "config.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "openai_review": {
+                            "enabled": False,
+                            "active_provider": "vendor",
+                            "providers": {
+                                "vendor": {
+                                    "display_name": "Vendor",
+                                    "base_url": "https://vendor.example/v1",
+                                    "api_mode": "chat_completions",
+                                    "api_key_file": str(key),
+                                    "model": "model",
+                                    "timeout_seconds": 20,
+                                }
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch(
+                "vps_audit.runtime.run_ai_provider_test",
+                return_value={"ok": True, "model": "model", "api_mode": "chat_completions", "latency_ms": 10},
+            ) as test_call:
+                result = run_configured_ai_test(str(config))
+            self.assertEqual(test_call.call_args.args[1], "private-key")
+            self.assertEqual(result["provider_id"], "vendor")
 
     def test_miaomiaowux_native_log_parser_supports_ipv4_and_ipv6(self):
         ipv4 = 'time="2026-08-26 09:04:22" level="INFO " msg="用户获取订阅" username=alice ip=198.51.100.9'

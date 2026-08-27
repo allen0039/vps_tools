@@ -48,6 +48,19 @@ def render_markdown(report: Dict[str, Any], ai_review: Dict[str, Any] | None = N
             "```",
             "",
         ])
+    if report.get("coverage_warnings"):
+        lines.extend(["## 观测范围警告", ""])
+        for warning in report["coverage_warnings"]:
+            lines.extend([
+                f"### [{warning['severity']}] {warning['title']}",
+                "",
+                warning["summary"],
+                "",
+                "```json",
+                _compact_json(warning["evidence"]),
+                "```",
+                "",
+            ])
     if ai_review:
         lines.extend(["## AI 复核", "", ai_review.get("overall_assessment", ""), ""])
         for case in ai_review.get("cases", []):

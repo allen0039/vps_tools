@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from vps_audit.bot import _DISCOVERY_CACHE, _authorized, _handle, _update_context, run_bot
 from vps_audit.runtime import load_runtime_config
+from vps_audit.settings import upsert_ai_provider
 from vps_audit.telegram import TelegramTransientError
 
 
@@ -125,6 +126,42 @@ class BotTests(unittest.TestCase):
         self.assertEqual(value, "discover:0")
         self.assertEqual(callback_id, "callback-1")
         self.assertEqual(message_id, 77)
+
+    def test_ai_providers_can_be_switched_and_tested_from_telegram(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = self._config(root)
+            for provider_id in ("first", "second"):
+                key_file = root / f"{provider_id}.key"
+                key_file.write_text("secret\n", encoding="utf-8")
+                upsert_ai_provider(
+                    str(path),
+                    provider_id,
+                    provider_id.title(),
+                    f"https://{provider_id}.example/v1",
+                    "chat_completions",
+                    str(key_file),
+                    f"{provider_id}-model",
+                    15,
+                )
+            response, keyboard = _handle(str(path), 12345, "ai:use:second", {})
+            self.assertIn("已切换", response)
+            self.assertEqual(load_runtime_config(str(path))["openai_review"]["active_provider"], "second")
+            with patch(
+                "vps_audit.bot.test_configured_ai_provider",
+                return_value={
+                    "display_name": "Second",
+                    "model": "second-model",
+                    "api_mode": "chat_completions",
+                    "latency_ms": 321,
+                },
+            ):
+                response, keyboard = _handle(str(path), 12345, "ai:test", {})
+            self.assertIn("321 ms", response)
+            callback_values = [
+                button["callback_data"] for row in keyboard["inline_keyboard"] for button in row
+            ]
+            self.assertIn("ai:use:first", callback_values)
 
 
 if __name__ == "__main__":

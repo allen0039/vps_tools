@@ -4,7 +4,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from vps_audit.management import _threshold_menu, _users_menu, interactive_menu
+from vps_audit.management import (
+    _configure_ai_provider,
+    _threshold_menu,
+    _users_menu,
+    interactive_menu,
+)
 from vps_audit.runtime import load_runtime_config
 from vps_audit.settings import THRESHOLD_SPECS
 
@@ -53,6 +58,28 @@ class ManagementTests(unittest.TestCase):
                 "builtins.input", side_effect=["0"]
             ):
                 interactive_menu(str(path), "/unused/install.sh")
+
+    def test_local_manager_adds_provider_and_stores_key_privately(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = self._config(root)
+            with patch(
+                "builtins.input",
+                side_effect=[
+                    "vendor",
+                    "Vendor AI",
+                    "https://vendor.example/v1",
+                    "chat_completions",
+                    "model-name",
+                    "25",
+                ],
+            ), patch("vps_audit.management.getpass.getpass", return_value="api-secret"):
+                provider_id = _configure_ai_provider(str(path))
+            config = load_runtime_config(str(path))
+            provider = config["openai_review"]["providers"][provider_id]
+            key_path = Path(provider["api_key_file"])
+            self.assertEqual(key_path.read_text(encoding="utf-8").strip(), "api-secret")
+            self.assertEqual(key_path.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

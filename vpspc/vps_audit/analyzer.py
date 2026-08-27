@@ -36,27 +36,36 @@ def _max_unique_window(
 ) -> Tuple[List[Event], set[Any]]:
     best_events: List[Event] = []
     best_values: set[Any] = set()
+    values = [key(event) for event in events]
+    counts: Dict[Any, int] = defaultdict(int)
     left = 0
     for right, current in enumerate(events):
+        current_value = values[right]
+        if current_value not in (None, ""):
+            counts[current_value] += 1
         while current.timestamp - events[left].timestamp > timedelta(minutes=minutes):
+            old_value = values[left]
+            if old_value not in (None, ""):
+                counts[old_value] -= 1
+                if counts[old_value] == 0:
+                    del counts[old_value]
             left += 1
-        window = list(events[left : right + 1])
-        values = {key(item) for item in window if key(item) not in (None, "")}
-        if len(values) > len(best_values):
-            best_events, best_values = window, values
+        if len(counts) > len(best_values):
+            best_events = list(events[left : right + 1])
+            best_values = set(counts)
     return best_events, best_values
 
 
 def _max_count_window(events: Sequence[Event], minutes: int) -> List[Event]:
-    best: List[Event] = []
+    best_left = 0
+    best_right = -1
     left = 0
     for right, current in enumerate(events):
         while current.timestamp - events[left].timestamp > timedelta(minutes=minutes):
             left += 1
-        window = list(events[left : right + 1])
-        if len(window) > len(best):
-            best = window
-    return best
+        if right - left > best_right - best_left:
+            best_left, best_right = left, right
+    return list(events[best_left : best_right + 1])
 
 
 def _login_findings(user: str, events: Sequence[Event], config: Dict[str, Any]) -> List[Finding]:
@@ -230,6 +239,17 @@ def _subscription_findings(user: str, events: Sequence[Event], config: Dict[str,
                 f"同一订阅在 {window_minutes} 分钟窗口内覆盖 {len(values)} 个不同{label}：{', '.join(sorted(values)[:10])}。",
                 [_event_evidence(event, ("source_ip", "region", "city", "country", "asn", "network_type", "device_id", "session_id")) for event in dimension_window[:20]],
             ))
+    device_window, devices = _max_unique_window(
+        accesses,
+        window_minutes,
+        lambda event: str(event.data.get("device_id", "")).strip(),
+    )
+    if len(devices) >= int(thresholds["subscription_device_count"]):
+        findings.append(Finding(
+            "SUB_MULTI_DEVICE", user, "medium", 35, "同一订阅短时设备标识过多",
+            f"同一订阅在 {window_minutes} 分钟窗口内出现 {len(devices)} 个不同设备标识；设备标识由上游日志提供，缺失时本规则不生效。",
+            [_event_evidence(event, ("source_ip", "region", "city", "asn", "device_id", "session_id")) for event in device_window[:20]],
+        ))
     for previous, current in zip(accesses, accesses[1:]):
         distance = _haversine_km(previous.data.get("geo") or previous.data, current.data.get("geo") or current.data)
         hours = (current.timestamp - previous.timestamp).total_seconds() / 3600
@@ -248,9 +268,42 @@ def _subscription_findings(user: str, events: Sequence[Event], config: Dict[str,
     return findings
 
 
+def _subscription_coverage_warnings(events: Sequence[Event], config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    accesses = [event for event in events if event.event_type == "subscription_access"]
+    by_source: Dict[str, List[Event]] = defaultdict(list)
+    for event in accesses:
+        source_ip = str(event.data.get("source_ip", "")).strip()
+        if source_ip:
+            by_source[source_ip].append(event)
+    warnings: List[Dict[str, Any]] = []
+    window_minutes = int(config["thresholds"]["subscription_window_minutes"])
+    threshold = int(config["thresholds"]["subscription_shared_source_user_count"])
+    for source_ip, source_events in by_source.items():
+        window, users = _max_unique_window(source_events, window_minutes, lambda event: event.user)
+        if len(users) < threshold:
+            continue
+        warnings.append({
+            "rule_id": "SUB_SHARED_FETCH_SOURCE",
+            "user": "订阅可见性",
+            "severity": "medium",
+            "score": 0,
+            "title": "同一来源短时拉取多个用户订阅",
+            "summary": (
+                f"来源 {source_ip} 在 {window_minutes} 分钟内拉取 {len(users)} 个不同订阅用户；"
+                "这可能是 Sub-Store/监控器/NAT。源站此时可能只能看到聚合出口，不能据此还原终端 IP。"
+            ),
+            "evidence": [
+                _event_evidence(event, ("source_ip", "user_agent", "device_id", "session_id"))
+                for event in window[:20]
+            ],
+        })
+    return warnings
+
+
 def analyze(events: Iterable[Event], config: Dict[str, Any]) -> Dict[str, Any]:
+    all_events = sorted(events, key=lambda event: event.timestamp)
     grouped: Dict[str, List[Event]] = defaultdict(list)
-    for event in events:
+    for event in all_events:
         grouped[event.user].append(event)
     trusted_users = set(config.get("trusted", {}).get("users", []))
     findings: List[Finding] = []
@@ -260,6 +313,7 @@ def analyze(events: Iterable[Event], config: Dict[str, Any]) -> Dict[str, Any]:
         findings.extend(_login_findings(user, user_events, config))
         findings.extend(_subscription_findings(user, user_events, config))
         findings.extend(_behavior_findings(user, user_events, config))
+    coverage_warnings = _subscription_coverage_warnings(all_events, config)
 
     per_user: Dict[str, List[Finding]] = defaultdict(list)
     for finding in findings:
@@ -291,6 +345,7 @@ def analyze(events: Iterable[Event], config: Dict[str, Any]) -> Dict[str, Any]:
         },
         "users": users,
         "findings": [finding.as_dict() for finding in findings],
+        "coverage_warnings": coverage_warnings,
         "policy": {
             "automatic_enforcement": False,
             "note": "检测结果是调查线索，不是共享账号或滥用行为的最终证明。",

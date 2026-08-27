@@ -9,6 +9,7 @@ class GeoIPEnricher:
     def __init__(self, config: Dict[str, Any]):
         self._stack = ExitStack()
         self._readers: Dict[str, Any] = {}
+        self._cache: Dict[str, Dict[str, Any]] = {}
         paths = config.get("geoip", {})
         configured = {key: value for key, value in paths.items() if key.endswith("_db") and value}
         if not configured:
@@ -27,6 +28,8 @@ class GeoIPEnricher:
         self._stack.close()
 
     def enrich(self, source_ip: str) -> Dict[str, Any]:
+        if source_ip in self._cache:
+            return dict(self._cache[source_ip])
         result: Dict[str, Any] = {}
         try:
             if "city_db" in self._readers:
@@ -55,7 +58,9 @@ class GeoIPEnricher:
         except Exception as exc:  # Database address misses differ across geoip2 versions.
             if exc.__class__.__name__ != "AddressNotFoundError":
                 raise
-        return {key: value for key, value in result.items() if value is not None}
+        normalized = {key: value for key, value in result.items() if value is not None}
+        self._cache[source_ip] = normalized
+        return dict(normalized)
 
     def __enter__(self) -> "GeoIPEnricher":
         return self

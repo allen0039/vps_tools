@@ -4,18 +4,19 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
+from urllib.parse import urlsplit
 
-from .ai_review import review_with_openai
+from .ai_review import review_with_provider, test_ai_provider as run_ai_provider_test
 from .analyzer import SEVERITY_ORDER, analyze
 from .config import DEFAULT_CONFIG
 from .falco_parser import parse_falco_event
 from .geoip import GeoIPEnricher
-from .io import read_events
 from .models import Event, parse_timestamp
 from .miaomiaowux_parser import parse_miaomiaowux_line
 from .report import render_markdown
@@ -66,8 +67,8 @@ DEFAULT_RUNTIME_CONFIG: Dict[str, Any] = {
     },
     "openai_review": {
         "enabled": False,
-        "api_key_file": "/etc/vps-audit/openai.key",
-        "model": "",
+        "active_provider": "",
+        "providers": {},
     },
 }
 
@@ -82,10 +83,97 @@ def _merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _normalize_ai_review(config: Dict[str, Any], raw: Dict[str, Any]) -> None:
+    raw_ai = raw.get("openai_review", {})
+    if not isinstance(raw_ai, dict):
+        raise ValueError("openai_review must be an object")
+    ai = config.get("openai_review")
+    if not isinstance(ai, dict):
+        raise ValueError("openai_review must be an object")
+    if not isinstance(ai.get("enabled"), bool):
+        raise ValueError("openai_review.enabled must be boolean")
+    providers = ai.get("providers", {})
+    if not isinstance(providers, dict):
+        raise ValueError("openai_review.providers must be an object")
+    legacy_model = str(raw_ai.get("model", "")).strip()
+    if not providers and legacy_model:
+        providers = {
+            "legacy": {
+                "display_name": "Legacy OpenAI",
+                "base_url": str(raw_ai.get("base_url", "https://api.openai.com/v1")),
+                "api_mode": str(raw_ai.get("api_mode", "responses")),
+                "api_key_file": str(raw_ai.get("api_key_file", "/etc/vps-audit/openai.key")),
+                "model": legacy_model,
+                "timeout_seconds": int(raw_ai.get("timeout_seconds", 60)),
+            }
+        }
+    if len(providers) > 16:
+        raise ValueError("openai_review.providers supports at most 16 providers")
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for raw_id, raw_provider in providers.items():
+        provider_id = str(raw_id).strip()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,31}", provider_id):
+            raise ValueError("AI provider ID must use 1-32 lowercase letters, numbers, dots, underscores or hyphens")
+        if not isinstance(raw_provider, dict):
+            raise ValueError(f"AI provider {provider_id} must be an object")
+        display_name = str(raw_provider.get("display_name", provider_id)).strip()
+        if not display_name or len(display_name) > 64 or any(ord(char) < 32 for char in display_name):
+            raise ValueError(f"AI provider {provider_id} display_name must contain 1-64 printable characters")
+        base_url = str(raw_provider.get("base_url", "")).strip().rstrip("/")
+        parsed = urlsplit(base_url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or len(base_url) > 512
+            or any(ord(char) < 32 or ord(char) == 127 for char in base_url)
+        ):
+            raise ValueError(f"AI provider {provider_id} base_url must be a plain HTTP(S) base URL")
+        api_mode = str(raw_provider.get("api_mode", "chat_completions"))
+        if api_mode not in {"responses", "chat_completions"}:
+            raise ValueError(f"AI provider {provider_id} api_mode must be responses or chat_completions")
+        model = str(raw_provider.get("model", "")).strip()
+        if not model or len(model) > 128 or any(ord(char) < 32 for char in model):
+            raise ValueError(f"AI provider {provider_id} model must contain 1-128 printable characters")
+        api_key_file = str(raw_provider.get("api_key_file", "")).strip()
+        if not api_key_file or not Path(api_key_file).is_absolute() or len(api_key_file) > 512:
+            raise ValueError(f"AI provider {provider_id} api_key_file must be an absolute path")
+        try:
+            timeout_seconds = int(raw_provider.get("timeout_seconds", 30))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"AI provider {provider_id} timeout_seconds must be an integer") from exc
+        if not 5 <= timeout_seconds <= 120:
+            raise ValueError(f"AI provider {provider_id} timeout_seconds must be between 5 and 120")
+        normalized[provider_id] = {
+            "display_name": display_name,
+            "base_url": base_url,
+            "api_mode": api_mode,
+            "api_key_file": api_key_file,
+            "model": model,
+            "timeout_seconds": timeout_seconds,
+        }
+    active = str(ai.get("active_provider", "")).strip()
+    if not active and len(normalized) == 1:
+        active = next(iter(normalized))
+    if active and active not in normalized:
+        raise ValueError("openai_review.active_provider does not exist in providers")
+    if ai["enabled"] and not active:
+        raise ValueError("AI review requires an active provider")
+    config["openai_review"] = {
+        "enabled": ai["enabled"],
+        "active_provider": active,
+        "providers": normalized,
+    }
+
+
 def normalize_runtime_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("runtime config root must be a JSON object")
     config = _merge(DEFAULT_RUNTIME_CONFIG, raw)
+    _normalize_ai_review(config, raw)
     severity = config["telegram"]["minimum_severity"]
     if severity not in SEVERITY_ORDER:
         raise ValueError(f"invalid telegram.minimum_severity: {severity}")
@@ -353,26 +441,30 @@ def _collect_journal(state: Dict[str, Any], config: Dict[str, Any], enricher: Ge
     return events, errors
 
 
-def _load_retained(path: Path, cutoff: datetime) -> List[Dict[str, Any]]:
+def _load_retained(path: Path, cutoff: datetime) -> Tuple[List[Dict[str, Any]], bool]:
     if not path.exists():
-        return []
+        return [], False
     result: List[Dict[str, Any]] = []
+    needs_rewrite = False
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             try:
                 raw = json.loads(line)
                 if isinstance(raw, dict) and parse_timestamp(str(raw["timestamp"])) >= cutoff:
                     result.append(raw)
+                else:
+                    needs_rewrite = True
             except (json.JSONDecodeError, KeyError, ValueError):
-                continue
-    return result
+                needs_rewrite = True
+    return result, needs_rewrite
 
 
 def _merge_events(existing: Iterable[Dict[str, Any]], new: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     unique: Dict[str, Dict[str, Any]] = {}
-    for event in list(existing) + list(new):
-        key = json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        unique[key] = event
+    for source in (existing, new):
+        for event in source:
+            key = json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            unique[key] = event
     return sorted(unique.values(), key=lambda item: parse_timestamp(str(item["timestamp"])))
 
 
@@ -391,8 +483,22 @@ def _filter_monitored_events(events: Iterable[Event], config: Dict[str, Any]) ->
 
 
 def _write_events(path: Path, events: Iterable[Dict[str, Any]]) -> None:
-    rendered = "".join(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n" for event in events)
-    _atomic_text(path, rendered)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f".tmp.{os.getpid()}")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            for event in events:
+                json.dump(event, handle, ensure_ascii=False, separators=(",", ":"))
+                handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _notification_candidates(report: Dict[str, Any], state: Dict[str, Any], config: Dict[str, Any], now: datetime) -> List[Dict[str, Any]]:
@@ -429,6 +535,25 @@ def _read_secret(path: str, label: str) -> str:
     return value
 
 
+def _selected_ai_provider(config: Dict[str, Any], provider_id: str | None = None) -> Tuple[str, Dict[str, Any]]:
+    ai = config["openai_review"]
+    selected = provider_id or str(ai.get("active_provider", ""))
+    providers = ai.get("providers", {})
+    if not selected or selected not in providers:
+        raise ValueError("未配置可用的 AI 供应商")
+    return selected, providers[selected]
+
+
+def test_configured_ai_provider(config_path: str, provider_id: str | None = None) -> Dict[str, Any]:
+    config = load_runtime_config(config_path)
+    selected, provider = _selected_ai_provider(config, provider_id)
+    api_key = _read_secret(str(provider["api_key_file"]), f"AI provider {selected} API key")
+    result = run_ai_provider_test(provider, api_key)
+    result["provider_id"] = selected
+    result["display_name"] = provider["display_name"]
+    return result
+
+
 def run_cycle(config_path: str) -> Dict[str, Any]:
     config = load_runtime_config(config_path)
     state_dir = Path(config["state_dir"])
@@ -459,12 +584,11 @@ def run_cycle(config_path: str) -> Dict[str, Any]:
                 parsed, errors = _collect_journal(state, config["journal"], enricher)
                 new_events.extend(parsed)
                 parse_errors += errors
-        for value in config.get("falco_logs", []):
-            lines = _read_incremental(Path(value), state, int(config["initial_scan_bytes"]))
-            parsed, errors = _parse_falco_lines(lines)
-            new_events.extend(parsed)
-            parse_errors += errors
-        with GeoIPEnricher(config) as enricher:
+            for value in config.get("falco_logs", []):
+                lines = _read_incremental(Path(value), state, int(config["initial_scan_bytes"]))
+                parsed, errors = _parse_falco_lines(lines)
+                new_events.extend(parsed)
+                parse_errors += errors
             for value in config.get("subscription_logs", []):
                 lines = _read_incremental(Path(value), state, int(config["initial_scan_bytes"]))
                 parsed, errors = _parse_subscription_lines(lines, enricher)
@@ -480,9 +604,12 @@ def run_cycle(config_path: str) -> Dict[str, Any]:
 
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=float(config["retention_days"]))
-        events = _merge_events(_load_retained(events_path, cutoff), new_events)
-        _write_events(events_path, events)
-        analyzed_events = _filter_monitored_events(read_events([str(events_path)]), config)
+        retained_events, needs_rewrite = _load_retained(events_path, cutoff)
+        events = _merge_events(retained_events, new_events)
+        if not events_path.exists() or needs_rewrite or events != retained_events:
+            _write_events(events_path, events)
+        event_models = [Event.from_dict(event, index) for index, event in enumerate(events, 1)]
+        analyzed_events = _filter_monitored_events(event_models, config)
         report = analyze(analyzed_events, config["rules"])
         report["runtime"] = {
             "generated_at": now.isoformat().replace("+00:00", "Z"),
@@ -496,18 +623,25 @@ def run_cycle(config_path: str) -> Dict[str, Any]:
             },
         }
         candidates = _notification_candidates(report, state, config, now)
+        coverage_candidates = _notification_candidates(
+            {"findings": report.get("coverage_warnings", []), "users": []},
+            state,
+            config,
+            now,
+        )
+        delivery_candidates = candidates + coverage_candidates
         ai_result = None
         ai_error = None
         if candidates and config["openai_review"].get("enabled"):
             try:
-                model = str(config["openai_review"].get("model", ""))
-                if not model:
-                    raise ValueError("openai_review.model is required when AI review is enabled")
-                api_key = _read_secret(str(config["openai_review"]["api_key_file"]), "OpenAI API key")
+                provider_id, provider = _selected_ai_provider(config)
+                api_key = _read_secret(str(provider["api_key_file"]), f"AI provider {provider_id} API key")
                 evidence_report = dict(report)
                 evidence_report["findings"] = candidates
-                ai_result = review_with_openai(evidence_report, model, api_key)
+                ai_result = review_with_provider(evidence_report, provider, api_key)
                 report["ai_review"] = ai_result
+                report["runtime"]["ai_provider"] = provider_id
+                report["runtime"]["ai_model"] = provider["model"]
             except (OSError, ValueError, RuntimeError) as exc:
                 ai_error = str(exc)
                 report["runtime"]["ai_error"] = ai_error
@@ -520,12 +654,12 @@ def run_cycle(config_path: str) -> Dict[str, Any]:
         _atomic_json(state_path, state)
 
         delivery_error = None
-        if candidates and config["telegram"].get("enabled"):
+        if delivery_candidates and config["telegram"].get("enabled"):
             try:
                 token = _read_secret(str(config["telegram"]["token_file"]), "Telegram token")
                 message = build_alert_message(
                     report,
-                    candidates,
+                    delivery_candidates,
                     bool(config["telegram"].get("include_source_ip")),
                     ai_result,
                     int(config["telegram"].get("max_findings", 8)),
@@ -533,8 +667,8 @@ def run_cycle(config_path: str) -> Dict[str, Any]:
                 send_message(token, str(config["telegram"]["chat_id"]), message)
             except (OSError, ValueError, RuntimeError) as exc:
                 delivery_error = str(exc)
-        if candidates and (not config["telegram"].get("enabled") or not delivery_error):
-            for finding in candidates:
+        if delivery_candidates and (not config["telegram"].get("enabled") or not delivery_error):
+            for finding in delivery_candidates:
                 state["notifications"][finding["notification_key"]] = now.isoformat().replace("+00:00", "Z")
         if delivery_error:
             state["last_error"] = delivery_error
@@ -564,6 +698,7 @@ def health(config_path: str) -> Dict[str, Any]:
         "telegram_management_enabled": bool(config["telegram"].get("bot_management_enabled")),
         "subscription_monitoring": config["subscription_monitoring"],
         "openai_review_enabled": bool(config["openai_review"].get("enabled")),
+        "openai_active_provider": config["openai_review"].get("active_provider", ""),
         "last_run": state.get("last_run"),
         "last_summary": state.get("last_summary"),
         "last_error": state.get("last_error"),
@@ -586,6 +721,8 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser("run", help="run one collection and audit cycle")
     subparsers.add_parser("health", help="show last cycle status")
     subparsers.add_parser("test-telegram", help="send a Telegram test message")
+    test_ai = subparsers.add_parser("test-ai", help="test an OpenAI-compatible AI provider")
+    test_ai.add_argument("--provider", help="provider ID; defaults to active_provider")
     return parser
 
 
@@ -597,9 +734,11 @@ def main(argv: List[str] | None = None) -> int:
             print(json.dumps({"ok": True, "summary": report["summary"], "runtime": report["runtime"]}, ensure_ascii=False))
         elif args.command == "health":
             print(json.dumps(health(args.config), ensure_ascii=False, indent=2))
-        else:
+        elif args.command == "test-telegram":
             test_telegram(args.config)
             print("Telegram test message sent.")
+        else:
+            print(json.dumps(test_configured_ai_provider(args.config, args.provider), ensure_ascii=False))
         return 0
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         print(f"vps-audit-runner: {exc}", file=sys.stderr)

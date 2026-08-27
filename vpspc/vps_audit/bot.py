@@ -9,11 +9,20 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from .runtime import _atomic_json, _read_secret, health, load_runtime_config
+from .runtime import (
+    _atomic_json,
+    _read_secret,
+    health,
+    load_runtime_config,
+    test_configured_ai_provider,
+)
 from .settings import (
     THRESHOLD_SPECS,
     add_monitored_user,
     remove_monitored_user,
+    set_active_ai_provider,
+    set_ai_enabled,
+    set_ai_provider_model,
     set_monitoring_mode,
     set_subscription_monitoring_enabled,
     set_telegram_option,
@@ -40,6 +49,7 @@ def _main_keyboard() -> Dict[str, Any]:
     return {"inline_keyboard": [
         [_button("📊 状态", "menu:status"), _button("👥 订阅用户", "menu:users")],
         [_button("⚙️ 检测参数", "menu:thresholds"), _button("🔔 推送参数", "menu:telegram")],
+        [_button("🤖 AI 复核", "menu:ai")],
         [_button("▶️ 立即巡查", "menu:run"), _button("❓ 帮助", "menu:help")],
     ]}
 
@@ -68,6 +78,23 @@ def _telegram_keyboard() -> Dict[str, Any]:
         [_button("切换完整 IP 显示", "toggle:include_source_ip")],
         [_button("⬅️ 主菜单", "menu:main")],
     ]}
+
+
+def _ai_keyboard(config: Dict[str, Any]) -> Dict[str, Any]:
+    ai = config["openai_review"]
+    rows: List[List[Dict[str, str]]] = []
+    for provider_id, provider in ai["providers"].items():
+        marker = "✅" if provider_id == ai["active_provider"] else "切换"
+        label = f"{marker} {provider['display_name']}"
+        if len(label) > 42:
+            label = label[:39] + "..."
+        rows.append([_button(label, f"ai:use:{provider_id}")])
+    rows.extend([
+        [_button("启用/暂停 AI", "ai:toggle"), _button("测试当前模型", "ai:test")],
+        [_button("修改当前模型名", "prompt:ai:model")],
+        [_button("⬅️ 主菜单", "menu:main")],
+    ])
+    return {"inline_keyboard": rows}
 
 
 def _monitoring_text(config: Dict[str, Any]) -> str:
@@ -182,6 +209,24 @@ def _telegram_text(config: Dict[str, Any]) -> str:
     )
 
 
+def _ai_text(config: Dict[str, Any]) -> str:
+    ai = config["openai_review"]
+    active = ai["active_provider"]
+    lines = [
+        f"AI 复核：{'开启' if ai['enabled'] else '关闭'}",
+        f"当前供应商：{active or '未配置'}",
+    ]
+    if active and active in ai["providers"]:
+        provider = ai["providers"][active]
+        lines.extend([
+            f"显示名称：{provider['display_name']}",
+            f"模型：{provider['model']}",
+            f"接口模式：{provider['api_mode']}",
+        ])
+    lines.append("\nTelegram 只允许切换、改模型名和测试；新增端点/API Key 请在 VPS 本机运行 vpspc。")
+    return "\n".join(lines)
+
+
 def _status_text(config_path: str) -> str:
     result = health(config_path)
     last_run = result.get("last_run") or {}
@@ -210,6 +255,11 @@ def _help_text() -> str:
         "/deluser <用户名或订阅ID>\n"
         "/thresholds - 查看参数\n"
         "/set <参数名> <整数>\n"
+        "/ai - 查看 AI 供应商\n"
+        "/aiuse <供应商ID> - 切换供应商\n"
+        "/aimodel <模型名> - 修改当前模型\n"
+        "/aitest - 用合成数据测试当前模型\n"
+        "/aion 或 /aioff - 开关 AI 复核\n"
         "/run - 立即巡查\n"
         "\n所有操作只会审计、记录和预警，不会自动封禁。"
     )
@@ -279,11 +329,14 @@ def _apply_pending(config_path: str, pending: Dict[str, Any], sender_id: int, te
     if action == "telegram":
         config = set_telegram_option(config_path, str(entry["key"]), text)
         return "推送参数已更新。\n\n" + _telegram_text(config)
+    if action == "ai_model":
+        config = set_ai_provider_model(config_path, str(entry["provider_id"]), text)
+        return "AI 模型已更新。\n\n" + _ai_text(config)
     raise ValueError("未知的待处理操作")
 
 
 def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any]) -> Tuple[str, Dict[str, Any] | None]:
-    if not value.startswith("/") and not value.startswith(("menu:", "mode:", "prompt:", "toggle:", "discover:")):
+    if not value.startswith("/") and not value.startswith(("menu:", "mode:", "prompt:", "toggle:", "discover:", "ai:")):
         result = _apply_pending(config_path, pending, sender_id, value)
         if result:
             return result, _main_keyboard()
@@ -302,6 +355,8 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
         return _threshold_text(config), _threshold_keyboard()
     if command == "menu:telegram":
         return _telegram_text(config), _telegram_keyboard()
+    if command in {"/ai", "menu:ai"}:
+        return _ai_text(config), _ai_keyboard(config)
     if command in {"/help", "menu:help"}:
         return _help_text(), _main_keyboard()
     if command in {"/run", "menu:run"}:
@@ -330,6 +385,30 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
             raise ValueError("用法：/set <参数名> <整数>")
         config = set_threshold(config_path, arguments[0], arguments[1])
         return "检测参数已更新。\n\n" + _threshold_text(config), _threshold_keyboard()
+    if command == "/aiuse":
+        if not arguments:
+            raise ValueError("用法：/aiuse <供应商ID>")
+        config = set_active_ai_provider(config_path, arguments[0])
+        return "AI 供应商已切换。\n\n" + _ai_text(config), _ai_keyboard(config)
+    if command == "/aimodel":
+        if not arguments:
+            raise ValueError("用法：/aimodel <模型名>")
+        active = config["openai_review"]["active_provider"]
+        if not active:
+            raise ValueError("请先在 VPS 本机配置 AI 供应商")
+        config = set_ai_provider_model(config_path, active, arguments[0])
+        return "AI 模型已更新。\n\n" + _ai_text(config), _ai_keyboard(config)
+    if command == "/aitest":
+        result = test_configured_ai_provider(config_path)
+        config = load_runtime_config(config_path)
+        return (
+            f"AI 模型测试成功。\n供应商：{result['display_name']}\n模型：{result['model']}\n"
+            f"接口：{result['api_mode']}\n耗时：{result['latency_ms']} ms",
+            _ai_keyboard(config),
+        )
+    if command in {"/aion", "/aioff"}:
+        config = set_ai_enabled(config_path, command == "/aion")
+        return "AI 复核开关已更新。\n\n" + _ai_text(config), _ai_keyboard(config)
     if command.startswith("prompt:"):
         parts = command.split(":")
         if parts[1] in {"adduser", "deluser"}:
@@ -339,6 +418,12 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
         if len(parts) == 3 and parts[1] in {"threshold", "telegram"}:
             pending[str(sender_id)] = {"action": parts[1], "key": parts[2]}
             return f"请发送 {parts[2]} 的新值。发送 /cancel 可取消。", None
+        if parts[1:] == ["ai", "model"]:
+            active = config["openai_review"]["active_provider"]
+            if not active:
+                raise ValueError("请先在 VPS 本机配置 AI 供应商")
+            pending[str(sender_id)] = {"action": "ai_model", "provider_id": active}
+            return "请发送新的模型名称。发送 /cancel 可取消。", None
     if command == "/cancel":
         pending.pop(str(sender_id), None)
         return "已取消。", _main_keyboard()
@@ -350,6 +435,20 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
             config_path, not config["subscription_monitoring"]["enabled"]
         )
         return "订阅监测开关已更新。\n\n" + _monitoring_text(config), _users_keyboard()
+    if command == "ai:toggle":
+        config = set_ai_enabled(config_path, not config["openai_review"]["enabled"])
+        return "AI 复核开关已更新。\n\n" + _ai_text(config), _ai_keyboard(config)
+    if command == "ai:test":
+        result = test_configured_ai_provider(config_path)
+        config = load_runtime_config(config_path)
+        return (
+            f"AI 模型测试成功。\n供应商：{result['display_name']}\n模型：{result['model']}\n"
+            f"接口：{result['api_mode']}\n耗时：{result['latency_ms']} ms",
+            _ai_keyboard(config),
+        )
+    if command.startswith("ai:use:"):
+        config = set_active_ai_provider(config_path, command.split(":", 2)[2])
+        return "AI 供应商已切换。\n\n" + _ai_text(config), _ai_keyboard(config)
     if command.startswith("discover:"):
         parts = command.split(":")
         if len(parts) == 2:

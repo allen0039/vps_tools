@@ -27,6 +27,7 @@ FALCOCTL_ETC_DIR="/etc/falcoctl"
 APT_LIST_CACHE_DIR="/var/lib/apt/lists"
 APT_ARCHIVE_CACHE_DIR="/var/cache/apt/archives"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+AI_TEST_REQUESTED="false"
 
 die() {
   echo "错误: $*" >&2
@@ -873,11 +874,17 @@ create_settings_snapshot() {
   install -m 0600 "$CONFIG_FILE" "$staging/config.json"
   [[ -f "$CONFIG_DIR/telegram.token" ]] && install -m 0600 "$CONFIG_DIR/telegram.token" "$staging/telegram.token"
   [[ -f "$CONFIG_DIR/openai.key" ]] && install -m 0600 "$CONFIG_DIR/openai.key" "$staging/openai.key"
+  if [[ -d "$CONFIG_DIR/ai-providers" ]]; then
+    cp -a "$CONFIG_DIR/ai-providers" "$staging/ai-providers"
+    chmod 0700 "$staging/ai-providers"
+    find "$staging/ai-providers" -type f -exec chmod 0600 {} +
+  fi
   [[ -f "$SYSTEMD_DIR/vps-audit.service" ]] && install -m 0644 "$SYSTEMD_DIR/vps-audit.service" "$staging/vps-audit.service"
   [[ -f "$SYSTEMD_DIR/vps-audit.timer" ]] && install -m 0644 "$SYSTEMD_DIR/vps-audit.timer" "$staging/vps-audit.timer"
   [[ -f "$SYSTEMD_DIR/vps-audit-bot.service" ]] && install -m 0644 "$SYSTEMD_DIR/vps-audit-bot.service" "$staging/vps-audit-bot.service"
   falco_component_is_managed package && : > "$staging/falco-managed-before"
-  chmod 0600 "$staging"/* 2>/dev/null || true
+  find "$staging" -type d -exec chmod 0700 {} +
+  find "$staging" -type f -exec chmod 0600 {} +
   rm -rf -- "$snapshot"
   mv "$staging" "$snapshot"
   echo "已保存上一次配置快照，可使用 install.sh rollback 恢复。"
@@ -904,6 +911,12 @@ rollback_settings_app() {
     install -m 0600 "$snapshot/openai.key" "$CONFIG_DIR/openai.key"
   else
     rm -f -- "$CONFIG_DIR/openai.key"
+  fi
+  rm -rf -- "$CONFIG_DIR/ai-providers"
+  if [[ -d "$snapshot/ai-providers" ]]; then
+    cp -a "$snapshot/ai-providers" "$CONFIG_DIR/ai-providers"
+    chmod 0700 "$CONFIG_DIR/ai-providers"
+    find "$CONFIG_DIR/ai-providers" -type f -exec chmod 0600 {} +
   fi
   if [[ -f "$snapshot/vps-audit.service" ]]; then
     install -m 0644 "$snapshot/vps-audit.service" "$SYSTEMD_DIR/vps-audit.service"
@@ -937,8 +950,10 @@ write_runtime_config() {
   local auth_log auth_timezone falco_log subscription_log miaomiaowux_log miaomiaowux_timezone retention interval
   local state_dir report_dir
   local journal_enabled telegram_enabled telegram_chat min_severity cooldown include_ip
-  local ai_enabled ai_model city_db asn_db install_geoip geoip_selection tab
-  local sub_window sub_ip_count sub_region_count sub_city_count sub_asn_count travel_distance travel_speed
+  local ai_enabled ai_model ai_provider_id ai_display_name ai_base_url ai_api_mode ai_timeout ai_key_file
+  local city_db asn_db install_geoip geoip_selection tab
+  local sub_window sub_ip_count sub_region_count sub_city_count sub_asn_count sub_device_count sub_shared_source_count
+  local travel_distance travel_speed
   local monitor_mode monitor_users
   local telegram_bot_enabled telegram_admin_ids telegram_admin_default
   local falco_install_requested falco_skipped
@@ -1071,9 +1086,11 @@ write_runtime_config() {
   sub_region_count="$(ask "同订阅跨多少个省/地区时告警" "$(existing_config_value rules.thresholds.subscription_region_count 3)")"
   sub_city_count="$(ask "同订阅跨多少个城市时告警" "$(existing_config_value rules.thresholds.subscription_city_count 5)")"
   sub_asn_count="$(ask "同订阅跨多少个 ASN/运营商时告警" "$(existing_config_value rules.thresholds.subscription_asn_count 4)")"
+  sub_device_count="$(ask "同订阅多少个设备标识时告警（日志有 device_id 时生效）" "$(existing_config_value rules.thresholds.subscription_device_count 6)")"
+  sub_shared_source_count="$(ask "同一来源拉取多少个不同订阅用户时提示聚合器/NAT" "$(existing_config_value rules.thresholds.subscription_shared_source_user_count 8)")"
   travel_distance="$(ask "不可能旅行最小距离（km）" "$(existing_config_value rules.thresholds.impossible_travel_min_km 500)")"
   travel_speed="$(ask "不可能旅行速度阈值（km/h）" "$(existing_config_value rules.thresholds.impossible_travel_kmh 900)")"
-  for value in "$sub_window" "$sub_ip_count" "$sub_region_count" "$sub_city_count" "$sub_asn_count" "$travel_distance" "$travel_speed"; do
+  for value in "$sub_window" "$sub_ip_count" "$sub_region_count" "$sub_city_count" "$sub_asn_count" "$sub_device_count" "$sub_shared_source_count" "$travel_distance" "$travel_speed"; do
     [[ "$value" =~ ^[0-9]+$ ]] || die "订阅审计阈值必须是正整数"
     (( value >= 1 )) || die "订阅审计阈值必须大于 0"
   done
@@ -1133,20 +1150,60 @@ write_runtime_config() {
 
   ai_enabled="false"
   ai_model=""
-  if ask_yes_no "有新告警时启用 OpenAI AI 复核" "$(existing_config_value openai_review.enabled no)"; then
+  ai_provider_id=""
+  ai_display_name=""
+  ai_base_url=""
+  ai_api_mode=""
+  ai_timeout="30"
+  ai_key_file=""
+  AI_TEST_REQUESTED="false"
+  if ask_yes_no "有新告警时启用 OpenAI 兼容 AI 复核" "$(existing_config_value openai_review.enabled no)"; then
     ai_enabled="true"
-    local openai_key openai_key_default
-    openai_key_default=""
-    [[ -s "$CONFIG_DIR/openai.key" ]] && openai_key_default="KEEP"
-    openai_key="$(ask_secret "OpenAI API Key（输入 KEEP 保留已有值）" "$openai_key_default")"
-    [[ -n "$openai_key" ]] || die "启用 AI 复核时 API Key 不能为空"
-    ai_model="$(ask "OpenAI 模型 ID" "$(existing_config_value openai_review.model "")")"
-    [[ -n "$ai_model" ]] || die "启用 AI 复核时模型 ID 不能为空"
-    install -d -m 0700 "$CONFIG_DIR"
-    if [[ "$openai_key" != "KEEP" ]]; then
-      printf '%s\n' "$openai_key" > "$CONFIG_DIR/openai.key"
+    local existing_ai_count
+    existing_ai_count="$(python3 - "$CONFIG_FILE" <<'PY'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        ai = json.load(handle).get("openai_review", {})
+    providers = ai.get("providers", {}) if isinstance(ai, dict) else {}
+    count = len(providers) if isinstance(providers, dict) else 0
+    if count == 0 and isinstance(ai, dict) and ai.get("model"):
+        count = 1
+    print(count)
+except (OSError, ValueError, TypeError, json.JSONDecodeError):
+    print(0)
+PY
+)"
+    if (( existing_ai_count > 0 )); then
+      echo "已保留现有 $existing_ai_count 个 AI 供应商；可安装后使用 vpspc 管理或在 Telegram 中切换。"
+    else
+      ai_provider_id="$(ask "初始供应商 ID（小写字母/数字/._-）" "openai")"
+      [[ "$ai_provider_id" =~ ^[a-z0-9][a-z0-9._-]{0,31}$ ]] || die "AI 供应商 ID 格式无效"
+      ai_display_name="$(ask "供应商显示名称" "OpenAI")"
+      ai_base_url="$(ask "OpenAI 兼容 Base URL" "https://api.openai.com/v1")"
+      ai_api_mode="$(ask "接口模式 responses/chat_completions" "responses")"
+      case "$ai_api_mode" in responses|chat_completions) ;; *) die "AI 接口模式无效" ;; esac
+      ai_model="$(ask "模型名称" "")"
+      [[ -n "$ai_model" ]] || die "启用 AI 复核时模型名称不能为空"
+      ai_timeout="$(ask "AI 请求超时秒数" "30")"
+      [[ "$ai_timeout" =~ ^[0-9]+$ ]] && (( ai_timeout >= 5 && ai_timeout <= 120 )) \
+        || die "AI 请求超时应为 5 到 120 秒"
+      ai_key_file="$CONFIG_DIR/ai-providers/$ai_provider_id.key"
+      local ai_key ai_key_default
+      ai_key_default=""
+      [[ -s "$ai_key_file" ]] && ai_key_default="KEEP"
+      ai_key="$(ask_secret "API Key（输入 KEEP 保留已有值）" "$ai_key_default")"
+      [[ -n "$ai_key" ]] || die "启用 AI 复核时 API Key 不能为空"
+      install -d -m 0700 "$CONFIG_DIR/ai-providers"
+      if [[ "$ai_key" != "KEEP" ]]; then
+        printf '%s\n' "$ai_key" > "$ai_key_file"
+      fi
+      chmod 0600 "$ai_key_file"
     fi
-    chmod 0600 "$CONFIG_DIR/openai.key"
+    if ask_yes_no "配置保存后手动测试当前 AI 模型" "no"; then
+      AI_TEST_REQUESTED="true"
+    fi
   fi
 
   if [[ "$install_geoip" == "true" ]]; then
@@ -1168,15 +1225,56 @@ write_runtime_config() {
   TELEGRAM_ENABLED="$telegram_enabled" TELEGRAM_CHAT="$telegram_chat" \
   MIN_SEVERITY="$min_severity" COOLDOWN="$cooldown" INCLUDE_IP="$include_ip" \
   TELEGRAM_BOT_ENABLED="$telegram_bot_enabled" TELEGRAM_ADMIN_IDS="$telegram_admin_ids" \
-  AI_ENABLED="$ai_enabled" AI_MODEL="$ai_model" CITY_DB="$city_db" ASN_DB="$asn_db" \
+  AI_ENABLED="$ai_enabled" AI_PROVIDER_ID="$ai_provider_id" AI_DISPLAY_NAME="$ai_display_name" \
+  AI_BASE_URL="$ai_base_url" AI_API_MODE="$ai_api_mode" AI_KEY_FILE="$ai_key_file" AI_MODEL="$ai_model" AI_TIMEOUT="$ai_timeout" \
+  CITY_DB="$city_db" ASN_DB="$asn_db" \
   MONITOR_MODE="$monitor_mode" MONITOR_USERS="$monitor_users" \
   SUB_WINDOW="$sub_window" SUB_IP_COUNT="$sub_ip_count" SUB_REGION_COUNT="$sub_region_count" \
-  SUB_CITY_COUNT="$sub_city_count" SUB_ASN_COUNT="$sub_asn_count" TRAVEL_DISTANCE="$travel_distance" TRAVEL_SPEED="$travel_speed" \
+  SUB_CITY_COUNT="$sub_city_count" SUB_ASN_COUNT="$sub_asn_count" SUB_DEVICE_COUNT="$sub_device_count" \
+  SUB_SHARED_SOURCE_COUNT="$sub_shared_source_count" \
+  TRAVEL_DISTANCE="$travel_distance" TRAVEL_SPEED="$travel_speed" \
   python3 - "$CONFIG_FILE" <<'PY'
 import json
 import os
 import sys
 from pathlib import Path
+
+path = Path(sys.argv[1])
+existing = {}
+try:
+    with path.open(encoding="utf-8") as handle:
+        existing = json.load(handle)
+except (OSError, ValueError, json.JSONDecodeError):
+    existing = {}
+existing_ai = existing.get("openai_review", {})
+if not isinstance(existing_ai, dict):
+    existing_ai = {}
+providers = existing_ai.get("providers", {})
+if not isinstance(providers, dict):
+    providers = {}
+providers = dict(providers)
+active_provider = str(existing_ai.get("active_provider", ""))
+if not providers and existing_ai.get("model"):
+    providers["legacy"] = {
+        "display_name": "Legacy OpenAI",
+        "base_url": str(existing_ai.get("base_url", "https://api.openai.com/v1")),
+        "api_mode": str(existing_ai.get("api_mode", "responses")),
+        "api_key_file": str(existing_ai.get("api_key_file", "/etc/vps-audit/openai.key")),
+        "model": str(existing_ai["model"]),
+        "timeout_seconds": int(existing_ai.get("timeout_seconds", 60)),
+    }
+    active_provider = "legacy"
+new_provider_id = os.environ["AI_PROVIDER_ID"]
+if new_provider_id:
+    providers[new_provider_id] = {
+        "display_name": os.environ["AI_DISPLAY_NAME"],
+        "base_url": os.environ["AI_BASE_URL"],
+        "api_mode": os.environ["AI_API_MODE"],
+        "api_key_file": os.environ["AI_KEY_FILE"],
+        "model": os.environ["AI_MODEL"],
+        "timeout_seconds": int(os.environ["AI_TIMEOUT"]),
+    }
+    active_provider = new_provider_id
 
 config = {
     "auth_logs": [os.environ["AUTH_LOG"]] if os.environ["AUTH_LOG"] else [],
@@ -1208,6 +1306,8 @@ config = {
             "subscription_region_count": int(os.environ["SUB_REGION_COUNT"]),
             "subscription_city_count": int(os.environ["SUB_CITY_COUNT"]),
             "subscription_asn_count": int(os.environ["SUB_ASN_COUNT"]),
+            "subscription_device_count": int(os.environ["SUB_DEVICE_COUNT"]),
+            "subscription_shared_source_user_count": int(os.environ["SUB_SHARED_SOURCE_COUNT"]),
             "impossible_travel_min_km": int(os.environ["TRAVEL_DISTANCE"]),
             "impossible_travel_kmh": int(os.environ["TRAVEL_SPEED"]),
         }
@@ -1229,11 +1329,10 @@ config = {
     },
     "openai_review": {
         "enabled": os.environ["AI_ENABLED"] == "true",
-        "api_key_file": "/etc/vps-audit/openai.key",
-        "model": os.environ["AI_MODEL"],
+        "active_provider": active_provider,
+        "providers": providers,
     },
 }
-path = Path(sys.argv[1])
 temporary = path.with_name(path.name + f".tmp.{os.getpid()}")
 with temporary.open("w", encoding="utf-8") as handle:
     json.dump(config, handle, ensure_ascii=False, indent=2)
@@ -1306,6 +1405,15 @@ configure_bot_service() {
   fi
 }
 
+test_ai_if_requested() {
+  if [[ "$AI_TEST_REQUESTED" == "true" ]]; then
+    echo
+    echo "测试当前 AI 供应商、模型与结构化输出..."
+    "$INSTALL_ROOT/venv/bin/vps-audit-runner" --config "$CONFIG_FILE" test-ai \
+      || die "AI 模型测试失败；可修正配置或使用 install.sh rollback 恢复"
+  fi
+}
+
 run_initial_audit_and_enable_timer() {
   echo
   echo "执行首次巡查..."
@@ -1326,6 +1434,7 @@ install_app() {
   INTERVAL="5"
   write_runtime_config
   install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR"
+  test_ai_if_requested
   run_initial_audit_and_enable_timer
   install_cli_shortcut
   configure_bot_service
@@ -1350,6 +1459,7 @@ configure_app() {
   INTERVAL="5"
   write_runtime_config
   install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR"
+  test_ai_if_requested
   run_initial_audit_and_enable_timer
   install_cli_shortcut
   configure_bot_service

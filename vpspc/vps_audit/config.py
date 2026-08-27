@@ -24,6 +24,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "subscription_region_count": 3,
         "subscription_city_count": 5,
         "subscription_asn_count": 4,
+        "subscription_device_count": 6,
+        "subscription_shared_source_user_count": 8,
     },
     "automation_indicators": {
         "browser_automation": [

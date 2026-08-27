@@ -7,6 +7,7 @@ from vps_audit.ai_review import _redact_for_ai
 from vps_audit.analyzer import analyze
 from vps_audit.config import load_config
 from vps_audit.io import read_events
+from vps_audit.report import render_markdown
 from vps_audit.ssh_parser import parse_auth_log, parse_sshd_message
 
 
@@ -93,6 +94,7 @@ class AnalyzerTests(unittest.TestCase):
                 "region": region,
                 "city": city,
                 "asn": 64510 + (index % 4),
+                "device_id": f"device-{index + 1}",
             })
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "subscription.jsonl"
@@ -102,7 +104,50 @@ class AnalyzerTests(unittest.TestCase):
         self.assertIn("SUB_ACTIVE_IPS", rule_ids)
         self.assertIn("SUB_MULTI_REGION", rule_ids)
         self.assertIn("SUB_MULTI_ASN", rule_ids)
+        self.assertIn("SUB_MULTI_DEVICE", rule_ids)
         self.assertEqual(report["users"][0]["severity"], "critical")
+
+    def test_shared_subscription_fetch_source_is_coverage_warning_only(self):
+        rows = [
+            {
+                "timestamp": f"2026-08-26T01:{index:02d}:00Z",
+                "event_type": "subscription_access",
+                "user": f"subscriber-{index}",
+                "source_ip": "198.51.100.88",
+                "user_agent": "Sub-Store",
+            }
+            for index in range(8)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "subscription.jsonl"
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+            report = analyze(read_events([str(path)]), load_config())
+
+        self.assertEqual(report["summary"]["flagged_user_count"], 0)
+        self.assertEqual(report["summary"]["finding_count"], 0)
+        self.assertEqual(
+            [item["rule_id"] for item in report["coverage_warnings"]],
+            ["SUB_SHARED_FETCH_SOURCE"],
+        )
+        self.assertIn("不能据此还原终端 IP", report["coverage_warnings"][0]["summary"])
+        self.assertIn("## 观测范围警告", render_markdown(report))
+
+    def test_shared_subscription_fetch_source_below_threshold_is_quiet(self):
+        rows = [
+            {
+                "timestamp": f"2026-08-26T01:0{index}:00Z",
+                "event_type": "subscription_access",
+                "user": f"subscriber-{index}",
+                "source_ip": "198.51.100.88",
+            }
+            for index in range(7)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "subscription.jsonl"
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+            report = analyze(read_events([str(path)]), load_config())
+
+        self.assertEqual(report["coverage_warnings"], [])
 
 
 if __name__ == "__main__":

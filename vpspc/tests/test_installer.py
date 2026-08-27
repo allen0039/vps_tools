@@ -397,6 +397,20 @@ class InstallerTests(unittest.TestCase):
                             "users": ["alice", "bob"],
                         },
                         "geoip": {"city_db": "/nonexistent", "asn_db": "/nonexistent"},
+                        "openai_review": {
+                            "enabled": True,
+                            "active_provider": "vendor",
+                            "providers": {
+                                "vendor": {
+                                    "display_name": "Vendor",
+                                    "base_url": "https://vendor.example/v1",
+                                    "api_mode": "chat_completions",
+                                    "api_key_file": str(config_dir / "ai-providers" / "vendor.key"),
+                                    "model": "vendor-model",
+                                    "timeout_seconds": 25,
+                                }
+                            },
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -413,6 +427,10 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(written["retention_days"], 21)
             self.assertEqual(written["subscription_monitoring"]["mode"], "allowlist")
             self.assertEqual(written["subscription_monitoring"]["users"], ["alice", "bob"])
+            self.assertEqual(written["openai_review"]["active_provider"], "vendor")
+            self.assertEqual(
+                written["openai_review"]["providers"]["vendor"]["model"], "vendor-model"
+            )
             self.assertTrue((state_dir / ".vps-audit-managed").is_file())
             self.assertTrue((report_dir / ".vps-audit-managed").is_file())
 
@@ -687,11 +705,15 @@ class InstallerTests(unittest.TestCase):
             systemd_dir.mkdir()
             config = config_dir / "config.json"
             token = config_dir / "telegram.token"
+            ai_keys = config_dir / "ai-providers"
+            ai_keys.mkdir()
+            first_ai_key = ai_keys / "first.key"
             service = systemd_dir / "vps-audit.service"
             timer = systemd_dir / "vps-audit.timer"
             bot_service = systemd_dir / "vps-audit-bot.service"
             config.write_text('{"retention_days": 7}\n', encoding="utf-8")
             token.write_text("old-token\n", encoding="utf-8")
+            first_ai_key.write_text("old-ai-key\n", encoding="utf-8")
             service.write_text("old-service\n", encoding="utf-8")
             timer.write_text("old-timer\n", encoding="utf-8")
             bot_service.write_text("old-bot-service\n", encoding="utf-8")
@@ -715,6 +737,8 @@ class InstallerTests(unittest.TestCase):
             config.write_text('{"retention_days": 30}\n', encoding="utf-8")
             token.write_text("new-token\n", encoding="utf-8")
             (config_dir / "openai.key").write_text("new-key\n", encoding="utf-8")
+            first_ai_key.write_text("changed-ai-key\n", encoding="utf-8")
+            (ai_keys / "second.key").write_text("new-provider-key\n", encoding="utf-8")
             service.write_text("new-service\n", encoding="utf-8")
             timer.write_text("new-timer\n", encoding="utf-8")
             bot_service.write_text("new-bot-service\n", encoding="utf-8")
@@ -723,6 +747,8 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(config.read_text(encoding="utf-8"), '{"retention_days": 7}\n')
             self.assertEqual(token.read_text(encoding="utf-8"), "old-token\n")
             self.assertFalse((config_dir / "openai.key").exists())
+            self.assertEqual(first_ai_key.read_text(encoding="utf-8"), "old-ai-key\n")
+            self.assertFalse((ai_keys / "second.key").exists())
             self.assertEqual(service.read_text(encoding="utf-8"), "old-service\n")
             self.assertEqual(timer.read_text(encoding="utf-8"), "old-timer\n")
             self.assertEqual(bot_service.read_text(encoding="utf-8"), "old-bot-service\n")
