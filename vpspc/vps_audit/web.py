@@ -49,12 +49,16 @@ def create_handler(config_path: str):
             if not isinstance(value,dict): raise ValueError('request body must be an object')
             return value
         def do_GET(self)->None:
-            if not self._authorized(): self._send(401,{'error':'unauthorized'});return
             path=urlsplit(self.path).path.rstrip('/') or '/'
+            # The shell page is non-sensitive and must load before its JS can
+            # prompt for the token; all data APIs remain authenticated.
+            if path == '/':
+                self._send(200, PAGE, 'text/html')
+                return
+            if not self._authorized(): self._send(401,{'error':'unauthorized'});return
             try:
                 current=load_runtime_config(config_path)
-                if path=='/': self._send(200,PAGE,'text/html')
-                elif path=='/api/health': self._send(200,health(config_path))
+                if path=='/api/health': self._send(200,health(config_path))
                 elif path=='/api/report':
                     report_path=Path(current['report_dir'])/'latest.json';self._send(200,json.loads(report_path.read_text(encoding='utf-8')) if report_path.exists() else {})
                 elif path=='/api/incidents': self._send(200,list_incidents(Path(current['behavior_audit']['archive_dir']),100))

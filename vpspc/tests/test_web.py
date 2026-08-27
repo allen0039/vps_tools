@@ -30,6 +30,10 @@ class WebTests(unittest.TestCase):
             thread.start()
             try:
                 connection = HTTPConnection(*server.server_address, timeout=3)
+                connection.request("GET", "/")
+                self.assertEqual(connection.getresponse().status, 200)
+                connection.close()
+                connection = HTTPConnection(*server.server_address, timeout=3)
                 connection.request("GET", "/api/report")
                 self.assertEqual(connection.getresponse().status, 401)
                 connection.close()
