@@ -117,7 +117,7 @@ def _post_json(provider: Dict[str, Any], api_key: str, payload: Dict[str, Any]) 
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            "User-Agent": "vps-user-audit/0.5.0",
+            "User-Agent": "vps-user-audit/0.5.1",
         },
         method="POST",
     )

@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vps_audit.management import (
+    _active_ips_menu,
     _configure_ai_provider,
     _threshold_menu,
     _users_menu,
@@ -80,6 +81,23 @@ class ManagementTests(unittest.TestCase):
             key_path = Path(provider["api_key_file"])
             self.assertEqual(key_path.read_text(encoding="utf-8").strip(), "api-secret")
             self.assertEqual(key_path.stat().st_mode & 0o777, 0o600)
+
+    def test_local_active_ip_menu_selects_added_user(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._config(Path(temporary))
+            with patch("builtins.input", side_effect=["3", "alice", "0"]):
+                _users_menu(str(path))
+            result = {
+                "user": "alice",
+                "window_minutes": 15,
+                "ip_count": 0,
+                "ips": [],
+            }
+            with patch("builtins.input", side_effect=["1", "", "0"]), patch(
+                "vps_audit.management.query_active_subscription_ips", return_value=result
+            ) as query:
+                _active_ips_menu(str(path))
+            self.assertEqual(query.call_args.args[1], "alice")
 
 
 if __name__ == "__main__":

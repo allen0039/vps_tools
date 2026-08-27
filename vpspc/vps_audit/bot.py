@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from .activity import query_active_subscription_ips, render_active_ip_query
 from .runtime import (
     _atomic_json,
     _read_secret,
@@ -48,6 +49,7 @@ def _button(text: str, data: str) -> Dict[str, str]:
 def _main_keyboard() -> Dict[str, Any]:
     return {"inline_keyboard": [
         [_button("📊 状态", "menu:status"), _button("👥 订阅用户", "menu:users")],
+        [_button("🌐 查询重点用户活跃 IP", "activeips:0")],
         [_button("⚙️ 检测参数", "menu:thresholds"), _button("🔔 推送参数", "menu:telegram")],
         [_button("🤖 AI 复核", "menu:ai")],
         [_button("▶️ 立即巡查", "menu:run"), _button("❓ 帮助", "menu:help")],
@@ -59,6 +61,7 @@ def _users_keyboard() -> Dict[str, Any]:
         [_button("监测全部用户", "mode:all"), _button("仅重点名单", "mode:allowlist")],
         [_button("启用/暂停订阅监测", "toggle:subscription_enabled")],
         [_button("🔎 从日志发现并点选", "discover:0")],
+        [_button("🌐 查询重点用户活跃 IP", "activeips:0")],
         [_button("➕ 添加用户", "prompt:adduser"), _button("➖ 删除用户", "prompt:deluser")],
         [_button("⬅️ 主菜单", "menu:main")],
     ]}
@@ -158,6 +161,58 @@ def _safe_button_label(user: str, selected: bool) -> str:
     return ("✅ " if selected else "➕ ") + clean
 
 
+def _plain_user_label(user: str) -> str:
+    clean = "".join(char if ord(char) >= 32 else "?" for char in user)
+    return clean if len(clean) <= 44 else clean[:41] + "..."
+
+
+def _active_ip_selection_view(config: Dict[str, Any], page: int) -> Tuple[str, Dict[str, Any]]:
+    users = list(config["subscription_monitoring"]["users"])
+    if not users:
+        return (
+            "重点用户名单为空，请先添加用户后再查询活跃 IP。",
+            {"inline_keyboard": [[_button("⬅️ 用户管理", "menu:users")]]},
+        )
+    page_count = max(1, (len(users) + DISCOVERY_PAGE_SIZE - 1) // DISCOVERY_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+    start = page * DISCOVERY_PAGE_SIZE
+    rows = [
+        [_button(_plain_user_label(user), f"activeips:user:{_user_token(user)}:{page}")]
+        for user in users[start : start + DISCOVERY_PAGE_SIZE]
+    ]
+    navigation: List[Dict[str, str]] = []
+    if page > 0:
+        navigation.append(_button("⬅️ 上一页", f"activeips:{page - 1}"))
+    if page + 1 < page_count:
+        navigation.append(_button("下一页 ➡️", f"activeips:{page + 1}"))
+    if navigation:
+        rows.append(navigation)
+    rows.append([_button("⬅️ 用户管理", "menu:users")])
+    window = config["rules"]["thresholds"]["subscription_window_minutes"]
+    return (
+        f"请选择要查询的重点用户（第 {page + 1}/{page_count} 页）。\n"
+        f"“活跃”表示最近 {window} 分钟内出现过订阅访问，并非严格同时在线。",
+        {"inline_keyboard": rows},
+    )
+
+
+def _active_ip_result(config: Dict[str, Any], user: str, page: int = 0) -> Tuple[str, Dict[str, Any]]:
+    if user not in config["subscription_monitoring"]["users"]:
+        raise ValueError("只能快捷查询已经添加的重点用户")
+    result = query_active_subscription_ips(config, user)
+    text = render_active_ip_query(
+        result,
+        include_source_ip=bool(config["telegram"].get("include_source_ip")),
+        max_items=20,
+    )
+    keyboard = {"inline_keyboard": [
+        [_button("🔄 刷新", f"activeips:user:{_user_token(user)}:{page}")],
+        [_button("⬅️ 选择其他用户", f"activeips:{page}")],
+        [_button("⬅️ 主菜单", "menu:main")],
+    ]}
+    return text[:3900], keyboard
+
+
 def _discovery_view(config: Dict[str, Any], page: int) -> Tuple[str, Dict[str, Any]]:
     users = _discovered_users(config)
     if not users:
@@ -249,6 +304,7 @@ def _help_text() -> str:
         "/status - 查看状态\n"
         "/users - 查看监测名单\n"
         "/discover - 从本地日志点选用户\n"
+        "/ips [用户名] - 查询已添加用户的活跃 IP 与位置\n"
         "/mode all|allowlist - 全部用户或重点名单\n"
         "/monitor on|off - 启用或暂停订阅监测\n"
         "/adduser <用户名或订阅ID>\n"
@@ -336,7 +392,7 @@ def _apply_pending(config_path: str, pending: Dict[str, Any], sender_id: int, te
 
 
 def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any]) -> Tuple[str, Dict[str, Any] | None]:
-    if not value.startswith("/") and not value.startswith(("menu:", "mode:", "prompt:", "toggle:", "discover:", "ai:")):
+    if not value.startswith("/") and not value.startswith(("menu:", "mode:", "prompt:", "toggle:", "discover:", "activeips:", "ai:")):
         result = _apply_pending(config_path, pending, sender_id, value)
         if result:
             return result, _main_keyboard()
@@ -351,6 +407,10 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
         return _monitoring_text(config), _users_keyboard()
     if command == "/discover":
         return _discovery_view(config, 0)
+    if command in {"/ips", "/activeips"}:
+        if not arguments:
+            return _active_ip_selection_view(config, 0)
+        return _active_ip_result(config, " ".join(arguments))
     if command in {"/thresholds", "menu:thresholds"}:
         return _threshold_text(config), _threshold_keyboard()
     if command == "menu:telegram":
@@ -449,6 +509,27 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
     if command.startswith("ai:use:"):
         config = set_active_ai_provider(config_path, command.split(":", 2)[2])
         return "AI 供应商已切换。\n\n" + _ai_text(config), _ai_keyboard(config)
+    if command.startswith("activeips:"):
+        parts = command.split(":")
+        if len(parts) == 2:
+            try:
+                page = int(parts[1])
+            except ValueError as exc:
+                raise ValueError("无效的活跃 IP 查询页码") from exc
+            return _active_ip_selection_view(config, page)
+        if len(parts) == 4 and parts[1] == "user":
+            token = parts[2]
+            try:
+                page = int(parts[3])
+            except ValueError as exc:
+                raise ValueError("无效的活跃 IP 查询页码") from exc
+            matches = [
+                user for user in config["subscription_monitoring"]["users"]
+                if _user_token(user) == token
+            ]
+            if len(matches) != 1:
+                raise ValueError("重点用户名单已变化，请重新选择")
+            return _active_ip_result(config, matches[0], page)
     if command.startswith("discover:"):
         parts = command.split(":")
         if len(parts) == 2:

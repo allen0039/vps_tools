@@ -163,6 +163,50 @@ class BotTests(unittest.TestCase):
             ]
             self.assertIn("ai:use:first", callback_values)
 
+    def test_active_ip_query_selects_added_user_and_masks_ip(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._config(Path(temporary))
+            _handle(str(path), 12345, "/adduser alice", {})
+            response, keyboard = _handle(str(path), 12345, "activeips:0", {})
+            self.assertIn("请选择", response)
+            callback = next(
+                button["callback_data"]
+                for row in keyboard["inline_keyboard"]
+                for button in row
+                if button["callback_data"].startswith("activeips:user:")
+            )
+            with patch(
+                "vps_audit.bot.query_active_subscription_ips",
+                return_value={
+                    "user": "alice",
+                    "window_minutes": 15,
+                    "ip_count": 1,
+                    "ips": [{
+                        "source_ip": "198.51.100.9",
+                        "country": "CN",
+                        "region": "Guangdong",
+                        "city": "Guangzhou",
+                        "last_seen": "2026-08-27T01:29:00Z",
+                        "access_count": 1,
+                        "device_count": 0,
+                    }],
+                },
+            ):
+                response, keyboard = _handle(str(path), 12345, callback, {})
+            self.assertIn("活跃 IP：1 个", response)
+            self.assertIn("198.51.*.*", response)
+            self.assertNotIn("198.51.100.9", response)
+            self.assertTrue(any(
+                button["callback_data"].startswith("activeips:user:")
+                for row in keyboard["inline_keyboard"] for button in row
+            ))
+
+    def test_active_ip_command_rejects_user_not_in_focus_list(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._config(Path(temporary))
+            with self.assertRaisesRegex(ValueError, "已经添加"):
+                _handle(str(path), 12345, "/ips outsider", {})
+
 
 if __name__ == "__main__":
     unittest.main()

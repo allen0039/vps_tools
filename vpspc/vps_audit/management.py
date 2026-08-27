@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
+from .activity import query_active_subscription_ips, render_active_ip_query
 from .runtime import health, load_runtime_config, test_configured_ai_provider
 from .settings import (
     THRESHOLD_SPECS,
@@ -78,6 +79,7 @@ def _users_menu(config_path: str) -> None:
         print("3. 添加重点用户")
         print("4. 删除重点用户")
         print("5. 启用 / 暂停订阅监测")
+        print("6. 查询重点用户活跃 IP")
         print("0. 返回")
         choice = _ask("请选择", "0")
         if choice == "0":
@@ -94,8 +96,39 @@ def _users_menu(config_path: str) -> None:
             remove_monitored_user(config_path, _ask("要删除的用户名或订阅 ID"))
         elif choice == "5":
             set_subscription_monitoring_enabled(config_path, not monitoring["enabled"])
+        elif choice == "6":
+            _active_ips_menu(config_path)
         else:
             print("无效选择。")
+
+
+def _active_ips_menu(config_path: str) -> None:
+    while True:
+        config = load_runtime_config(config_path)
+        users = list(config["subscription_monitoring"]["users"])
+        window = config["rules"]["thresholds"]["subscription_window_minutes"]
+        print("\n重点用户活跃 IP 查询")
+        print(f"统计口径：最近 {window} 分钟订阅访问；不是严格 TCP/节点同时在线数。")
+        if not users:
+            print("重点用户名单为空，请先添加用户。")
+            _pause()
+            return
+        for index, user in enumerate(users, 1):
+            print(f"  {index}. {user}")
+        print("0. 返回")
+        raw = _ask("请选择用户", "0")
+        if raw == "0":
+            return
+        try:
+            selected = int(raw)
+            if not 1 <= selected <= len(users):
+                raise ValueError
+        except ValueError:
+            print("无效选择。")
+            continue
+        result = query_active_subscription_ips(config, users[selected - 1])
+        print("\n" + render_active_ip_query(result, include_source_ip=True, max_items=100))
+        _pause()
 
 
 def _threshold_menu(config_path: str) -> None:
@@ -286,12 +319,13 @@ def interactive_menu(config_path: str, installer: str) -> None:
         print("1. 查看运行状态")
         print("2. 立即巡查")
         print("3. 多订阅用户管理")
-        print("4. 检测阈值管理")
-        print("5. Telegram 参数管理")
-        print("6. AI 供应商与模型")
-        print("7. 完整重新配置")
-        print("8. 回滚上一次配置")
-        print("9. 卸载 / 彻底清理")
+        print("4. 查询重点用户活跃 IP")
+        print("5. 检测阈值管理")
+        print("6. Telegram 参数管理")
+        print("7. AI 供应商与模型")
+        print("8. 完整重新配置")
+        print("9. 回滚上一次配置")
+        print("10. 卸载 / 彻底清理")
         print("0. 退出")
         choice = _ask("请选择", "0")
         try:
@@ -306,17 +340,19 @@ def interactive_menu(config_path: str, installer: str) -> None:
             elif choice == "3":
                 _users_menu(config_path)
             elif choice == "4":
-                _threshold_menu(config_path)
+                _active_ips_menu(config_path)
             elif choice == "5":
-                _telegram_menu(config_path)
+                _threshold_menu(config_path)
             elif choice == "6":
-                _ai_menu(config_path)
+                _telegram_menu(config_path)
             elif choice == "7":
-                _run_installer(installer, "configure")
+                _ai_menu(config_path)
             elif choice == "8":
+                _run_installer(installer, "configure")
+            elif choice == "9":
                 if _ask("确认回滚上一次配置？输入 yes", "no").lower() == "yes":
                     _run_installer(installer, "rollback")
-            elif choice == "9":
+            elif choice == "10":
                 mode = _ask("输入 uninstall 保留数据，或 destroy 彻底清理", "uninstall").lower()
                 if mode == "destroy" and _ask("彻底清理不可恢复，输入 DESTROY 确认", "").upper() == "DESTROY":
                     _run_installer(installer, "destroy")
