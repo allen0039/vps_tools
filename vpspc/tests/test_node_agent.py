@@ -86,6 +86,38 @@ class NodeAgentTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["event_id"], "event_22222222")
 
+    def test_run_once_stores_dynamic_policy_in_state_without_rewriting_config(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            env = {"VPSPC_NODE_TEST_ROOT": temporary, "VPSPC_NODE_SKIP_SYSTEMCTL": "1"}
+            config = {
+                "controller_url": "https://monitor.example.com",
+                "node_id": "node_1234567890abcdef12345678",
+                "installation_id": "install_12345678",
+                "node_name": "edge",
+                "xray_logs": [],
+                "interval_minutes": 5,
+                "timeout_seconds": 30,
+                "agent_version": "test",
+                "behavior_audit_enabled": False,
+            }
+            with patch.dict(os.environ, env, clear=False), patch.object(
+                agent, "_authenticated_request", return_value={
+                    "ok": True,
+                    "accepted": 0,
+                    "behavior_audit": {"enabled": True},
+                }
+            ):
+                agent._write_installation(config, "private-node-key", 5)
+                config_path = Path(temporary) / "etc" / "vpspc-node" / "config.json"
+                original_config = config_path.read_bytes()
+                result = agent.run_once()
+
+            state_path = Path(temporary) / "var" / "lib" / "vpspc-node" / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["sent"], 0)
+            self.assertEqual(config_path.read_bytes(), original_config)
+            self.assertTrue(state["behavior_audit_enabled"])
+
     def test_fixed_remote_uninstall_acknowledges_then_purges_managed_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             env = {"VPSPC_NODE_TEST_ROOT": temporary, "VPSPC_NODE_SKIP_SYSTEMCTL": "1"}

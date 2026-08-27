@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 
-AGENT_VERSION = "0.1.0"
+AGENT_VERSION = "0.1.1"
 MARKER = "managed-by=vpspc-node"
 INSTALL_DIR = Path("/usr/local/lib/vpspc-node")
 AGENT_PATH = INSTALL_DIR / "vpspc-node.py"
@@ -440,6 +440,9 @@ def run_once() -> Dict[str, Any]:
     except OSError as exc:
         raise RuntimeError("节点密钥不可读") from exc
     state = _load_json(_rooted(STATE_PATH), {"files": {}})
+    behavior_audit_enabled = bool(
+        state.get("behavior_audit_enabled", config.get("behavior_audit_enabled"))
+    )
     new_events: List[Dict[str, Any]] = []
     parse_errors = 0
     for raw_path in config.get("xray_logs", []):
@@ -447,7 +450,7 @@ def run_once() -> Dict[str, Any]:
         for line in _read_incremental(path, state):
             event = parse_xray_access_line(line, str(path))
             if event:
-                if config.get("behavior_audit_enabled"):
+                if behavior_audit_enabled:
                     new_events.append(event)
                 else:
                     new_events.append(_connection_activity(event))
@@ -467,14 +470,13 @@ def run_once() -> Dict[str, Any]:
                 command = result["command"]
             policy = result.get("behavior_audit")
             if isinstance(policy, dict) and isinstance(policy.get("enabled"), bool):
-                config["behavior_audit_enabled"] = policy["enabled"]
+                state["behavior_audit_enabled"] = policy["enabled"]
             if not remaining:
                 break
     except RuntimeError:
         _write_spool(remaining)
         _atomic_json(_rooted(STATE_PATH), state)
         raise
-    _atomic_json(_rooted(CONFIG_PATH), config)
     _atomic_json(_rooted(STATE_PATH), state)
     _write_spool([])
     if isinstance(command, dict) and command.get("type") == "self_uninstall":
