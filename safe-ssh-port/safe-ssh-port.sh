@@ -833,6 +833,49 @@ install_netfilter_persistence() {
     log 'iptables-persistent 已安装。'
 }
 
+install_iptables_tools() {
+    debian_apt_supported || return 1
+    log '正在安装 iptables/iptables-nft 兼容工具。'
+    if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq; then
+        warn 'apt-get update 失败，将尝试使用现有软件包索引继续安装。'
+    fi
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y iptables; then
+        warn 'iptables 自动安装失败。'
+        return 1
+    fi
+    hash -r
+    if ! command -v iptables >/dev/null 2>&1 || ! iptables -S INPUT >/dev/null 2>&1; then
+        warn 'iptables 安装完成，但无法读取 IPv4 INPUT 规则。'
+        return 1
+    fi
+    if ! command -v ip6tables >/dev/null 2>&1 || ! ip6tables -S INPUT >/dev/null 2>&1; then
+        warn 'iptables 安装完成，但无法读取 IPv6 INPUT 规则。'
+        return 1
+    fi
+    log 'iptables/iptables-nft 已安装并可用。'
+}
+
+prepare_iptables_for_firewall_menu() {
+    if command -v iptables >/dev/null 2>&1; then
+        if ! iptables -S INPUT >/dev/null 2>&1; then
+            warn '已找到 iptables，但无法读取 INPUT 规则；将保留当前防火墙后端。'
+        fi
+        return 0
+    fi
+
+    warn '未检测到 iptables；原生 nftables 在防火墙菜单中只提供状态展示。'
+    if ! debian_apt_supported; then
+        warn '当前系统不支持通过 apt-get 自动安装 iptables，请使用发行版的包管理器手动安装。'
+        return 0
+    fi
+    if ! prompt_yes_no '是否现在安装 iptables/iptables-nft（推荐）？' yes; then
+        log '已跳过 iptables 安装，将继续使用当前防火墙后端。'
+        return 0
+    fi
+    install_iptables_tools ||
+        warn 'iptables 未能正常安装，将继续使用当前防火墙后端。'
+}
+
 persist_iptables_rules() {
     local warn_if_missing=${1:-yes}
     if ! command -v netfilter-persistent >/dev/null 2>&1; then
@@ -981,9 +1024,14 @@ detect_firewall_backend() {
 }
 
 protected_ssh_ports() {
+    local configured_ports
+    configured_ports=$(effective_ports 2>/dev/null || true)
     {
-        effective_ports || true
-        if [[ ${SSH_CONNECTION:-} =~ ^[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+([0-9]+)$ ]]; then
+        if [[ -n $configured_ports ]]; then
+            printf '%s\n' "$configured_ports"
+        elif [[ ${SSH_CONNECTION:-} =~ ^[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+([0-9]+)$ ]]; then
+            # sshd reload 后旧会话仍会记住原端口，不能把它误当成当前监听端口。
+            # 只在无法读取 sshd 有效配置时，才用会话端口作安全兜底。
             printf '%s\n' "${BASH_REMATCH[1]}"
         fi
     } | awk '$1 ~ /^[0-9]+$/ && $1 >= 1 && $1 <= 65535 { print $1 }' | sort -nu
@@ -1827,6 +1875,14 @@ iptables_remove_tagged_rule() {
     done
 }
 
+iptables_remove_lockdown_allow_rule() {
+    local command_name=$1 chain=$2 protocol=$3 port=$4
+    [[ $chain == "$FIREWALL_CHAIN" ]] || return 0
+    while "$command_name" -C "$chain" -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null; do
+        "$command_name" -D "$chain" -p "$protocol" --dport "$port" -j ACCEPT || return 1
+    done
+}
+
 iptables_apply_tagged_port() {
     local action=$1 port=$2 protocols=$3 command_name protocol chain verdict opposite failed=no
     for command_name in iptables ip6tables; do
@@ -1834,7 +1890,10 @@ iptables_apply_tagged_port() {
         chain=$(iptables_target_chain "$command_name")
         for protocol in $protocols; do
             if [[ $action == open ]]; then verdict=ACCEPT; opposite=DROP; else verdict=DROP; opposite=ACCEPT; fi
-            if ! iptables_remove_tagged_rule "$command_name" "$chain" "$protocol" "$port" "$opposite"; then
+            if [[ $action == close ]] &&
+               ! iptables_remove_lockdown_allow_rule "$command_name" "$chain" "$protocol" "$port"; then
+                failed=yes
+            elif ! iptables_remove_tagged_rule "$command_name" "$chain" "$protocol" "$port" "$opposite"; then
                 failed=yes
             elif ! "$command_name" -C "$chain" -p "$protocol" --dport "$port" -m comment --comment allentool-managed -j "$verdict" 2>/dev/null; then
                 "$command_name" -I "$chain" 1 -p "$protocol" --dport "$port" -m comment --comment allentool-managed -j "$verdict" || failed=yes
@@ -2078,6 +2137,7 @@ firewall_lockdown_interactive() {
 
 firewall_menu() {
     local choice
+    prepare_iptables_for_firewall_menu
     while true; do
         show_firewall_port_overview
         show_access_control_overview

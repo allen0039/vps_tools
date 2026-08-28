@@ -59,6 +59,8 @@ Debian/Ubuntu 缺少持久化工具时还会自动安装 `iptables-persistent` �
 iptables/iptables-nft 后端启用；国家网段通过 IPdeny HTTPS 同时下载并校验
 IPv4 和 IPv6 数据。脚本会拒绝拉黑当前 SSH 客户端，并在“仅允许指定国家”
 模式中保留当前 SSH 来源。
+进入防火墙菜单时如果 Debian/Ubuntu 未安装 `iptables`，脚本会询问是否
+安装 `iptables/iptables-nft` 兼容工具，并把安装设为默认推荐选项。
 防火墙规则直接修改，不再产生按时间命名的快照备份。原生自定义 nftables 只做
 状态展示，不会猜测表和链。
 云厂商安全组仍需在服务商控制台单独管理。

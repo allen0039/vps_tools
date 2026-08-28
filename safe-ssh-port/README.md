@@ -83,6 +83,12 @@ allentool
 sudo safe-ssh-port firewall
 ```
 
+进入防火墙菜单时，脚本会先检查 `iptables`。Debian/Ubuntu 系统如果
+未安装，会询问是否安装 `iptables/iptables-nft` 兼容工具，直接回车默认
+选择安装。跳过安装、安装失败，或当前发行版不支持 `apt-get` 时，仍会
+进入菜单并保留现有后端的可用功能。安装兼容工具不会删除或迁移已有的
+原生 nftables 规则。
+
 ## 修改 SSH 端口
 
 先在云厂商安全组放行计划使用的新端口，然后执行：
@@ -167,8 +173,12 @@ sudo safe-ssh-port switch 21919 --cloud-firewall-ready --enable-main-password
 
 开放或关闭指定端口时，可以选择 `TCP`、`UDP` 或 `TCP + UDP`。通常服务端口应按
 实际协议开放，默认推荐 TCP；只有确认应用同时使用两种协议时才选择同时开放。
-关闭 TCP 端口前，脚本会读取 `sshd -T` 的有效端口和当前 `SSH_CONNECTION`，拒绝
-关闭任何正在使用的 SSH 端口。若端口当前有非回环监听程序，还会再次询问。
+关闭 TCP 端口前，脚本会优先读取 `sshd -T` 的当前有效端口，拒绝关闭实际
+正在使用的 SSH 监听端口。只有无法读取 sshd 有效配置时，才使用当前
+`SSH_CONNECTION` 的服务器端口作安全兜底；因此 sshd reload 后仍存活的旧会话
+不会把已停止监听的旧端口误标为 SSH 保护端口。若端口当前有非回环监听
+程序，还会再次询问。关闭端口时如果 `ALLENTOOL_INPUT` 中存在入站保护模式
+以前产生的该端口保留规则，脚本会先删除历史放行，再写入明确关闭规则。
 
 状态页本身只读取信息。iptables 后端没有 `netfilter-persistent` 时，状态页会显示
 “安装并保存规则”和“返回”两个选择；只有明确选择安装才会改变系统。也可以从
