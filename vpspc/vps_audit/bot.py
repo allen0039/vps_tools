@@ -21,12 +21,15 @@ from .node_reporting import (
     request_registered_node_uninstall,
     revoke_registered_node,
 )
+from .maintenance.client import MaintenanceClient
+from .operations import OperationStore
 from .runtime import (
     _atomic_json,
     _read_secret,
     health,
     load_runtime_config,
     review_behavior_incident,
+    run_cycle,
     test_configured_ai_provider,
 )
 from .settings import (
@@ -54,13 +57,18 @@ from .telegram import (
 
 DISCOVERY_PAGE_SIZE = 8
 _DISCOVERY_CACHE: Dict[str, Any] = {}
+PENDING_TTL_SECONDS = 15 * 60
+
+
+def _container_mode() -> bool:
+    return os.environ.get("VPSPC_RUNTIME_MODE", "").lower() == "docker" or Path("/.dockerenv").exists()
 
 
 def _register_command_menu(token: str) -> None:
     try:
         set_my_commands(token)
         set_chat_menu_button(token)
-    except TelegramTransientError as exc:
+    except Exception as exc:
         print(f"vps-audit-bot: command menu registration deferred: {exc}", file=sys.stderr)
 
 
@@ -74,22 +82,27 @@ def _main_keyboard() -> Dict[str, Any]:
         [_button("🌐 查询重点用户活跃 IP", "activeips:0")],
         [_button("🧾 行为事件", "incident:list")],
         [_button("🖥️ 节点部署与管理", "menu:nodes")],
+        [_button("🔄 更新管理", "maint:menu"), _button("🧹 彻底卸载", "destroy:menu")],
         [_button("🌐 Web 管理台", "menu:web")],
         [_button("⚙️ 检测参数", "menu:thresholds"), _button("🔔 推送参数", "menu:telegram")],
         [_button("🤖 AI 复核", "menu:ai")],
-        [_button("▶️ 立即巡查", "menu:run"), _button("❓ 帮助", "menu:help")],
+        [_button("▶️ 立即巡查", "menu:run"), _button("🕒 最近任务", "menu:tasks")],
+        [_button("❓ 帮助", "menu:help")],
     ]}
 
 
 def _web_service_state() -> str:
+    if _container_mode():
+        return "由容器编排器管理"
     try:
         completed = subprocess.run(
             ["systemctl", "is-active", "vps-audit-web.service"],
             capture_output=True,
             text=True,
+            timeout=5,
             check=False,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return "无法查询"
     return (completed.stdout or "").strip() or "未运行"
 
@@ -147,14 +160,17 @@ def _nodes_text(config_path: str, config: Dict[str, Any] | None = None) -> str:
 
 
 def _service_state(unit: str) -> str:
+    if _container_mode():
+        return "由容器编排器管理"
     try:
         completed = subprocess.run(
             ["systemctl", "is-active", unit],
             capture_output=True,
             text=True,
+            timeout=5,
             check=False,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return "无法查询"
     return (completed.stdout or "").strip() or "未运行"
 
@@ -203,7 +219,15 @@ def _atomic_secret(path: Path, value: str) -> None:
 
 
 def _restart_web_service() -> None:
-    completed = subprocess.run(["systemctl", "restart", "vps-audit-web.service"], check=False)
+    if _container_mode():
+        raise RuntimeError("Docker 部署由 Compose 管理 Web 重启；Token 已即时生效，无需重启服务")
+    completed = subprocess.run(
+        ["systemctl", "restart", "vps-audit-web.service"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
     if completed.returncode:
         raise RuntimeError("Web 服务启动失败，请检查 journalctl -u vps-audit-web.service")
     if _web_service_state() != "active":
@@ -500,6 +524,8 @@ def _help_text() -> str:
         "/status - 查看状态\n"
         "/web - 管理 Web 服务与 Token\n"
         "/nodes - 管理节点并生成一键部署命令\n"
+        "/maintenance - 管理主控与在线节点更新\n"
+        "/destroy - 彻底卸载 VPSPC 受管资源\n"
         "/users - 查看监测名单\n"
         "/discover - 从本地日志点选用户\n"
         "/ips [用户名] - 查询已添加用户的活跃 IP 与位置\n"
@@ -543,6 +569,9 @@ def _authorized(config: Dict[str, Any], chat: Dict[str, Any], sender_id: int) ->
 
 
 def _run_audit(config_path: str) -> str:
+    if _container_mode():
+        run_cycle(config_path)
+        return "巡查已完成。\n\n" + _status_text(config_path)
     completed = subprocess.run(
         ["systemctl", "start", "vps-audit.service"],
         capture_output=True,
@@ -559,19 +588,37 @@ def _run_audit(config_path: str) -> str:
 def _answer_callback_safely(token: str, callback_id: str, text: str = "") -> None:
     try:
         answer_callback_query(token, callback_id, text)
-    except RuntimeError as exc:
+    except Exception as exc:
         print(f"vps-audit-bot: callback acknowledgement failed: {exc}", file=sys.stderr)
 
 
 def _send_error_safely(token: str, chat_id: str, text: str) -> None:
     try:
         send_message(token, chat_id, text)
-    except RuntimeError as exc:
+    except Exception as exc:
         print(f"vps-audit-bot: unable to send operation error: {exc}", file=sys.stderr)
 
 
-def _apply_pending(config_path: str, pending: Dict[str, Any], sender_id: int, text: str) -> str | None:
+def _set_pending(pending: Dict[str, Any], sender_id: int, value: Dict[str, Any]) -> None:
+    pending[str(sender_id)] = {**value, "created_at": time.time()}
+
+
+def _take_pending(pending: Dict[str, Any], sender_id: int) -> Dict[str, Any] | None:
     entry = pending.pop(str(sender_id), None)
+    if not isinstance(entry, dict):
+        return None
+    created_at = entry.get("created_at")
+    if created_at is not None:
+        try:
+            if time.time() - float(created_at) > PENDING_TTL_SECONDS:
+                return None
+        except (TypeError, ValueError):
+            return None
+    return entry
+
+
+def _apply_pending(config_path: str, pending: Dict[str, Any], sender_id: int, text: str) -> str | None:
+    entry = _take_pending(pending, sender_id)
     if not entry:
         return None
     action = entry.get("action")
@@ -601,11 +648,179 @@ def _apply_pending(config_path: str, pending: Dict[str, Any], sender_id: int, te
     if action == "incident_question":
         review = review_behavior_incident(config_path, str(entry["incident_id"]), text)
         return render_ai_review(review)
+    if action == "maintenance_destroy_code":
+        client = MaintenanceClient()
+        kind = str(entry["kind"])
+        if kind == "controller_destroy":
+            result = client.request(
+                "POST",
+                "/v1/confirm-controller-destroy",
+                {"confirmation_id": entry["confirmation_id"], "confirmation_code": text.strip()},
+            )
+        else:
+            result = client.request(
+                "POST",
+                "/v1/start",
+                {
+                    "action": kind,
+                    "channel": None,
+                    "version": None,
+                    "node_ids": list(entry.get("node_ids", [])),
+                    "actor": f"tg:{sender_id}",
+                    "confirmation_id": entry["confirmation_id"],
+                    "confirmation_code": text.strip(),
+                },
+            )
+        return "维护任务已提交。\n\n" + _maintenance_job_text(result.get("job"))
     raise ValueError("未知的待处理操作")
 
 
+def _maintenance_client() -> MaintenanceClient:
+    return MaintenanceClient()
+
+
+def _maintenance_job_text(job: Any) -> str:
+    if not isinstance(job, dict):
+        return "当前没有维护任务。"
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    nodes = result.get("nodes") if isinstance(result.get("nodes"), dict) else {}
+    complete = sum(1 for item in nodes.values() if isinstance(item, dict) and item.get("status") in {"success", "failed", "rolled_back", "expired", "cancelled", "safely_retained", "skipped"})
+    failures = [item for item in nodes.values() if isinstance(item, dict) and item.get("status") not in {"success", "skipped"}]
+    lines = [
+        "维护任务",
+        f"类型：{job.get('kind', '-')}",
+        f"状态：{job.get('status', '-')}",
+        f"节点进度：{complete}/{len(nodes)}，失败：{len(failures)}",
+    ]
+    for item in failures[:8]:
+        lines.append(
+            f"失败：{item.get('node_name', item.get('node_id', '-'))} | "
+            f"{item.get('from_version', 'unknown')} -> {item.get('target_version', result.get('target_version', '-'))} | "
+            f"{item.get('stage', item.get('status', '-'))}"
+        )
+    if job.get("status") == "awaiting_controller_confirmation":
+        lines.append("所有在线被控端已完成，仍需最后确认才会清理主控。")
+    if job.get("status") == "blocked_before_controller_destroy":
+        lines.append("存在未成功清理的被控端，主控已安全保留。")
+    return "\n".join(lines)[:3900]
+
+
+def _maintenance_keyboard(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    label = "检测到可用更新" if snapshot.get("update_available") else "检查更新"
+    preferences = snapshot.get("preferences") if isinstance(snapshot.get("preferences"), dict) else {}
+    toggle = "关闭每日版本检查" if preferences.get("version_check_enabled", True) else "开启每日版本检查"
+    return {"inline_keyboard": [
+        [_button(label, "maint:check")],
+        [_button("仅升级主控", "maint:controller")],
+        [_button("升级被控端", "maint:nodes")],
+        [_button("升级主控＋全部在线被控端", "maint:all")],
+        [_button(toggle, "maint:check:toggle")],
+        [_button("🕒 当前维护任务", "maint:job")],
+        [_button("🧹 彻底卸载", "destroy:menu")],
+        [_button("⬅️ 主菜单", "menu:main")],
+    ]}
+
+
+def _maintenance_text(snapshot: Dict[str, Any]) -> str:
+    catalog = snapshot.get("catalog") if isinstance(snapshot.get("catalog"), dict) else {}
+    stable = catalog.get("stable") if isinstance(catalog.get("stable"), dict) else None
+    edge = catalog.get("edge") if isinstance(catalog.get("edge"), dict) else None
+    return (
+        "更新管理\n"
+        f"主控当前版本：{snapshot.get('controller_version', '未知')}\n"
+        f"部署方式：{snapshot.get('deployment_mode', '未知')}\n"
+        f"最新稳定版：{stable.get('version') if stable else '尚未检查'}\n"
+        f"最新测试版：{edge.get('version') if edge else '尚未检查'}\n"
+        f"在线被控端：{snapshot.get('online_node_count', 0)}\n"
+        f"每日版本检查：{'开启' if snapshot.get('preferences', {}).get('version_check_enabled', True) else '关闭'}"
+    )
+
+
+def _maintenance_version_keyboard(snapshot: Dict[str, Any], action: str, page: int = 0) -> Dict[str, Any]:
+    catalog = snapshot.get("catalog") if isinstance(snapshot.get("catalog"), dict) else {}
+    releases = [item for item in catalog.get("releases", []) if isinstance(item, dict)]
+    rows: List[List[Dict[str, str]]] = [
+        [_button("稳定版", "maint:pick:stable")],
+        [_button("测试版", "maint:pick:edge")],
+    ]
+    if releases:
+        page_count = max(1, (len(releases) + DISCOVERY_PAGE_SIZE - 1) // DISCOVERY_PAGE_SIZE)
+        page = max(0, min(page, page_count - 1))
+        for item in releases[page * DISCOVERY_PAGE_SIZE : (page + 1) * DISCOVERY_PAGE_SIZE]:
+            version = str(item.get("version", ""))
+            if version:
+                rows.append([_button(f"指定 {version}", f"maint:pick:{version}")])
+        navigation: List[Dict[str, str]] = []
+        if page:
+            navigation.append(_button("⬅️", f"maint:releases:{page - 1}"))
+        if page + 1 < page_count:
+            navigation.append(_button("➡️", f"maint:releases:{page + 1}"))
+        if navigation:
+            rows.append(navigation)
+    rows.append([_button("⬅️ 更新管理", "maint:menu")])
+    return {"inline_keyboard": rows}
+
+
+def _maintenance_node_selection(
+    client: MaintenanceClient, pending: Dict[str, Any], sender_id: int
+) -> Tuple[str, Dict[str, Any]]:
+    entry = pending.get(str(sender_id))
+    if not isinstance(entry, dict) or entry.get("action") != "maintenance_nodes":
+        raise ValueError("节点选择已过期，请重新开始")
+    selected = set(entry.get("node_ids", []))
+    nodes = client.request("GET", "/v1/nodes").get("nodes", [])
+    rows: List[List[Dict[str, str]]] = []
+    online_count = 0
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("node_id", ""))
+        if not node_id or not node.get("online"):
+            continue
+        online_count += 1
+        label = str(node.get("name") or node_id)
+        if len(label) > 36:
+            label = label[:33] + "..."
+        rows.append([_button(("✅ " if node_id in selected else "☐ ") + label, f"maint:toggle:{node_id}")])
+    rows.append([_button("完成选择", "maint:nodes:done")])
+    rows.append([_button("⬅️ 取消", "maint:menu" if entry.get("kind") == "node_update" else "destroy:menu")])
+    return (
+        f"请选择在线被控端（已选 {len(selected)} / 在线 {online_count}）。\n"
+        "离线节点不会加入队列，也不会在以后上线时自动执行。",
+        {"inline_keyboard": rows},
+    )
+
+
+def _maintenance_confirm_view(pending: Dict[str, Any], sender_id: int, snapshot: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    entry = pending.get(str(sender_id))
+    if not isinstance(entry, dict) or entry.get("action") != "maintenance_update":
+        raise ValueError("更新选择已过期，请重新开始")
+    names = {str(item.get("node_id")): str(item.get("name") or item.get("node_id")) for item in snapshot.get("nodes", []) if isinstance(item, dict)}
+    selected = list(entry.get("node_ids", []))
+    target = "全部在线被控端" if entry.get("kind") == "all_update" else "、".join(names.get(item, item) for item in selected) or "主控"
+    return (
+        "升级确认\n"
+        f"目标：{target}\n"
+        f"版本：{entry.get('version')}\n"
+        f"部署方式：{snapshot.get('deployment_mode')}\n\n"
+        "相关 VPSPC 服务会短暂重启。失败的被控端会自动回滚，后续批次继续执行。",
+        {"inline_keyboard": [
+            [_button("确认升级", "maint:start"), _button("取消", "maint:menu")],
+        ]},
+    )
+
+
+def _destroy_keyboard() -> Dict[str, Any]:
+    return {"inline_keyboard": [
+        [_button("彻底卸载被控端", "destroy:nodes")],
+        [_button("彻底卸载主控＋被控端", "destroy:all")],
+        [_button("🕒 当前维护任务", "maint:job")],
+        [_button("⬅️ 主菜单", "menu:main")],
+    ]}
+
+
 def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any]) -> Tuple[str, Dict[str, Any] | None]:
-    if not value.startswith("/") and not value.startswith(("menu:", "mode:", "prompt:", "toggle:", "discover:", "activeips:", "ai:", "incident:", "web:", "node:")):
+    if not value.startswith("/") and not value.startswith(("menu:", "mode:", "prompt:", "toggle:", "discover:", "activeips:", "ai:", "incident:", "web:", "node:", "maint:", "destroy:")):
         result = _apply_pending(config_path, pending, sender_id, value)
         if result:
             return result, _main_keyboard()
@@ -620,6 +835,17 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
         return _monitoring_text(config), _users_keyboard()
     if command in {"/nodes", "menu:nodes"}:
         return _nodes_text(config_path, config), _nodes_keyboard(config_path)
+    if command in {"/maintenance", "maint:menu"}:
+        snapshot = _maintenance_client().request("GET", "/v1/status")["status"]
+        return _maintenance_text(snapshot), _maintenance_keyboard(snapshot)
+    if command in {"/destroy", "destroy:menu"}:
+        return (
+            "彻底卸载\n\n"
+            "只会清理 VPSPC 明确创建且归属标记匹配的程序、服务、配置、密钥、状态、缓存和日志。"
+            "不会修改 Xray、sing-box、V2Board、妙妙屋 X、xrayagent 或它们的日志。\n\n"
+            "在线被控端可选择指定节点或全部；整套清理任一节点失败时，主控会安全保留。",
+            _destroy_keyboard(),
+        )
     if command in {"/web", "menu:web"}:
         return _web_text(config), _web_keyboard()
     if command == "/discover":
@@ -652,6 +878,142 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
         return render_ai_review(review), _main_keyboard()
     if command in {"/help", "menu:help"}:
         return _help_text(), _main_keyboard()
+    if command == "maint:check":
+        snapshot = _maintenance_client().request("POST", "/v1/check", {})["catalog"]
+        return (
+            f"版本检查完成。\n稳定版：{(snapshot.get('stable') or {}).get('version', '无')}\n"
+            f"测试版：{(snapshot.get('edge') or {}).get('version', '无')}",
+            _maintenance_keyboard(_maintenance_client().request("GET", "/v1/status")["status"]),
+        )
+    if command == "maint:check:toggle":
+        snapshot = _maintenance_client().request("GET", "/v1/status")["status"]
+        enabled = not bool(snapshot.get("preferences", {}).get("version_check_enabled", True))
+        _maintenance_client().request("POST", "/v1/preferences", {"version_check_enabled": enabled})
+        snapshot = _maintenance_client().request("GET", "/v1/status")["status"]
+        return _maintenance_text(snapshot), _maintenance_keyboard(snapshot)
+    if command in {"maint:controller", "maint:all"}:
+        kind = "controller_update" if command == "maint:controller" else "all_update"
+        _set_pending(pending, sender_id, {"action": "maintenance_update", "kind": kind, "node_ids": []})
+        snapshot = _maintenance_client().request("GET", "/v1/status")["status"]
+        return "请选择更新通道或指定正式版本。", _maintenance_version_keyboard(snapshot, kind)
+    if command == "maint:nodes":
+        _set_pending(pending, sender_id, {"action": "maintenance_nodes", "kind": "node_update", "node_ids": []})
+        return _maintenance_node_selection(_maintenance_client(), pending, sender_id)
+    if command == "destroy:nodes":
+        _set_pending(pending, sender_id, {"action": "maintenance_nodes", "kind": "node_destroy", "node_ids": []})
+        return _maintenance_node_selection(_maintenance_client(), pending, sender_id)
+    if command == "destroy:all":
+        confirmation = _maintenance_client().request("POST", "/v1/confirmation", {"action": "full_destroy"})["confirmation"]
+        _set_pending(
+            pending,
+            sender_id,
+            {"action": "maintenance_destroy_code", "kind": "full_destroy", "node_ids": [], "confirmation_id": confirmation["id"]},
+        )
+        return (
+            "将先彻底清理所有当前在线被控端；任一失败会保留主控。\n"
+            f"确认码：{confirmation['code']}\n请发送这 6 位确认码继续。发送 /cancel 可取消。",
+            None,
+        )
+    if command == "destroy:final":
+        confirmation = _maintenance_client().request("POST", "/v1/confirmation", {"action": "controller_destroy"})["confirmation"]
+        _set_pending(
+            pending,
+            sender_id,
+            {"action": "maintenance_destroy_code", "kind": "controller_destroy", "confirmation_id": confirmation["id"]},
+        )
+        return (
+            "所有在线被控端已完成。确认后将开始清理主控，Telegram 与 Web 会离线。\n"
+            f"最终确认码：{confirmation['code']}\n请发送这 6 位确认码继续。发送 /cancel 可取消。",
+            None,
+        )
+    if command.startswith("maint:toggle:"):
+        node_id = command.split(":", 2)[2]
+        entry = pending.get(str(sender_id))
+        if not isinstance(entry, dict) or entry.get("action") != "maintenance_nodes":
+            raise ValueError("节点选择已过期，请重新开始")
+        nodes = _maintenance_client().request("GET", "/v1/nodes")["nodes"]
+        if node_id not in {str(item.get("node_id")) for item in nodes if isinstance(item, dict) and item.get("online")}:
+            raise ValueError("该节点当前离线或不存在，无法加入任务")
+        selected = set(entry.get("node_ids", []))
+        if node_id in selected:
+            selected.remove(node_id)
+        else:
+            selected.add(node_id)
+        entry["node_ids"] = sorted(selected)
+        entry["created_at"] = time.time()
+        return _maintenance_node_selection(_maintenance_client(), pending, sender_id)
+    if command == "maint:nodes:done":
+        entry = pending.get(str(sender_id))
+        if not isinstance(entry, dict) or entry.get("action") != "maintenance_nodes":
+            raise ValueError("节点选择已过期，请重新开始")
+        node_ids = list(entry.get("node_ids", []))
+        if not node_ids:
+            raise ValueError("请至少选择一台在线被控端")
+        if entry.get("kind") == "node_destroy":
+            confirmation = _maintenance_client().request("POST", "/v1/confirmation", {"action": "node_destroy"})["confirmation"]
+            _set_pending(
+                pending,
+                sender_id,
+                {"action": "maintenance_destroy_code", "kind": "node_destroy", "node_ids": node_ids, "confirmation_id": confirmation["id"]},
+            )
+            return (
+                "将彻底清理所选在线被控端的 VPSPC 探针、服务、配置、密钥、状态与日志。\n"
+                "不会修改节点自身的代理或其他第三方服务。\n"
+                f"确认码：{confirmation['code']}\n请发送这 6 位确认码继续。发送 /cancel 可取消。",
+                None,
+            )
+        entry["action"] = "maintenance_update"
+        entry["kind"] = "node_update"
+        entry["created_at"] = time.time()
+        snapshot = _maintenance_client().request("GET", "/v1/status")["status"]
+        return "请选择更新通道或指定正式版本。", _maintenance_version_keyboard(snapshot, "node_update")
+    if command.startswith("maint:releases:"):
+        entry = pending.get(str(sender_id))
+        if not isinstance(entry, dict) or entry.get("action") != "maintenance_update":
+            raise ValueError("更新选择已过期，请重新开始")
+        try:
+            page = int(command.rsplit(":", 1)[1])
+        except ValueError as exc:
+            raise ValueError("版本页码无效") from exc
+        snapshot = _maintenance_client().request("GET", "/v1/status")["status"]
+        return "请选择更新通道或指定正式版本。", _maintenance_version_keyboard(snapshot, str(entry.get("kind")), page)
+    if command.startswith("maint:pick:"):
+        entry = pending.get(str(sender_id))
+        if not isinstance(entry, dict) or entry.get("action") != "maintenance_update":
+            raise ValueError("更新选择已过期，请重新开始")
+        selected = command.split(":", 2)[2]
+        if selected == "stable":
+            entry["channel"], entry["version"] = "stable", None
+        elif selected == "edge":
+            entry["channel"], entry["version"] = "edge", None
+        else:
+            entry["channel"], entry["version"] = "stable", selected
+        entry["created_at"] = time.time()
+        snapshot = _maintenance_client().request("GET", "/v1/status")["status"]
+        return _maintenance_confirm_view(pending, sender_id, snapshot)
+    if command == "maint:start":
+        entry = _take_pending(pending, sender_id)
+        if not isinstance(entry, dict) or entry.get("action") != "maintenance_update":
+            raise ValueError("更新确认已过期，请重新开始")
+        response = _maintenance_client().request(
+            "POST",
+            "/v1/start",
+            {
+                "action": entry["kind"],
+                "channel": entry.get("channel"),
+                "version": entry.get("version"),
+                "node_ids": list(entry.get("node_ids", [])),
+                "actor": f"tg:{sender_id}",
+            },
+        )
+        return "维护任务已提交。\n\n" + _maintenance_job_text(response.get("job")), {"inline_keyboard": [[_button("刷新进度", "maint:job")], [_button("⬅️ 更新管理", "maint:menu")]]}
+    if command == "maint:job":
+        job = _maintenance_client().request("GET", "/v1/job").get("job")
+        rows: List[List[Dict[str, str]]] = [[_button("刷新进度", "maint:job")]]
+        if isinstance(job, dict) and job.get("status") == "awaiting_controller_confirmation":
+            rows.append([_button("确认彻底删除主控", "destroy:final")])
+        rows.append([_button("⬅️ 更新管理", "maint:menu")])
+        return _maintenance_job_text(job), {"inline_keyboard": rows}
     if command in {"/run", "menu:run"}:
         return _run_audit(config_path), _main_keyboard()
     if command.startswith("mode:"):
@@ -705,22 +1067,22 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
     if command.startswith("prompt:"):
         parts = command.split(":")
         if parts[1] in {"adduser", "deluser"}:
-            pending[str(sender_id)] = {"action": parts[1]}
+            _set_pending(pending, sender_id, {"action": parts[1]})
             action_text = "添加" if parts[1] == "adduser" else "删除"
             return f"请发送需要{action_text}的用户名或订阅 ID。发送 /cancel 可取消。", None
         if len(parts) == 3 and parts[1] == "node" and parts[2] in {"normal", "replace"}:
             if config["node_reporting"]["mode"] != "node_reporting":
                 raise ValueError("请先在主控执行完整重新配置并选择允许节点轻量上报")
-            pending[str(sender_id)] = {"action": "node_create", "replace": parts[2] == "replace"}
+            _set_pending(pending, sender_id, {"action": "node_create", "replace": parts[2] == "replace"})
             return "请发送 被控端 名称，例如：服务商+地区。发送 /cancel 可取消。", None
         if len(parts) == 3 and parts[1] in {"threshold", "telegram"}:
-            pending[str(sender_id)] = {"action": parts[1], "key": parts[2]}
+            _set_pending(pending, sender_id, {"action": parts[1], "key": parts[2]})
             return f"请发送 {parts[2]} 的新值。发送 /cancel 可取消。", None
         if parts[1:] == ["ai", "model"]:
             active = config["openai_review"]["active_provider"]
             if not active:
                 raise ValueError("请先在 VPS 本机配置 AI 供应商")
-            pending[str(sender_id)] = {"action": "ai_model", "provider_id": active}
+            _set_pending(pending, sender_id, {"action": "ai_model", "provider_id": active})
             return "请发送新的模型名称。发送 /cancel 可取消。", None
     if command == "/cancel":
         pending.pop(str(sender_id), None)
@@ -736,11 +1098,15 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
             raise ValueError("Web 管理台未启用，请先在 VPS 本机运行 vpspc 完整重新配置")
         token_path = Path(str(config["web"]["token_file"]))
         _atomic_secret(token_path, secrets.token_urlsafe(32))
+        if _container_mode():
+            return "Web Token 已重新生成并即时生效。请点击“查看 Web Token”获取新 Token。", _web_keyboard()
         _restart_web_service()
         return "Web Token 已重新生成，服务已重启。请点击“查看 Web Token”获取新 Token。", _web_keyboard()
     if command == "web:restart":
         if not config["web"]["enabled"]:
             raise ValueError("Web 管理台未启用，请先在 VPS 本机运行 vpspc 完整重新配置")
+        if _container_mode():
+            return "Docker 部署由 Compose 管理服务重启；当前 Web Token 已支持即时读取，无需重启。", _web_keyboard()
         _restart_web_service()
         config = load_runtime_config(config_path)
         return "Web 服务已重启并通过 active 检查。\n\n" + _web_text(config), _web_keyboard()
@@ -794,7 +1160,7 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
         load_incident(Path(str(config["behavior_audit"]["archive_dir"])), identifier)
         if not _incident_ai_available(config):
             raise ValueError("请先在 VPS 本机配置 AI 供应商")
-        pending[str(sender_id)] = {"action": "incident_question", "incident_id": identifier}
+        _set_pending(pending, sender_id, {"action": "incident_question", "incident_id": identifier})
         return f"请发送针对事件 {identifier} 的问题。发送 /cancel 可取消。", None
     if command.startswith("activeips:"):
         parts = command.split(":")
@@ -842,6 +1208,105 @@ def _handle(config_path: str, sender_id: int, value: str, pending: Dict[str, Any
     return "无法识别该操作。\n\n" + _help_text(), _main_keyboard()
 
 
+def _is_background_interaction(value: str, pending: Dict[str, Any], sender_id: int) -> bool:
+    """Return whether an interaction can block or change persistent state."""
+
+    # Maintenance uses several callback-only selection steps.  They must stay
+    # on the polling path so the selected channel/node IDs are atomically
+    # written to bot-state before the next callback arrives.  Only the final
+    # submission is slow enough to move into the durable worker.
+    entry = pending.get(str(sender_id))
+    if isinstance(entry, dict):
+        action = str(entry.get("action", ""))
+        if action in {"maintenance_update", "maintenance_nodes"}:
+            return value == "maint:start"
+        if not value.startswith("/"):
+            return True
+    command = value.split(maxsplit=1)[0].split("@", 1)[0].lower() if value else ""
+    if command in {
+        "/run", "menu:run", "/aitest", "ai:test", "/incidentai", "/ask",
+        "web:restart", "web:regenerate:yes", "toggle:include_source_ip",
+        "toggle:subscription_enabled", "ai:toggle", "/mode", "/monitor",
+        "/adduser", "/deluser", "/set", "/aiuse", "/aimodel", "/aion", "/aioff",
+        "/incidents", "incident:list", "maint:check",
+    }:
+        return True
+    if command.startswith(("incident:ai:", "discover:", "node:revoke:yes:", "node:uninstall:yes:", "node:delete:yes:")):
+        return True
+    if command.startswith("activeips:user:"):
+        return True
+    if command.startswith("mode:") or command.startswith("ai:use:"):
+        return True
+    if command in {"/ips", "/activeips"} and len(value.split(maxsplit=1)) == 2:
+        return True
+    return False
+
+
+def _operation_keyboard(job_id: str) -> Dict[str, Any]:
+    return {"inline_keyboard": [
+        [_button("🔄 刷新任务状态", f"job:status:{job_id}")],
+        [_button("⬅️ 主菜单", "menu:main")],
+    ]}
+
+
+def _operation_text(job: Dict[str, Any]) -> str:
+    labels = {"queued": "等待执行", "running": "正在执行", "success": "已完成", "failed": "执行失败", "cancelled": "已取消"}
+    text = [
+        "VPSPC 后台任务",
+        f"编号：{job.get('id', '-')}",
+        f"状态：{labels.get(str(job.get('status')), str(job.get('status', '-')))}",
+    ]
+    result = job.get("result")
+    if isinstance(result, dict) and result.get("text"):
+        text.extend(["", str(result["text"])])
+    return "\n".join(text)[:3900]
+
+
+def _deliver_operation_result(token: str, job: Dict[str, Any]) -> None:
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    text = str(result.get("text") or "任务已结束。")[:3900]
+    keyboard = result.get("keyboard") if isinstance(result.get("keyboard"), dict) else _main_keyboard()
+    try:
+        message_id = job.get("message_id")
+        if isinstance(message_id, int) and message_id > 0:
+            edit_message_text(token, str(job["chat_id"]), message_id, text, reply_markup=keyboard)
+        else:
+            send_message(token, str(job["chat_id"]), text, reply_markup=keyboard)
+    except Exception as exc:
+        print(f"vps-audit-bot: operation result delivery deferred: {exc}", file=sys.stderr)
+
+
+def _operation_worker(stop: threading.Event, store: OperationStore, config_path: str, token: str) -> None:
+    while not stop.is_set():
+        try:
+            job = store.claim_next()
+        except Exception as exc:
+            print(f"vps-audit-bot: operation queue unavailable: {exc}", file=sys.stderr)
+            stop.wait(1.0)
+            continue
+        if job is None:
+            stop.wait(0.2)
+            continue
+        started = time.monotonic()
+        pending = job.get("pending") if isinstance(job.get("pending"), dict) else {}
+        try:
+            response, keyboard = _handle(config_path, int(job["actor_id"]), str(job["value"]), pending)
+            completed = store.complete(job["id"], success=True, text=response, keyboard=keyboard or _main_keyboard())
+        except Exception as exc:
+            completed = store.complete(
+                job["id"],
+                success=False,
+                text=f"操作失败：{str(exc)[:500]}",
+                keyboard=_main_keyboard(),
+            )
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        print(
+            f"vps-audit-bot: operation {job['id']} {completed['status']} in {elapsed_ms}ms",
+            file=sys.stderr,
+        )
+        _deliver_operation_result(token, completed)
+
+
 def run_bot(config_path: str, once: bool = False) -> None:
     config = load_runtime_config(config_path)
     telegram = config["telegram"]
@@ -862,6 +1327,16 @@ def run_bot(config_path: str, once: bool = False) -> None:
         pending = {}
         state["pending"] = pending
     offset = state.get("offset")
+    store = OperationStore(Path(config["state_dir"]) / "bot-operations.json")
+    store.recover_running()
+    stop = threading.Event()
+    if not once:
+        threading.Thread(
+            target=_operation_worker,
+            args=(stop, store, config_path, token),
+            name="vps-audit-bot-worker",
+            daemon=True,
+        ).start()
     retry_delay = 1.0
     while True:
         config = load_runtime_config(config_path)
@@ -869,34 +1344,75 @@ def run_bot(config_path: str, once: bool = False) -> None:
         try:
             updates = get_updates(token, offset, int(telegram["poll_timeout_seconds"]))
             retry_delay = 1.0
-        except TelegramTransientError as exc:
-            print(f"vps-audit-bot: temporary Telegram polling error; retrying in {retry_delay:g}s: {exc}", file=sys.stderr)
+            state["last_poll_at"] = time.time()
+            _atomic_json(state_path, state)
+        except Exception as exc:
+            print(f"vps-audit-bot: Telegram polling error; retrying in {retry_delay:g}s: {str(exc)[:500]}", file=sys.stderr)
             time.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 30.0)
+            retry_delay = min(retry_delay * 2, 60.0)
             continue
         for update in updates:
-            update_id = int(update.get("update_id", 0))
-            offset = max(int(offset or 0), update_id + 1)
-            state["offset"] = offset
-            _atomic_json(state_path, state)
-            chat, sender_id, value, callback_id, message_id = _update_context(update)
-            if not _authorized(config, chat, sender_id):
-                if callback_id:
-                    _answer_callback_safely(token, callback_id, "无权操作")
-                elif str(chat.get("id", "")) == str(telegram.get("chat_id", "")):
-                    _send_error_safely(token, str(chat.get("id")), "该 Telegram 用户未被授权管理 VPSPC。")
-                _atomic_json(state_path, state)
-                continue
             try:
+                update_id = int(update.get("update_id", 0))
+                chat, sender_id, value, callback_id, message_id = _update_context(update)
+                if not _authorized(config, chat, sender_id):
+                    if callback_id:
+                        _answer_callback_safely(token, callback_id, "无权操作")
+                    elif str(chat.get("id", "")) == str(telegram.get("chat_id", "")):
+                        _send_error_safely(token, str(chat.get("id")), "该 Telegram 用户未被授权管理 VPSPC。")
+                    offset = max(int(offset or 0), update_id + 1)
+                    state["offset"] = offset
+                    _atomic_json(state_path, state)
+                    continue
                 if callback_id:
                     _answer_callback_safely(token, callback_id)
-                response, keyboard = _handle(config_path, sender_id, value, pending)
+                if value == "menu:tasks":
+                    job = store.latest(sender_id)
+                    response = _operation_text(job) if job else "当前没有待处理或最近完成的后台任务。"
+                    keyboard = _operation_keyboard(str(job["id"])) if job else _main_keyboard()
+                elif value.startswith("job:status:"):
+                    job = store.read(value.split(":", 2)[2])
+                    response = _operation_text(job) if job else "任务不存在或结果已自动清理。"
+                    keyboard = _operation_keyboard(str(job["id"])) if job else _main_keyboard()
+                elif _is_background_interaction(value, pending, sender_id):
+                    job_pending: Dict[str, Any] = {}
+                    entry = pending.pop(str(sender_id), None)
+                    if isinstance(entry, dict):
+                        entry = dict(entry)
+                        entry["created_at"] = time.time()
+                        job_pending[str(sender_id)] = entry
+                    job = store.enqueue(
+                        update_id=update_id,
+                        actor_id=sender_id,
+                        chat_id=str(chat["id"]),
+                        message_id=message_id if callback_id else None,
+                        value=value,
+                        pending=job_pending,
+                    )
+                    response = "任务已提交。\n\n" + _operation_text(job)
+                    keyboard = _operation_keyboard(str(job["id"]))
+                    offset = max(int(offset or 0), update_id + 1)
+                    state["offset"] = offset
+                    _atomic_json(state_path, state)
+                else:
+                    response, keyboard = _handle(config_path, sender_id, value, pending)
                 if callback_id and message_id is not None:
                     edit_message_text(token, str(chat["id"]), message_id, response, reply_markup=keyboard)
                 else:
                     send_message(token, str(chat["id"]), response, reply_markup=keyboard)
-            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
-                _send_error_safely(token, str(chat["id"]), f"操作失败：{str(exc)[:500]}")
+                offset = max(int(offset or 0), update_id + 1)
+                state["offset"] = offset
+            except Exception as exc:
+                chat_id = str(update.get("message", {}).get("chat", {}).get("id", ""))
+                if chat_id:
+                    _send_error_safely(token, chat_id, f"操作失败：{str(exc)[:500]}")
+                print(f"vps-audit-bot: update handling failed: {str(exc)[:500]}", file=sys.stderr)
+                try:
+                    update_id = int(update.get("update_id", 0))
+                    offset = max(int(offset or 0), update_id + 1)
+                    state["offset"] = offset
+                except (TypeError, ValueError):
+                    pass
             _atomic_json(state_path, state)
         if once:
             return

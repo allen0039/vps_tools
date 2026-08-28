@@ -1,3 +1,4 @@
+# managed-by=vpspc
 [Unit]
 Description=Run VPS user behavior audit every @INTERVAL@ minutes
 

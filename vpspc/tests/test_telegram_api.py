@@ -60,6 +60,16 @@ class TelegramApiTests(unittest.TestCase):
             with self.assertRaises(TelegramTransientError):
                 get_updates("secret-token", None, timeout=5)
 
+    def test_ipv4_handler_passes_only_supported_https_connection_arguments(self):
+        from vps_audit.telegram import _IPv4HTTPSHandler
+
+        handler = _IPv4HTTPSHandler()
+        request = object()
+        with patch.object(handler, "do_open", return_value="ok") as do_open:
+            self.assertEqual(handler.https_open(request), "ok")
+        self.assertEqual(do_open.call_args.args[1], request)
+        self.assertEqual(set(do_open.call_args.kwargs), {"context"})
+
     def test_edit_message_posts_message_id_and_keyboard(self):
         keyboard = {"inline_keyboard": [[{"text": "下一页", "callback_data": "discover:1"}]]}
         with patch(
@@ -86,6 +96,8 @@ class TelegramApiTests(unittest.TestCase):
         self.assertIn({"command": "vpspc", "description": "打开 VPSPC 管理菜单"}, first["commands"])
         self.assertIn({"command": "web", "description": "管理 Web 与 Token"}, first["commands"])
         self.assertIn({"command": "nodes", "description": "管理节点与部署命令"}, first["commands"])
+        self.assertIn({"command": "maintenance", "description": "管理主控与节点更新"}, first["commands"])
+        self.assertIn({"command": "destroy", "description": "彻底卸载 VPSPC"}, first["commands"])
         self.assertIn({"command": "incidents", "description": "查看行为事件"}, first["commands"])
         self.assertIn({"command": "adduser", "description": "添加重点用户"}, first["commands"])
         self.assertEqual(second["menu_button"], {"type": "commands"})

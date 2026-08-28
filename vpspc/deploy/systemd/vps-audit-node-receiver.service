@@ -1,3 +1,4 @@
+# managed-by=vpspc
 [Unit]
 Description=VPSPC authenticated node event receiver
 After=network-online.target
@@ -17,7 +18,7 @@ PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
 ReadOnlyPaths=/etc/vps-audit /opt/vps-audit/manager/deploy/node
-ReadWritePaths=@STATE_DIR@ @BEHAVIOR_ARCHIVE_DIR@
+ReadWritePaths=@STATE_DIR@ @BEHAVIOR_ARCHIVE_DIR@ /run/vpspc
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictRealtime=yes

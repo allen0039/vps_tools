@@ -36,8 +36,9 @@ jobs:
         working-directory: vpspc
         run: |
           python3 -m compileall -q vps_audit deploy/node/vpspc-node.py scripts/build_vpspc_release.py
-          bash -n install.sh remote-install.sh
+          bash -n install.sh remote-install.sh docker/audit-loop.sh docker/entrypoint.sh docker/setup-host-updater.sh
           find deploy/bin -type f -print0 | xargs -0 -r bash -n
+          AUDIT_IMAGE=vpspc:stable-verify docker compose config >/dev/null
       - name: Build reproducible stable artifacts
         working-directory: vpspc
         run: |

@@ -65,6 +65,8 @@ DEFAULT_COMMANDS: List[Dict[str, str]] = [
     {"command": "status", "description": "查看运行状态"},
     {"command": "web", "description": "管理 Web 与 Token"},
     {"command": "nodes", "description": "管理节点与部署命令"},
+    {"command": "maintenance", "description": "管理主控与节点更新"},
+    {"command": "destroy", "description": "彻底卸载 VPSPC"},
     {"command": "users", "description": "管理订阅用户"},
     {"command": "discover", "description": "从日志发现用户"},
     {"command": "ips", "description": "查询用户活跃 IP"},

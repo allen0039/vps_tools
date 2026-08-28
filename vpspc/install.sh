@@ -9,6 +9,7 @@ SYSTEMD_DIR="/etc/systemd/system"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 DATA_MARKER=".vps-audit-managed"
 SOURCE_MARKER=".vpspc-source-managed"
+DIRECTORY_MARKER=".vpspc-managed"
 CLI_SHORTCUT="/usr/local/bin/vpspc"
 CLI_SHORTCUT_MARKER="managed-by=vpspc"
 FALCO_MANAGED_DIR="$CONFIG_DIR/managed"
@@ -544,6 +545,96 @@ copy_application() {
   install -m 0755 "$SCRIPT_DIR/deploy/bin/vpspc" "$INSTALL_ROOT/venv/bin/vpspc"
   install -m 0755 "$SCRIPT_DIR/deploy/bin/vps-audit-nodes" "$INSTALL_ROOT/venv/bin/vps-audit-nodes"
   install -m 0755 "$SCRIPT_DIR/deploy/bin/vps-audit-web" "$INSTALL_ROOT/venv/bin/vps-audit-web"
+  install -m 0755 "$SCRIPT_DIR/deploy/bin/vps-audit-maintenance" "$INSTALL_ROOT/venv/bin/vps-audit-maintenance"
+  printf 'managed-by=vpspc\n' > "$INSTALL_ROOT/$DIRECTORY_MARKER"
+  chmod 0600 "$INSTALL_ROOT/$DIRECTORY_MARKER"
+}
+
+install_maintenance_helper() {
+  install -d -m 0755 /usr/local/lib/vpspc-updater
+  install -d -m 0700 /run/vpspc
+  install -d -m 0700 "$CONFIG_DIR"
+  install -m 0755 "$SCRIPT_DIR/deploy/update/vpspc-host-updater.py" \
+    /usr/local/lib/vpspc-updater/vpspc-host-updater.py
+  if [[ ! -s "$CONFIG_DIR/updater.key" ]]; then
+    python3 - <<'PY' > "$CONFIG_DIR/updater.key"
+import secrets
+print(secrets.token_hex(32))
+PY
+  fi
+  chmod 0600 "$CONFIG_DIR/updater.key"
+}
+
+write_ownership_manifest() {
+  local state_dir="$1"
+  local report_dir="$2"
+  local behavior_archive_dir="$3"
+  printf 'managed-by=vpspc\n' > "$CONFIG_DIR/$DIRECTORY_MARKER"
+  chmod 0600 "$CONFIG_DIR/$DIRECTORY_MARKER"
+  VPSPC_OWNERSHIP_CONFIG_DIR="$CONFIG_DIR" VPSPC_OWNERSHIP_INSTALL_ROOT="$INSTALL_ROOT" \
+  VPSPC_OWNERSHIP_SOURCE_ROOT="$SCRIPT_DIR" VPSPC_OWNERSHIP_STATE_DIR="$state_dir" \
+  VPSPC_OWNERSHIP_REPORT_DIR="$report_dir" VPSPC_OWNERSHIP_ARCHIVE_DIR="$behavior_archive_dir" \
+  VPSPC_OWNERSHIP_SYSTEMD_DIR="$SYSTEMD_DIR" python3 - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+
+config = Path(os.environ["VPSPC_OWNERSHIP_CONFIG_DIR"])
+install_root = Path(os.environ["VPSPC_OWNERSHIP_INSTALL_ROOT"])
+source_root = Path(os.environ["VPSPC_OWNERSHIP_SOURCE_ROOT"])
+state_root = Path(os.environ["VPSPC_OWNERSHIP_STATE_DIR"])
+report_root = Path(os.environ["VPSPC_OWNERSHIP_REPORT_DIR"])
+archive_root = Path(os.environ["VPSPC_OWNERSHIP_ARCHIVE_DIR"])
+systemd = Path(os.environ["VPSPC_OWNERSHIP_SYSTEMD_DIR"])
+resources = []
+seen = set()
+
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def directory(kind: str, path: Path, marker: str) -> None:
+    path = path.resolve()
+    marker_path = path / marker
+    if path in seen or not path.is_dir() or not marker_path.is_file():
+        return
+    seen.add(path)
+    resources.append({"kind": kind, "path": str(path), "marker": marker, "fingerprint": digest(marker_path)})
+
+def file(kind: str, path: Path, marker: str) -> None:
+    path = path.resolve()
+    if path in seen or not path.is_file() or path.is_symlink():
+        return
+    seen.add(path)
+    resources.append({"kind": kind, "path": str(path), "marker": marker, "fingerprint": digest(path)})
+
+directory("application", install_root, ".vpspc-managed")
+directory("config", config, ".vpspc-managed")
+if (source_root / ".vpspc-source-managed").is_file():
+    directory("source", source_root, ".vpspc-source-managed")
+for value in (state_root, report_root, archive_root):
+    directory("managed_data", value, ".vps-audit-managed")
+for unit in (
+    "vps-audit.service", "vps-audit.timer", "vps-audit-bot.service",
+    "vps-audit-node-receiver.service", "vps-audit-web.service",
+    "vps-audit-maintenance.service", "vps-audit-update-helper.service",
+    "vps-audit-update-helper.socket",
+):
+    file("systemd_unit", systemd / unit, "managed-by=vpspc")
+file("cli", Path("/usr/local/bin/vpspc"), "managed-by=vpspc")
+file("managed_file", Path("/usr/local/lib/vpspc-updater/vpspc-host-updater.py"), "managed-by=vpspc")
+payload = {"schema_version": 1, "install_mode": "native", "resources": resources}
+destination = config / "ownership.json"
+temporary = destination.with_name(destination.name + ".tmp." + str(os.getpid()))
+with temporary.open("w", encoding="utf-8") as handle:
+    json.dump(payload, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.chmod(temporary, 0o600)
+os.replace(temporary, destination)
+PY
+  chmod 0600 "$CONFIG_DIR/ownership.json"
 }
 
 install_cli_shortcut() {
@@ -1434,6 +1525,7 @@ if new_provider_id:
     active_provider = new_provider_id
 
 config = {
+    "maintenance": {"deployment_mode": "native"},
     "web": {
         "enabled": os.environ["WEB_ENABLED"] == "true",
         "listen_host": os.environ["WEB_HOST"],
@@ -1613,7 +1705,31 @@ template = template.replace("@BEHAVIOR_ARCHIVE_DIR@", os.environ["BEHAVIOR_ARCHI
 Path(os.environ["WEB_OUTPUT"]).write_text(template, encoding="utf-8")
 PY
   chmod 0644 "$SYSTEMD_DIR/vps-audit-web.service"
+  STATE_PATH="$state_dir" MAINTENANCE_TEMPLATE="$SCRIPT_DIR/deploy/systemd/vps-audit-maintenance.service" \
+  MAINTENANCE_OUTPUT="$SYSTEMD_DIR/vps-audit-maintenance.service" python3 <<'PY'
+import os
+from pathlib import Path
+template = Path(os.environ["MAINTENANCE_TEMPLATE"]).read_text(encoding="utf-8")
+template = template.replace("@STATE_DIR@", os.environ["STATE_PATH"])
+Path(os.environ["MAINTENANCE_OUTPUT"]).write_text(template, encoding="utf-8")
+PY
+  chmod 0644 "$SYSTEMD_DIR/vps-audit-maintenance.service"
+  install -m 0644 "$SCRIPT_DIR/deploy/systemd/vps-audit-update-helper.service" \
+    "$SYSTEMD_DIR/vps-audit-update-helper.service"
+  install -m 0644 "$SCRIPT_DIR/deploy/systemd/vps-audit-update-helper.socket" \
+    "$SYSTEMD_DIR/vps-audit-update-helper.socket"
   systemctl daemon-reload
+}
+
+configure_maintenance_service() {
+  systemctl enable --now vps-audit-update-helper.socket
+  systemctl enable vps-audit-maintenance.service
+  if ! systemctl restart vps-audit-maintenance.service; then
+    journalctl -u vps-audit-maintenance.service -n 30 --no-pager || true
+    die "维护服务启动失败；请执行 systemctl status vps-audit-maintenance.service 查看详情"
+  fi
+  systemctl is-active --quiet vps-audit-maintenance.service \
+    || die "维护服务未进入运行状态"
 }
 
 configure_bot_service() {
@@ -1681,15 +1797,18 @@ install_app() {
   check_cli_shortcut_available
   install_os_packages
   copy_application
+  install_maintenance_helper
   create_settings_snapshot
   systemctl stop vps-audit-web.service vps-audit-node-receiver.service vps-audit-bot.service vps-audit.timer >/dev/null 2>&1 || true
   INTERVAL="5"
   write_runtime_config
   install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR" "$CONFIGURED_BEHAVIOR_ARCHIVE_DIR"
+  install_cli_shortcut
+  write_ownership_manifest "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR" "$CONFIGURED_BEHAVIOR_ARCHIVE_DIR"
+  configure_maintenance_service
   configure_web_service
   test_ai_if_requested
   run_initial_audit_and_enable_timer
-  install_cli_shortcut
   configure_bot_service
   configure_node_receiver_service
   if [[ "$(existing_config_value telegram.enabled no)" == "yes" ]] && ask_yes_no "发送 Telegram 测试消息" "yes"; then
@@ -1709,14 +1828,17 @@ configure_app() {
   check_cli_shortcut_available
   [[ -x "$INSTALL_ROOT/venv/bin/vps-audit-runner" ]] || die "尚未安装"
   create_settings_snapshot
-  systemctl stop vps-audit-web.service vps-audit-node-receiver.service vps-audit-bot.service vps-audit.timer >/dev/null 2>&1 || true
+  systemctl stop vps-audit-web.service vps-audit-node-receiver.service vps-audit-bot.service vps-audit-maintenance.service vps-audit.timer >/dev/null 2>&1 || true
   INTERVAL="5"
   write_runtime_config
+  install_maintenance_helper
   install_systemd_units "$INTERVAL" "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR" "$CONFIGURED_BEHAVIOR_ARCHIVE_DIR"
+  install_cli_shortcut
+  write_ownership_manifest "$CONFIGURED_STATE_DIR" "$CONFIGURED_REPORT_DIR" "$CONFIGURED_BEHAVIOR_ARCHIVE_DIR"
+  configure_maintenance_service
   configure_web_service
   test_ai_if_requested
   run_initial_audit_and_enable_timer
-  install_cli_shortcut
   configure_bot_service
   configure_node_receiver_service
   echo "配置已更新。"
@@ -1770,12 +1892,16 @@ uninstall_app() {
     systemctl stop falco-modern-bpf.service >/dev/null 2>&1 || true
     echo "已停止本工具管理的 Falco；配置保留，重新安装 vpspc 后可恢复。"
   fi
-  systemctl disable --now vps-audit-web.service vps-audit-node-receiver.service vps-audit-bot.service vps-audit.timer >/dev/null 2>&1 || true
+  systemctl disable --now vps-audit-web.service vps-audit-node-receiver.service vps-audit-bot.service vps-audit-maintenance.service vps-audit-update-helper.socket vps-audit.timer >/dev/null 2>&1 || true
   systemctl stop vps-audit.service >/dev/null 2>&1 || true
   rm -f "$SYSTEMD_DIR/vps-audit.service" "$SYSTEMD_DIR/vps-audit.timer" "$SYSTEMD_DIR/vps-audit-bot.service" \
-    "$SYSTEMD_DIR/vps-audit-node-receiver.service" "$SYSTEMD_DIR/vps-audit-web.service"
+    "$SYSTEMD_DIR/vps-audit-node-receiver.service" "$SYSTEMD_DIR/vps-audit-web.service" \
+    "$SYSTEMD_DIR/vps-audit-maintenance.service" "$SYSTEMD_DIR/vps-audit-update-helper.service" \
+    "$SYSTEMD_DIR/vps-audit-update-helper.socket"
   systemctl daemon-reload
   remove_cli_shortcut
+  rm -f /usr/local/lib/vpspc-updater/vpspc-host-updater.py
+  rmdir /usr/local/lib/vpspc-updater >/dev/null 2>&1 || true
   rm -rf "$INSTALL_ROOT"
   if [[ "${1:-}" == "--purge" ]]; then
     local deleted=()

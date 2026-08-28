@@ -51,14 +51,28 @@ Docker 使用 `docker/config.json` 直接配置：
 
 ```bash
 cp docker/config.json.example docker/config.json
+cp docker/.env.example .env
 mkdir -p docker/secrets
 openssl rand -base64 32 > docker/secrets/web_token
 chmod 600 docker/secrets/web_token
-docker compose up -d
-docker compose --profile web up -d
+sudo ./docker/setup-host-updater.sh
+docker compose --env-file /etc/vps-audit/docker.env -f /etc/vps-audit/docker-compose.yml up -d
+docker compose --env-file /etc/vps-audit/docker.env -f /etc/vps-audit/docker-compose.yml --profile web up -d
 ```
 
-将 `web.listen_port` 设置为容器端口（默认 `8787`），宿主机映射可通过 `WEB_PORT` 调整。生产环境建议把 Web 放在 Caddy/Nginx/Traefik 后终止 HTTPS；`docker compose down` 不会删除审计卷，显式 `down -v` 才会清理持久化数据。
+`AUDIT_IMAGE` 必须指向 VPSPC 镜像；示例使用测试版，稳定版发布后可改为对应稳定标签或固定 digest。初始化脚本会把 Compose 与配置复制到 `/etc/vps-audit`，安装唯一能访问 Docker 的受限宿主机 helper，并生成维护密钥；Web、Bot、节点接收器和维护容器都不挂载 Docker socket。以后修改 Docker 配置或密钥后，重新执行该脚本再重启受管 Compose 栈。
+
+将 `web.listen_port` 设置为容器端口（默认 `8787`），宿主机映射可通过 `WEB_PORT` 调整。生产环境建议把 Web 放在 Caddy/Nginx/Traefik 后终止 HTTPS；日常 `docker compose down` 不会删除审计卷，VPSPC 的“彻底卸载”只会清理它自己的 Compose 项目、命名卷、配置、密钥、状态和日志，不会触碰同机的 Xray、sing-box、V2Board、妙妙屋 X 或 xrayagent。
+
+### 受管更新与卸载
+
+Web 的“更新管理”和 Telegram 的“更新管理”菜单提供相同能力：可选最新稳定版、最新测试版或已发布的指定正式版本；可只更新主控、勾选指定在线被控端，或更新主控加全部在线被控端。每天只检查稳定版和测试版，不会自动安装；每日检查可在两端关闭。发现新版本时，检查按钮显示“检测到可用更新”。
+
+被控端以最近 120 秒的已认证心跳为在线依据。离线服务器会跳过，不会等候或排队；任务下发失败、下载校验失败、安装失败或健康检查失败都会让该被控端自动恢复更新前版本。后续批次继续执行，最后会列出失败的 VPS 名称、原版本、目标版本和阶段。维护结果只保留短期当前任务状态，过期后自动清理，不形成长期升级或卸载历史。
+
+原生主控更新使用受限 root helper 原子切换安装目录并做服务健康检查；失败自动恢复旧目录。维护协调器会先写入结果，再由 helper 仅重启维护服务自身，避免 Telegram/Web 请求因更新而中断或重复执行。Docker 主控固定到经过 Release 清单验证的 GHCR image digest，更新失败自动恢复原 digest；管理容器没有 Docker socket。
+
+“彻底卸载被控端”只对选中的在线 VPS 下发一次性卸载任务。“彻底卸载主控＋全部在线被控端”会先处理全部在线被控端；任何一台未成功清理，主控一定保留。全部成功后仍需单独输入第二个确认码。最终阶段会清除 VPSPC 自己的主控程序、Compose 项目/卷、配置、密钥、状态、缓存、日志和维护临时结果，管理台与 Bot 随即离线；不会保留一份“卸载成功”的状态文件来制造残留。
 
 ## 使用本地源码交互安装
 

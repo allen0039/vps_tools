@@ -1,4 +1,5 @@
 {
+  "maintenance": {"deployment_mode": "docker", "updater_socket": "/run/vpspc-host/updater.sock", "updater_key_file": "/run/secrets/updater_key"},
   "web": {"enabled": true, "listen_host": "0.0.0.0", "listen_port": 8787, "token_file": "/run/secrets/web_token"},
   "state_dir": "/var/lib/vps-audit",
   "report_dir": "/var/lib/vps-audit/reports",

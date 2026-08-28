@@ -39,6 +39,11 @@ DEFAULT_RUNTIME_CONFIG: Dict[str, Any] = {
         "listen_port": 8787,
         "token_file": "/etc/vps-audit/web.token",
     },
+    "maintenance": {
+        "deployment_mode": "native",
+        "updater_socket": "/run/vpspc/updater.sock",
+        "updater_key_file": "/etc/vps-audit/updater.key",
+    },
     "auth_logs": ["/var/log/auth.log", "/var/log/secure"],
     "auth_timezone": "+00:00",
     "journal": {
@@ -209,6 +214,13 @@ def normalize_runtime_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("runtime config root must be a JSON object")
     config = _merge(DEFAULT_RUNTIME_CONFIG, raw)
     _normalize_ai_review(config, raw)
+    maintenance = config.get("maintenance")
+    if not isinstance(maintenance, dict) or maintenance.get("deployment_mode") not in {"native", "docker"}:
+        raise ValueError("maintenance.deployment_mode must be native or docker")
+    for key in ("updater_socket", "updater_key_file"):
+        value = maintenance.get(key)
+        if not isinstance(value, str) or not value.startswith("/") or len(value) > 512:
+            raise ValueError("maintenance." + key + " must be an absolute path")
     node_reporting = config.get("node_reporting")
     if not isinstance(node_reporting, dict):
         raise ValueError("node_reporting must be an object")

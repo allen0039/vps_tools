@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vps_audit.behavior_audit import save_incidents
-from vps_audit.bot import _DISCOVERY_CACHE, _authorized, _handle, _update_context, run_bot
+from vps_audit.bot import _DISCOVERY_CACHE, _apply_pending, _authorized, _handle, _update_context, run_bot
 from vps_audit.runtime import load_runtime_config
 from vps_audit.settings import upsert_ai_provider
 from vps_audit.telegram import TelegramTransientError
@@ -124,6 +124,58 @@ class BotTests(unittest.TestCase):
             response, _ = _handle(str(path), 12345, "vmiss hk", pending)
             self.assertIn("curl -fsSL", response)
 
+    def test_maintenance_menu_selects_named_online_nodes_and_starts_update(self):
+        class Maintenance:
+            def __init__(self):
+                self.calls = []
+                self.snapshot = {
+                    "controller_version": "0.6.0",
+                    "deployment_mode": "native",
+                    "update_available": True,
+                    "preferences": {"version_check_enabled": True, "batch_size": 3},
+                    "online_node_count": 1,
+                    "catalog": {
+                        "stable": {"version": "v0.7.0"},
+                        "edge": {"version": "edge"},
+                        "releases": [{"version": "v0.7.0"}],
+                    },
+                    "nodes": [{"node_id": "node_1234567890abcdef12345678", "name": "vmiss hk", "online": True}],
+                }
+
+            def request(self, method, path, body=None):
+                self.calls.append((method, path, body))
+                if path == "/v1/status":
+                    return {"status": self.snapshot}
+                if path == "/v1/nodes":
+                    return {"nodes": self.snapshot["nodes"]}
+                if path == "/v1/start":
+                    return {"job": {"kind": body["action"], "status": "nodes_running", "result": {"nodes": {}}}}
+                raise AssertionError((method, path, body))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._config(Path(temporary))
+            maintenance = Maintenance()
+            pending = {}
+            with patch("vps_audit.bot._maintenance_client", return_value=maintenance):
+                response, keyboard = _handle(str(path), 12345, "/maintenance", pending)
+                labels = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
+                self.assertIn("检测到可用更新", labels)
+                self.assertIn("主控当前版本：0.6.0", response)
+
+                _handle(str(path), 12345, "maint:nodes", pending)
+                response, keyboard = _handle(
+                    str(path), 12345, "maint:toggle:node_1234567890abcdef12345678", pending
+                )
+                self.assertIn("已选 1", response)
+                self.assertIn("✅ vmiss hk", json.dumps(keyboard, ensure_ascii=False))
+                _handle(str(path), 12345, "maint:nodes:done", pending)
+                _handle(str(path), 12345, "maint:pick:stable", pending)
+                response, keyboard = _handle(str(path), 12345, "maint:start", pending)
+            self.assertIn("维护任务已提交", response)
+            start = next(item for item in maintenance.calls if item[1] == "/v1/start")
+            self.assertEqual(start[2]["action"], "node_update")
+            self.assertEqual(start[2]["node_ids"], ["node_1234567890abcdef12345678"])
+
     def test_button_prompt_uses_per_admin_pending_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = self._config(Path(temporary))
@@ -179,6 +231,182 @@ class BotTests(unittest.TestCase):
                 run_bot(str(path), once=True)
             self.assertEqual(get_updates_mock.call_count, 2)
             sleep_mock.assert_called_once_with(1.0)
+
+    def test_slow_callback_is_queued_before_audit_runs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = self._config(root)
+            update = {
+                "update_id": 55,
+                "callback_query": {
+                    "id": "callback-55",
+                    "from": {"id": 12345},
+                    "data": "menu:run",
+                    "message": {"message_id": 77, "chat": {"id": -100500}},
+                },
+            }
+            with patch("vps_audit.bot.get_updates", return_value=[update]), patch(
+                "vps_audit.bot.answer_callback_query"
+            ) as acknowledge, patch("vps_audit.bot.edit_message_text") as edit, patch(
+                "vps_audit.bot._run_audit"
+            ) as audit:
+                run_bot(str(path), once=True)
+            acknowledge.assert_called_once()
+            audit.assert_not_called()
+            self.assertIn("任务已提交", edit.call_args.args[3])
+            state = json.loads((root / "state" / "bot-operations.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["jobs"][0]["status"], "queued")
+
+    def test_maintenance_selection_persists_before_background_submission(self):
+        class Maintenance:
+            snapshot = {
+                "controller_version": "0.6.0",
+                "deployment_mode": "native",
+                "update_available": False,
+                "preferences": {"version_check_enabled": True, "batch_size": 3},
+                "online_node_count": 0,
+                "catalog": {"stable": {"version": "v0.7.0"}, "edge": None, "releases": []},
+                "nodes": [],
+            }
+
+            def request(self, method, path, body=None):
+                self.calls.append((method, path, body))
+                if path == "/v1/status":
+                    return {"status": self.snapshot}
+                raise AssertionError((method, path, body))
+
+            def __init__(self):
+                self.calls = []
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = self._config(root)
+            state_path = root / "state" / "bot-state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps({
+                    "pending": {
+                        "12345": {
+                            "action": "maintenance_update",
+                            "kind": "controller_update",
+                            "node_ids": [],
+                            "created_at": 1_700_000_000,
+                        }
+                    }
+                }),
+                encoding="utf-8",
+            )
+            update = {
+                "update_id": 57,
+                "callback_query": {
+                    "id": "callback-57",
+                    "from": {"id": 12345},
+                    "data": "maint:pick:stable",
+                    "message": {"message_id": 77, "chat": {"id": -100500}},
+                },
+            }
+            maintenance = Maintenance()
+            with patch("vps_audit.bot.get_updates", return_value=[update]), patch(
+                "vps_audit.bot.answer_callback_query"
+            ), patch("vps_audit.bot.edit_message_text"), patch(
+                "vps_audit.bot._maintenance_client", return_value=maintenance
+            ):
+                run_bot(str(path), once=True)
+
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            entry = saved["pending"]["12345"]
+            self.assertEqual(entry["channel"], "stable")
+            self.assertIsNone(entry["version"])
+            operations = json.loads((root / "state" / "bot-operations.json").read_text(encoding="utf-8"))
+            self.assertEqual(operations["jobs"], [])
+
+    def test_maintenance_check_is_queued_outside_the_polling_loop(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = self._config(root)
+            update = {
+                "update_id": 58,
+                "callback_query": {
+                    "id": "callback-58",
+                    "from": {"id": 12345},
+                    "data": "maint:check",
+                    "message": {"message_id": 78, "chat": {"id": -100500}},
+                },
+            }
+            with patch("vps_audit.bot.get_updates", return_value=[update]), patch(
+                "vps_audit.bot.answer_callback_query"
+            ), patch("vps_audit.bot.edit_message_text") as edit, patch(
+                "vps_audit.bot._maintenance_client", side_effect=AssertionError("must run in worker")
+            ):
+                run_bot(str(path), once=True)
+
+            self.assertIn("任务已提交", edit.call_args.args[3])
+            state = json.loads((root / "state" / "bot-operations.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["jobs"][0]["value"], "maint:check")
+            self.assertEqual(state["jobs"][0]["status"], "queued")
+
+    def test_maintenance_submission_queues_the_selected_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = self._config(root)
+            state_path = root / "state" / "bot-state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps({
+                    "pending": {
+                        "12345": {
+                            "action": "maintenance_update",
+                            "kind": "node_update",
+                            "channel": "stable",
+                            "version": None,
+                            "node_ids": ["node_1234567890abcdef12345678"],
+                            "created_at": 1_700_000_000,
+                        }
+                    }
+                }),
+                encoding="utf-8",
+            )
+            update = {
+                "update_id": 59,
+                "callback_query": {
+                    "id": "callback-59",
+                    "from": {"id": 12345},
+                    "data": "maint:start",
+                    "message": {"message_id": 79, "chat": {"id": -100500}},
+                },
+            }
+            with patch("vps_audit.bot.get_updates", return_value=[update]), patch(
+                "vps_audit.bot.answer_callback_query"
+            ), patch("vps_audit.bot.edit_message_text"), patch(
+                "vps_audit.bot._maintenance_client", side_effect=AssertionError("must run in worker")
+            ):
+                run_bot(str(path), once=True)
+
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertNotIn("12345", saved["pending"])
+            operations = json.loads((root / "state" / "bot-operations.json").read_text(encoding="utf-8"))
+            self.assertEqual(operations["jobs"][0]["value"], "maint:start")
+            self.assertEqual(operations["jobs"][0]["pending"]["12345"]["channel"], "stable")
+            self.assertEqual(
+                operations["jobs"][0]["pending"]["12345"]["node_ids"],
+                ["node_1234567890abcdef12345678"],
+            )
+
+    def test_malformed_update_is_skipped_without_exiting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._config(Path(temporary))
+            malformed = {"update_id": 56, "message": {"from": {"id": None}, "chat": {"id": -100500}}}
+            with patch("vps_audit.bot.get_updates", return_value=[malformed]), patch(
+                "vps_audit.bot.send_message"
+            ):
+                run_bot(str(path), once=True)
+
+    def test_expired_pending_prompt_does_not_apply_a_later_message(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._config(Path(temporary))
+            pending = {"12345": {"action": "adduser", "created_at": 0}}
+            self.assertIsNone(_apply_pending(str(path), pending, 12345, "late-user"))
+            self.assertEqual(load_runtime_config(str(path))["subscription_monitoring"]["users"], [])
 
     def test_callback_context_includes_message_id_for_in_place_updates(self):
         chat, sender_id, value, callback_id, message_id = _update_context(

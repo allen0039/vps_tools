@@ -1,3 +1,4 @@
+# managed-by=vpspc
 [Unit]
 Description=VPSPC Telegram management bot
 After=network-online.target
@@ -17,7 +18,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=/etc/vps-audit @STATE_DIR@ @BEHAVIOR_ARCHIVE_DIR@
+ReadWritePaths=/etc/vps-audit @STATE_DIR@ @BEHAVIOR_ARCHIVE_DIR@ /run/vpspc
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictRealtime=yes

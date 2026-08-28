@@ -73,6 +73,14 @@ class HostUpdaterClient:
             },
         )
 
+    def restart_maintenance(self, *, job_id: str) -> Dict[str, Any]:
+        """Ask the helper to restart only the native maintenance coordinator."""
+        return self._request(
+            "POST",
+            "/v1/maintenance-restart",
+            {"action": "maintenance-restart", "job_id": job_id},
+        )
+
     def controller_destroy(self, *, job_id: str, confirmation_id: str) -> Dict[str, Any]:
         return self._request(
             "POST",
@@ -84,16 +92,31 @@ class HostUpdaterClient:
             },
         )
 
+    def docker_update(self, *, job_id: str, digest: str, version: str) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/v1/docker-update",
+            {
+                "action": "docker-update",
+                "job_id": job_id,
+                "digest": digest,
+                "version": version,
+            },
+        )
+
+    def docker_destroy(self, *, job_id: str, confirmation_id: str) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/v1/docker-destroy",
+            {
+                "action": "docker-destroy",
+                "job_id": job_id,
+                "confirmation_id": confirmation_id,
+            },
+        )
+
     def job_status(self, job_id: str) -> Dict[str, Any]:
         return self._request("GET", "/v1/jobs/" + job_id, {})
-
-    def docker_update(self, **_ignored: Any) -> Dict[str, Any]:
-        """Reserved for Task 11; refuse rather than accepting Docker arguments now."""
-        raise RuntimeError("Docker controller updates are not installed")
-
-    def docker_destroy(self, **_ignored: Any) -> Dict[str, Any]:
-        """Reserved for Task 11; refuse rather than accepting Docker arguments now."""
-        raise RuntimeError("Docker controller removal is not installed")
 
     def _request(self, method: str, path: str, body: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
         if method not in {"GET", "POST"}:

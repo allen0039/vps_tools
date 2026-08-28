@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from scripts.build_vpspc_release import build_release
 
 from vps_audit.maintenance.helper_client import HostUpdaterClient
 from vps_audit.maintenance.ownership import OwnedResource, OwnershipManifest, file_fingerprint
@@ -74,6 +75,9 @@ class HostUpdaterTests(unittest.TestCase):
         self.cache_root = self.root / "cache"
         self.cache_root.mkdir()
         self.work_root = self.root / "work"
+        self.docker_compose = self.root / "docker-compose.yml"
+        self.docker_env = self.root / "docker.env"
+        self.docker_metadata = self.root / "docker-maintenance.json"
         self.key_path = self.root / "updater.key"
         self.key_path.write_text("test-secret-value\n", encoding="utf-8")
         self.key_path.chmod(0o600)
@@ -87,6 +91,10 @@ class HostUpdaterTests(unittest.TestCase):
             ownership_manifest=self.root / "ownership.json",
             allowed_roots=(self.root,),
             enabled_units=("vps-audit.service",),
+            docker_compose_path=self.docker_compose,
+            docker_env_path=self.docker_env,
+            docker_metadata_path=self.docker_metadata,
+            helper_job_root=self.root / "helper-jobs",
         )
         self.helper = self.helper_module.HostUpdater(
             paths=self.paths,
@@ -210,6 +218,55 @@ class HostUpdaterTests(unittest.TestCase):
         self.assertEqual((self.install_root / "venv-keep.txt").read_text(encoding="utf-8"), "preserved\n")
         self.assertFalse(any(self.work_root.iterdir()))
 
+    def test_native_update_keeps_maintenance_alive_until_result_is_persisted(self):
+        self.helper.paths = self.helper_module.NativePaths(
+            install_root=self.install_root,
+            config_path=self.config_path,
+            cache_root=self.cache_root,
+            work_root=self.work_root,
+            ownership_manifest=self.paths.ownership_manifest,
+            allowed_roots=self.paths.allowed_roots,
+            enabled_units=("vps-audit.service", "vps-audit-maintenance.service"),
+            docker_compose_path=self.docker_compose,
+            docker_env_path=self.docker_env,
+            docker_metadata_path=self.docker_metadata,
+            helper_job_root=self.paths.helper_job_root,
+        )
+
+        result = self.helper.native_update(self.request(), healthcheck=lambda _root: True)
+
+        self.assertEqual(result["status"], "success")
+        self.assertNotIn(("systemctl", "stop", "vps-audit-maintenance.service"), self.runner.commands)
+        self.assertNotIn(("systemctl", "start", "vps-audit-maintenance.service"), self.runner.commands)
+        self.assertEqual(self.helper.maintenance_restart({"action": "maintenance-restart", "job_id": "job_12345678"})["status"], "accepted")
+        self.assertNotIn(("systemctl", "restart", "vps-audit-maintenance.service"), self.runner.commands)
+        self.helper.finalize_deferred_cleanup()
+        self.assertIn(("systemctl", "restart", "vps-audit-maintenance.service"), self.runner.commands)
+
+    def test_native_update_applies_the_real_release_bundle_root(self):
+        release = build_release(
+            ROOT,
+            self.root / "release",
+            version="v1.2.3",
+            revision="a" * 40,
+            channel="stable",
+            docker_digest="sha256:" + "b" * 64,
+        )
+        artifact_id = "controller-v1.2.3"
+        cached = self.cache_root / (artifact_id + ".tar.gz")
+        cached.write_bytes(release.controller.read_bytes())
+        request = {
+            "action": "native-update",
+            "job_id": "job_12345678",
+            "artifact_id": artifact_id,
+            "version": "v1.2.3",
+            "sha256": hashlib.sha256(cached.read_bytes()).hexdigest(),
+        }
+        result = self.helper.native_update(request, healthcheck=lambda _root: True)
+        self.assertEqual(result["status"], "success")
+        self.assertTrue((self.install_root / "vps_audit" / "maintenance" / "ownership.py").is_file())
+        self.assertFalse((self.install_root / "vpspc").exists())
+
     def test_native_update_preserves_venv_links_without_following_them(self):
         venv_bin = self.install_root / "venv" / "bin"
         venv_bin.mkdir(parents=True)
@@ -244,13 +301,15 @@ class HostUpdaterTests(unittest.TestCase):
         self.assertFalse((self.root / "outside.py").exists())
         self.assertNotIn(("systemctl", "stop", "vps-audit.service"), self.runner.commands)
 
-    def test_controller_destroy_returns_verified_plan_without_deleting(self):
+    def test_controller_destroy_removes_only_verified_owned_resources(self):
         data = self.root / "data"
         data.mkdir()
         marker = data / ".vps-audit-managed"
         marker.write_text("managed-by=vpspc\n", encoding="utf-8")
         event = data / "events.jsonl"
         event.write_text("keep until final coordinator confirmation\n", encoding="utf-8")
+        third_party = self.root / "third-party-xrayagent.log"
+        third_party.write_text("must survive VPSPC removal\n", encoding="utf-8")
         manifest = OwnershipManifest(
             schema_version=1,
             install_mode="native",
@@ -273,10 +332,136 @@ class HostUpdaterTests(unittest.TestCase):
                 "confirmation_id": "confirm_" + "a" * 32,
             }
         )
-        self.assertEqual(result["status"], "planned")
-        self.assertIn(str(event.resolve()), result["removal_plan"]["files"])
-        self.assertTrue(event.exists())
-        self.assertTrue(marker.exists())
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["removed_paths_count"], 3)
+        self.assertFalse(data.exists())
+        self.assertFalse(event.exists())
+        self.assertTrue(third_party.exists())
+
+    def test_controller_destroy_defers_managed_state_until_after_response(self):
+        config_dir = self.root / "config"
+        state_dir = self.root / "state"
+        config_dir.mkdir()
+        state_dir.mkdir()
+        config_path = config_dir / "config.json"
+        config_path.write_text(json.dumps({"state_dir": str(state_dir)}), encoding="utf-8")
+        config_marker = config_dir / ".vps-audit-managed"
+        state_marker = state_dir / ".vps-audit-managed"
+        config_marker.write_text("managed-by=vpspc\n", encoding="utf-8")
+        state_marker.write_text("managed-by=vpspc\n", encoding="utf-8")
+        state_event = state_dir / "maintenance.json"
+        state_event.write_text("{}\n", encoding="utf-8")
+        foreign = self.root / "xrayagent.service"
+        foreign.write_text("third party\n", encoding="utf-8")
+        manifest = OwnershipManifest(
+            schema_version=1,
+            install_mode="native",
+            resources=(
+                OwnedResource("managed_directory", str(config_dir), ".vps-audit-managed", file_fingerprint(config_marker)),
+                OwnedResource("managed_data", str(state_dir), ".vps-audit-managed", file_fingerprint(state_marker)),
+            ),
+        )
+        ownership = config_dir / "ownership.json"
+        ownership.write_text(json.dumps(manifest.to_dict()), encoding="utf-8")
+        ownership.chmod(0o600)
+        self.helper.paths = self.helper_module.NativePaths(
+            install_root=self.install_root,
+            config_path=config_path,
+            cache_root=self.cache_root,
+            work_root=self.work_root,
+            ownership_manifest=ownership,
+            allowed_roots=(self.root,),
+            enabled_units=("vps-audit.service",),
+            docker_compose_path=self.docker_compose,
+            docker_env_path=self.docker_env,
+            docker_metadata_path=self.docker_metadata,
+            helper_job_root=self.paths.helper_job_root,
+        )
+
+        result = self.helper.controller_destroy(
+            {"action": "controller-destroy", "job_id": "job_12345678", "confirmation_id": "confirm_" + "a" * 32}
+        )
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertTrue(config_dir.exists())
+        self.assertTrue(state_dir.exists())
+        self.helper.finalize_deferred_cleanup()
+        self.assertFalse(config_dir.exists())
+        self.assertFalse(state_dir.exists())
+        self.assertFalse(self.paths.helper_job_root.exists())
+        self.assertTrue(foreign.exists())
+
+    def _docker_metadata_files(self):
+        self.docker_compose.write_text("services: {}\n", encoding="utf-8")
+        self.docker_env.write_text(
+            "AUDIT_IMAGE=ghcr.io/allen0039/vpspc@sha256:" + "c" * 64 + "\n",
+            encoding="utf-8",
+        )
+        self.docker_metadata.write_text(
+            json.dumps({"schema_version": 1, "project": "vpspc", "services": ["audit", "maintenance"]}),
+            encoding="utf-8",
+        )
+
+    def test_docker_update_pins_digest_and_never_prunes_globally(self):
+        self._docker_metadata_files()
+        result = self.helper.docker_update(
+            {
+                "action": "docker-update",
+                "job_id": "job_12345678",
+                "digest": "sha256:" + "b" * 64,
+                "version": "v1.2.3",
+            }
+        )
+        self.assertEqual(result["status"], "success")
+        self.assertIn(
+            "AUDIT_IMAGE=ghcr.io/allen0039/vpspc@sha256:" + "b" * 64,
+            self.docker_env.read_text(encoding="utf-8"),
+        )
+        self.assertTrue(
+            any(command[:2] == ("docker", "compose") and command[-1] == "pull" for command in self.runner.commands)
+        )
+        self.assertFalse(any(command[:3] == ("docker", "system", "prune") for command in self.runner.commands))
+        replacement = self.helper_module.HostUpdater(
+            paths=self.paths,
+            key_path=self.key_path,
+            runner=self.runner,
+            require_root_owned_files=False,
+        )
+        self.assertEqual(replacement.job_status("job_12345678")["status"], "success")
+
+    def test_docker_destroy_keeps_third_party_sentinel(self):
+        self._docker_metadata_files()
+        owned = self.root / "owned"
+        owned.mkdir()
+        marker = owned / ".vps-audit-managed"
+        marker.write_text("managed-by=vpspc\n", encoding="utf-8")
+        foreign = self.root / "xrayagent.service"
+        foreign.write_text("third party\n", encoding="utf-8")
+        manifest = OwnershipManifest(
+            schema_version=1,
+            install_mode="docker",
+            resources=(
+                OwnedResource(
+                    kind="managed_data",
+                    path=str(owned),
+                    marker=".vps-audit-managed",
+                    fingerprint=file_fingerprint(marker),
+                ),
+            ),
+        )
+        self.paths.ownership_manifest.write_text(json.dumps(manifest.to_dict()), encoding="utf-8")
+        self.paths.ownership_manifest.chmod(0o600)
+        result = self.helper.docker_destroy(
+            {
+                "action": "docker-destroy",
+                "job_id": "job_12345678",
+                "confirmation_id": "confirm_" + "a" * 32,
+            }
+        )
+        self.assertEqual(result["status"], "success")
+        self.assertFalse(owned.exists())
+        self.assertTrue(foreign.exists())
+        self.assertTrue(any(command[:2] == ("docker", "compose") and "down" in command for command in self.runner.commands))
 
     def test_units_are_socket_activated_and_constrained(self):
         systemd = ROOT / "deploy" / "systemd"
@@ -287,7 +472,8 @@ class HostUpdaterTests(unittest.TestCase):
         self.assertIn("NoNewPrivileges=yes", service)
         self.assertIn("ProtectSystem=strict", service)
         self.assertIn("/run/vpspc", service)
-        self.assertNotIn("docker.sock", service)
+        self.assertIn("/run/docker.sock", service)
+        self.assertNotIn("/var/run/docker.sock", (ROOT / "compose.yml").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

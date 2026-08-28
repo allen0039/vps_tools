@@ -1,3 +1,4 @@
+# managed-by=vpspc
 [Unit]
 Description=VPSPC restricted host update helper
 Requires=vps-audit-update-helper.socket
@@ -31,6 +32,6 @@ MemoryDenyWriteExecute=yes
 RestrictNamespaces=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadOnlyPaths=/etc/vps-audit /usr/local/lib/vpspc-updater
-ReadWritePaths=/opt/vps-audit /opt/.vps-audit-update /var/lib/vps-audit /run/vpspc
+ReadWritePaths=/opt/vps-audit /opt/.vps-audit-update /var/lib/vps-audit /run/vpspc /run/docker.sock
 SystemCallArchitectures=native
 SystemCallFilter=@system-service

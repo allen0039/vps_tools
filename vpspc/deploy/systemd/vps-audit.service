@@ -1,3 +1,4 @@
+# managed-by=vpspc
 [Unit]
 Description=VPS user behavior audit cycle
 After=network-online.target

@@ -43,6 +43,7 @@ DEFAULT_ALLOWED_ROOTS = (
     Path("/etc/apt/sources.list.d"),
     Path("/usr/share/keyrings"),
     Path("/usr/local/bin"),
+    Path("/usr/local/lib/vpspc-updater"),
 )
 DEFAULT_FALCO_SNAPSHOT_ROOTS = (
     Path("/etc/falco"),

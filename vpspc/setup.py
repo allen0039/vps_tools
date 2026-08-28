@@ -29,5 +29,6 @@ setup(
         "vpspc=vps_audit.management:main",
         "vps-audit-nodes=vps_audit.node_reporting:main",
         "vps-audit-web=vps_audit.web:main",
+        "vps-audit-maintenance=vps_audit.maintenance.service:main",
     ]},
 )

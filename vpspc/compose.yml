@@ -1,7 +1,8 @@
+name: vpspc
+
 services:
   audit:
-    build: .
-    image: ${AUDIT_IMAGE:-vpspc:local}
+    image: ${AUDIT_IMAGE:?set AUDIT_IMAGE in .env}
     environment:
       VPS_AUDIT_CONFIG: /etc/vps-audit/config.json
       AUDIT_INTERVAL_SECONDS: ${AUDIT_INTERVAL_SECONDS:-300}
@@ -9,28 +10,48 @@ services:
       - ./docker/config.json:/etc/vps-audit/config.json:ro
       - vpspc-state:/var/lib/vps-audit
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "/opt/vps-audit/docker/healthcheck.py", "audit", "/etc/vps-audit/config.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
   web:
-    image: ${AUDIT_IMAGE:-vpspc:local}
+    image: ${AUDIT_IMAGE:?set AUDIT_IMAGE in .env}
     command: ["/usr/local/bin/vps-audit-web", "--config", "/etc/vps-audit/config.json"]
     profiles: [web]
     volumes:
       - ./docker/config.json:/etc/vps-audit/config.json:ro
       - vpspc-state:/var/lib/vps-audit
+      - vpspc-run:/run/vpspc
       - ./docker/secrets/web_token:/run/secrets/web_token:ro
     ports:
       - "${WEB_PORT:-8787}:8787"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "/opt/vps-audit/docker/healthcheck.py", "web", "/etc/vps-audit/config.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
   bot:
-    image: ${AUDIT_IMAGE:-vpspc:local}
+    image: ${AUDIT_IMAGE:?set AUDIT_IMAGE in .env}
     command: ["/usr/local/bin/vps-audit-bot", "--config", "/etc/vps-audit/config.json"]
     profiles: [bot]
     volumes:
       - ./docker/config.json:/etc/vps-audit/config.json:ro
       - vpspc-state:/var/lib/vps-audit
+      - vpspc-run:/run/vpspc
       - ./docker/secrets/telegram_token:/run/secrets/telegram_token:ro
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "/opt/vps-audit/docker/healthcheck.py", "bot", "/etc/vps-audit/config.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
   receiver:
-    image: ${AUDIT_IMAGE:-vpspc:local}
+    image: ${AUDIT_IMAGE:?set AUDIT_IMAGE in .env}
     command: ["/usr/local/bin/vps-audit-nodes", "--config", "/etc/vps-audit/config.json", "serve"]
     profiles: [receiver]
     volumes:
@@ -39,5 +60,28 @@ services:
     ports:
       - "${RECEIVER_PORT:-8766}:8766"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "/opt/vps-audit/docker/healthcheck.py", "receiver", "/etc/vps-audit/config.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  maintenance:
+    image: ${AUDIT_IMAGE:?set AUDIT_IMAGE in .env}
+    command: ["/usr/local/bin/vps-audit-maintenance", "--config", "/etc/vps-audit/config.json"]
+    volumes:
+      - ./docker/config.json:/etc/vps-audit/config.json:ro
+      - ./docker/secrets/updater_key:/run/secrets/updater_key:ro
+      - /run/vpspc:/run/vpspc-host:ro
+      - vpspc-state:/var/lib/vps-audit
+      - vpspc-run:/run/vpspc
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "/opt/vps-audit/docker/healthcheck.py", "maintenance", "/etc/vps-audit/config.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 volumes:
   vpspc-state:
+  vpspc-run:
