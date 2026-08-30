@@ -3,6 +3,9 @@ name: VPSPC Edge Release
 on:
   push:
     branches: [main]
+    paths:
+      - "vpspc/**"
+      - ".github/workflows/vpspc-edge.yml"
 
 permissions:
   contents: write

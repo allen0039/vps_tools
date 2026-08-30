@@ -1,0 +1,31 @@
+name: Safe SSH Port Checks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "safe-ssh-port/**"
+      - ".github/workflows/safe-ssh-port.yml"
+  pull_request:
+    paths:
+      - "safe-ssh-port/**"
+      - ".github/workflows/safe-ssh-port.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: safe-ssh-port-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate shell syntax
+        run: bash -n safe-ssh-port/safe-ssh-port.sh
+      - name: Run safe-ssh-port tests
+        run: python3 -m unittest discover -s safe-ssh-port/tests -p 'test_*.py'
