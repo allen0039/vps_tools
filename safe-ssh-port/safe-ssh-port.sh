@@ -11,6 +11,9 @@ MANAGED_CONFIG=${SAFE_SSH_PORT_MANAGED_CONFIG:-$SSHD_DROPIN_DIR/00-safe-ssh-port
 STATE_DIR=${SAFE_SSH_PORT_STATE_DIR:-/var/lib/safe-ssh-port}
 STATE_FILE=$STATE_DIR/state
 BACKUP_ROOT=$STATE_DIR/backups
+FIREWALL_NOTE_FILE=${SAFE_SSH_PORT_FIREWALL_NOTE_FILE:-$STATE_DIR/firewall-port-notes.tsv}
+FIREWALL_HISTORY_FILE=${SAFE_SSH_PORT_FIREWALL_HISTORY_FILE:-$STATE_DIR/firewall-port-history.tsv}
+FIREWALL_HISTORY_LIMIT=20
 FIREWALL_CHAIN=ALLENTOOL_INPUT
 ACCESS_CHAIN=ALLENTOOL_ACCESS
 IP_ALLOW_CHAIN=ALLENTOOL_IP_ALLOW
@@ -35,6 +38,15 @@ STATE_FIREWALL_RULE_ADDED=no
 STATE_FIREWALL_IPTABLES_FAMILIES=
 STATE_MAIN_PASSWORD_CHANGED=no
 ORIGINAL_ARGS=()
+SELECTED_FIREWALL_NOTE=
+FIREWALL_LOOKED_UP_NOTE=
+FIREWALL_LAST_TIME=
+FIREWALL_LAST_RESULT=
+FIREWALL_LAST_ACTION=
+FIREWALL_LAST_PORT=
+FIREWALL_LAST_PROTOCOLS=
+FIREWALL_LAST_BACKEND=
+FIREWALL_LAST_NOTE=
 
 log() {
     printf '[safe-ssh-port] %s\n' "$*"
@@ -158,7 +170,7 @@ install_shortcut() {
 
 require_commands() {
     local command_name
-    for command_name in "$SSHD_BIN" "$SS_BIN" awk grep sed sort tr mktemp cp mv chmod chown mkdir find rm date stat sleep; do
+    for command_name in "$SSHD_BIN" "$SS_BIN" awk grep sed sort tr mktemp cp mv chmod chown mkdir find rm date stat sleep tail; do
         command -v "$command_name" >/dev/null 2>&1 || die "缺少命令: $command_name"
     done
 }
@@ -1146,8 +1158,196 @@ firewall_rule_records() {
     esac | sort -k2,2 -k3,3 -k4,4n -u
 }
 
+ensure_firewall_metadata_state_dir() {
+    mkdir -p "$STATE_DIR" || return 1
+    chmod 700 "$STATE_DIR" || return 1
+}
+
+firewall_protocol_label() {
+    case ${1:-} in
+        tcp) printf 'TCP\n' ;;
+        udp) printf 'UDP\n' ;;
+        'tcp udp') printf 'TCP + UDP\n' ;;
+        *) printf '%s\n' "${1:-未知}" ;;
+    esac
+}
+
+firewall_action_label() {
+    case ${1:-} in
+        open) printf '开放\n' ;;
+        close) printf '关闭\n' ;;
+        *) printf '%s\n' "${1:-未知}" ;;
+    esac
+}
+
+firewall_result_label() {
+    case ${1:-} in
+        success) printf '成功\n' ;;
+        failed) printf '失败\n' ;;
+        *) printf '%s\n' "${1:-未知}" ;;
+    esac
+}
+
+firewall_note_label() {
+    if [[ -n ${1:-} ]]; then
+        printf '%s\n' "$1"
+    else
+        printf '无\n'
+    fi
+}
+
+firewall_port_note() {
+    local port=$1 protocol=$2 stored_port stored_protocol stored_note found=no
+    FIREWALL_LOOKED_UP_NOTE=
+    [[ -f $FIREWALL_NOTE_FILE ]] || return 1
+    while IFS=$'\t' read -r stored_port stored_protocol stored_note ||
+        [[ -n $stored_port || -n $stored_protocol || -n $stored_note ]]; do
+        if [[ $stored_port == "$port" && $stored_protocol == "$protocol" ]]; then
+            FIREWALL_LOOKED_UP_NOTE=$stored_note
+            found=yes
+        fi
+    done < "$FIREWALL_NOTE_FILE"
+    [[ $found == yes ]]
+}
+
+firewall_update_port_notes() {
+    local action=$1 port=$2 protocols=$3 note=${4:-}
+    local temporary stored_port stored_protocol stored_note protocol skip
+    [[ $action == open || $action == close ]] || return 1
+    ensure_firewall_metadata_state_dir || return 1
+    temporary=$(mktemp "$STATE_DIR/.firewall-port-notes.XXXXXX") || return 1
+    if [[ -f $FIREWALL_NOTE_FILE ]]; then
+        while IFS=$'\t' read -r stored_port stored_protocol stored_note ||
+            [[ -n $stored_port || -n $stored_protocol || -n $stored_note ]]; do
+            skip=no
+            if [[ $stored_port == "$port" ]]; then
+                for protocol in $protocols; do
+                    if [[ $stored_protocol == "$protocol" ]]; then
+                        skip=yes
+                        break
+                    fi
+                done
+            fi
+            if [[ $skip != yes ]]; then
+                printf '%s\t%s\t%s\n' "$stored_port" "$stored_protocol" "$stored_note" >> "$temporary" || {
+                    rm -f "$temporary"
+                    return 1
+                }
+            fi
+        done < "$FIREWALL_NOTE_FILE"
+    fi
+    if [[ $action == open ]]; then
+        for protocol in $protocols; do
+            printf '%s\t%s\t%s\n' "$port" "$protocol" "$note" >> "$temporary" || {
+                rm -f "$temporary"
+                return 1
+            }
+        done
+    fi
+    chmod 600 "$temporary" || { rm -f "$temporary"; return 1; }
+    mv -f "$temporary" "$FIREWALL_NOTE_FILE" || { rm -f "$temporary"; return 1; }
+}
+
+firewall_set_last_action() {
+    FIREWALL_LAST_TIME=$1
+    FIREWALL_LAST_RESULT=$2
+    FIREWALL_LAST_ACTION=$3
+    FIREWALL_LAST_PORT=$4
+    FIREWALL_LAST_PROTOCOLS=$5
+    FIREWALL_LAST_BACKEND=$6
+    FIREWALL_LAST_NOTE=${7:-}
+}
+
+firewall_record_operation() {
+    local result=$1 action=$2 port=$3 protocols=$4 backend=$5 note=${6:-}
+    local timestamp temporary history_keep=$((FIREWALL_HISTORY_LIMIT - 1))
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    firewall_set_last_action "$timestamp" "$result" "$action" "$port" "$protocols" "$backend" "$note"
+    if ! ensure_firewall_metadata_state_dir; then
+        warn '端口操作已执行，但无法创建备注和历史记录目录。'
+        return 1
+    fi
+    temporary=$(mktemp "$STATE_DIR/.firewall-port-history.XXXXXX") || {
+        warn '端口操作已执行，但无法创建历史记录临时文件。'
+        return 1
+    }
+    if [[ -s $FIREWALL_HISTORY_FILE ]]; then
+        tail -n "$history_keep" "$FIREWALL_HISTORY_FILE" > "$temporary" || {
+            rm -f "$temporary"
+            warn '端口操作已执行，但无法读取原有历史记录。'
+            return 1
+        }
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$timestamp" "$result" "$action" "$port" "$protocols" "$backend" "$note" >> "$temporary" || {
+        rm -f "$temporary"
+        warn '端口操作已执行，但无法写入历史记录。'
+        return 1
+    }
+    chmod 600 "$temporary" || { rm -f "$temporary"; return 1; }
+    mv -f "$temporary" "$FIREWALL_HISTORY_FILE" || { rm -f "$temporary"; return 1; }
+}
+
+firewall_load_latest_operation() {
+    local timestamp result action port protocols backend note
+    [[ -n $FIREWALL_LAST_RESULT ]] && return 0
+    [[ -s $FIREWALL_HISTORY_FILE ]] || return 1
+    IFS=$'\t' read -r timestamp result action port protocols backend note < <(tail -n 1 "$FIREWALL_HISTORY_FILE") || return 1
+    [[ -n $timestamp && -n $result && -n $action ]] || return 1
+    firewall_set_last_action "$timestamp" "$result" "$action" "$port" "$protocols" "$backend" "$note"
+}
+
+show_latest_firewall_operation() {
+    printf '\n最近一次端口操作\n'
+    printf '%s\n' '----------------------------------------'
+    if ! firewall_load_latest_operation; then
+        printf '  暂无记录。\n'
+        return 0
+    fi
+    printf '时间：%s\n' "$FIREWALL_LAST_TIME"
+    printf '结果：%s\n' "$(firewall_result_label "$FIREWALL_LAST_RESULT")"
+    printf '操作：%s\n' "$(firewall_action_label "$FIREWALL_LAST_ACTION")"
+    printf '端口：%s\n' "$FIREWALL_LAST_PORT"
+    printf '协议：%s\n' "$(firewall_protocol_label "$FIREWALL_LAST_PROTOCOLS")"
+    printf '备注：%s\n' "$(firewall_note_label "$FIREWALL_LAST_NOTE")"
+}
+
+show_firewall_operation_history() {
+    local timestamp result action port protocols backend note
+    printf '\n最近端口操作（最多 %s 条）\n' "$FIREWALL_HISTORY_LIMIT"
+    printf '%s\n' '----------------------------------------'
+    if [[ ! -s $FIREWALL_HISTORY_FILE ]]; then
+        printf '  暂无记录。\n'
+    else
+        while IFS=$'\t' read -r timestamp result action port protocols backend note ||
+            [[ -n $timestamp || -n $result || -n $action ]]; do
+            printf '  %s  %s %s %s/%s  备注：%s\n' \
+                "$timestamp" \
+                "$(firewall_result_label "$result")" \
+                "$(firewall_action_label "$action")" \
+                "$port" \
+                "${protocols// /+}" \
+                "$(firewall_note_label "$note")"
+        done < <(awk '{ records[NR]=$0 } END { for (index=NR; index>=1; index--) print records[index] }' "$FIREWALL_HISTORY_FILE")
+    fi
+    printf '\n按回车返回...'
+    read -r _
+}
+
+show_firewall_port_records() {
+    local records=$1 wanted_verdict=$2 family verdict protocol port
+    while read -r family verdict protocol port; do
+        [[ -n $family && $verdict == "$wanted_verdict" ]] || continue
+        printf '  %-6s %s/%s' "$family" "$port" "$protocol"
+        if [[ $wanted_verdict == ACCEPT ]] && firewall_port_note "$port" "$protocol"; then
+            printf '  备注：%s' "$(firewall_note_label "$FIREWALL_LOOKED_UP_NOTE")"
+        fi
+        printf '\n'
+    done <<< "$records"
+}
+
 show_firewall_port_overview() {
-    local backend records ports protection=不适用 protected_families= default_allowed_families=
+    local backend records ports rejected_ports protection=不适用 protected_families= default_allowed_families=
     local policy command_name family family_protected
     backend=$(detect_firewall_backend)
     records=$(firewall_rule_records "$backend" || true)
@@ -1189,11 +1389,14 @@ show_firewall_port_overview() {
     fi
 
     printf '\n明确放行的端口：\n'
-    ports=$(awk '$2=="ACCEPT" {printf "  %-6s %s/%s\n", $1, $4, $3}' <<< "$records")
+    ports=$(show_firewall_port_records "$records" ACCEPT)
     if [[ -n $ports ]]; then printf '%s\n' "$ports"; else printf '  （未检测到明确的单端口放行规则）\n'; fi
 
     printf '\n明确关闭的端口：\n'
-    ports=$(awk '$2=="DROP" || $2=="REJECT" {printf "  %-6s %s/%s\n", $1, $4, $3}' <<< "$records")
+    ports=$(show_firewall_port_records "$records" DROP)
+    rejected_ports=$(show_firewall_port_records "$records" REJECT)
+    if [[ -n $ports && -n $rejected_ports ]]; then ports+=$'\n'; fi
+    ports+=$rejected_ports
     if [[ -n $ports ]]; then printf '%s\n' "$ports"; else printf '  （没有指定关闭的单端口规则）\n'; fi
 
     if [[ $backend == nftables ]]; then
@@ -1837,14 +2040,31 @@ country_access_menu() {
 }
 
 prompt_firewall_protocols() {
-    local choice
+    local action=${1:-close} choice default_choice
     SELECTED_PROTOCOLS=
-    printf '请选择协议：\n  1. TCP（推荐）\n  2. UDP\n  3. TCP + UDP\n  0. 取消\n'
+    case $action in
+        open)
+            default_choice=3
+            printf '请选择协议：\n  1. TCP\n  2. UDP\n  3. TCP + UDP（推荐）\n  0. 取消\n'
+            ;;
+        close)
+            default_choice=1
+            printf '请选择协议：\n  1. TCP（默认）\n  2. UDP\n  3. TCP + UDP\n  0. 取消\n'
+            ;;
+        *)
+            warn "不支持的协议选择操作：$action"
+            return 1
+            ;;
+    esac
     while true; do
-        printf '请选择 [0-3，默认 1]: '
+        printf '请选择 [0-3，默认 %s]: ' "$default_choice"
         read -r choice
         case $choice in
-            ''|1) SELECTED_PROTOCOLS=tcp; return 0 ;;
+            '')
+                if [[ $default_choice == 3 ]]; then SELECTED_PROTOCOLS='tcp udp'; else SELECTED_PROTOCOLS=tcp; fi
+                return 0
+                ;;
+            1) SELECTED_PROTOCOLS=tcp; return 0 ;;
             2) SELECTED_PROTOCOLS=udp; return 0 ;;
             3) SELECTED_PROTOCOLS='tcp udp'; return 0 ;;
             0|q|Q) return 1 ;;
@@ -1865,6 +2085,27 @@ prompt_firewall_port() {
             return 0
         fi
         printf '端口无效，请重新输入。\n'
+    done
+}
+
+prompt_firewall_note() {
+    local answer
+    SELECTED_FIREWALL_NOTE=
+    while true; do
+        printf '请输入备注（可选，直接回车为无）: '
+        if ! IFS= read -r answer; then
+            return 1
+        fi
+        answer=${answer#"${answer%%[![:space:]]*}"}
+        answer=${answer%"${answer##*[![:space:]]}"}
+        if [[ ${#answer} -gt 80 ]]; then
+            printf '备注不能超过 80 个字符，请重新输入。\n'
+        elif [[ $answer == *[[:cntrl:]]* || $answer == *$'\t'* ]]; then
+            printf '备注不能包含控制字符，请重新输入。\n'
+        else
+            SELECTED_FIREWALL_NOTE=$answer
+            return 0
+        fi
     done
 }
 
@@ -1933,10 +2174,10 @@ firewall_apply_port() {
             for protocol in $protocols; do
                 if [[ $action == open ]]; then
                     ufw --force delete deny "${port}/${protocol}" >/dev/null 2>&1 || true
-                    ufw allow "${port}/${protocol}"
+                    ufw allow "${port}/${protocol}" || return 1
                 else
                     ufw --force delete allow "${port}/${protocol}" >/dev/null 2>&1 || true
-                    ufw deny "${port}/${protocol}"
+                    ufw deny "${port}/${protocol}" || return 1
                 fi
             done
             ;;
@@ -1945,15 +2186,15 @@ firewall_apply_port() {
                 rich_rule="rule priority=\"-100\" port port=\"${port}\" protocol=\"${protocol}\" drop"
                 if [[ $action == open ]]; then
                     firewall-cmd --permanent --remove-rich-rule="$rich_rule" >/dev/null 2>&1 || true
-                    firewall-cmd --permanent --add-port="${port}/${protocol}"
+                    firewall-cmd --permanent --add-port="${port}/${protocol}" || return 1
                 else
                     firewall-cmd --permanent --remove-port="${port}/${protocol}" || true
-                    firewall-cmd --permanent --add-rich-rule="$rich_rule"
+                    firewall-cmd --permanent --add-rich-rule="$rich_rule" || return 1
                 fi
             done
-            firewall-cmd --reload
+            firewall-cmd --reload || return 1
             ;;
-        iptables) iptables_apply_tagged_port "$action" "$port" "$protocols" ;;
+        iptables) iptables_apply_tagged_port "$action" "$port" "$protocols" || return 1 ;;
         nftables)
             warn '检测到原生 nftables 自定义规则，拒绝猜测表和链；请人工处理。'
             return 1
@@ -1968,15 +2209,28 @@ firewall_apply_port() {
 }
 
 firewall_open_interactive() {
+    local backend
     prompt_firewall_port || return 0
-    prompt_firewall_protocols || return 0
-    firewall_apply_port open "$SELECTED_FIREWALL_PORT" "$SELECTED_PROTOCOLS"
+    prompt_firewall_protocols open || return 0
+    prompt_firewall_note || return 0
+    printf '准备开放：%s/%s，备注：%s\n' \
+        "$SELECTED_FIREWALL_PORT" \
+        "${SELECTED_PROTOCOLS// /+}" \
+        "$(firewall_note_label "$SELECTED_FIREWALL_NOTE")"
+    backend=$(detect_firewall_backend)
+    if firewall_apply_port open "$SELECTED_FIREWALL_PORT" "$SELECTED_PROTOCOLS"; then
+        firewall_update_port_notes open "$SELECTED_FIREWALL_PORT" "$SELECTED_PROTOCOLS" "$SELECTED_FIREWALL_NOTE" ||
+            warn '端口已开放，但备注未能保存。'
+        firewall_record_operation success open "$SELECTED_FIREWALL_PORT" "$SELECTED_PROTOCOLS" "$backend" "$SELECTED_FIREWALL_NOTE" || true
+    else
+        firewall_record_operation failed open "$SELECTED_FIREWALL_PORT" "$SELECTED_PROTOCOLS" "$backend" "$SELECTED_FIREWALL_NOTE" || true
+    fi
 }
 
 firewall_close_interactive() {
+    local ssh_port listener protocol backend
     prompt_firewall_port || return 0
-    prompt_firewall_protocols || return 0
-    local ssh_port listener protocol
+    prompt_firewall_protocols close || return 0
     if [[ $SELECTED_PROTOCOLS == *tcp* ]]; then
         while IFS= read -r ssh_port; do
             if [[ $ssh_port == "$SELECTED_FIREWALL_PORT" ]]; then
@@ -1990,7 +2244,15 @@ firewall_close_interactive() {
             prompt_yes_no "端口 ${listener}/${protocol} 当前正在公网监听，仍要关闭吗？" no || return 0
         fi
     done < <(public_listeners)
-    firewall_apply_port close "$SELECTED_FIREWALL_PORT" "$SELECTED_PROTOCOLS"
+    printf '准备关闭：%s/%s\n' "$SELECTED_FIREWALL_PORT" "${SELECTED_PROTOCOLS// /+}"
+    backend=$(detect_firewall_backend)
+    if firewall_apply_port close "$SELECTED_FIREWALL_PORT" "$SELECTED_PROTOCOLS"; then
+        firewall_update_port_notes close "$SELECTED_FIREWALL_PORT" "$SELECTED_PROTOCOLS" ||
+            warn '端口已关闭，但旧备注未能清理。'
+        firewall_record_operation success close "$SELECTED_FIREWALL_PORT" "$SELECTED_PROTOCOLS" "$backend" '' || true
+    else
+        firewall_record_operation failed close "$SELECTED_FIREWALL_PORT" "$SELECTED_PROTOCOLS" "$backend" '' || true
+    fi
 }
 
 repair_ssh_firewall() {
@@ -2141,6 +2403,7 @@ firewall_menu() {
     while true; do
         show_firewall_port_overview
         show_access_control_overview
+        show_latest_firewall_operation
         printf '\n防火墙管理\n'
         printf '%s\n' '----------------------------------------'
         printf '  1. 开放指定端口        2. 关闭指定端口\n'
@@ -2150,9 +2413,10 @@ firewall_menu() {
         printf '  6. 保留 SSH 和当前公网监听端口\n'
         printf '  7. 安装/修复防火墙持久化\n'
         printf '  8. IP 黑白名单         9. 国家黑白名单\n'
+        printf ' 10. 查看最近端口操作\n'
         printf '%s\n' '----------------------------------------'
         printf '  0. 返回上一级菜单\n'
-        printf '请选择 [0-9]: '
+        printf '请选择 [0-10]: '
         read -r choice
         case $choice in
             1) firewall_open_interactive ;;
@@ -2164,6 +2428,7 @@ firewall_menu() {
             7) repair_firewall_persistence ;;
             8) ip_access_menu ;;
             9) country_access_menu ;;
+            10) show_firewall_operation_history ;;
             0|q|Q) return 0 ;;
             *) printf '选项无效，请重新输入。\n' ;;
         esac
