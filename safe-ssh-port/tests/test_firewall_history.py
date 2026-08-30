@@ -67,6 +67,26 @@ class FirewallHistoryTest(unittest.TestCase):
         result = self.run_bash(body)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_firewall_overview_collapses_matching_families_and_keeps_single_stack(self):
+        body = textwrap.dedent(
+            f"""
+            source {SCRIPT!s}
+            records=$(printf '%s\n' \
+                'IPv6 ACCEPT udp 31122' \
+                'IPv4 ACCEPT tcp 31122' \
+                'IPv6 ACCEPT tcp 31122' \
+                'IPv4 ACCEPT udp 31122' \
+                'IPv4 ACCEPT tcp 8080' \
+                'IPv6 ACCEPT tcp 8443' \
+                '双栈 DROP tcp 9000' \
+                'IPv4 DROP tcp 9000' | collapse_firewall_rule_families)
+            expected=$'IPv4 ACCEPT tcp 8080\nIPv6 ACCEPT tcp 8443\n双栈 ACCEPT tcp 31122\n双栈 ACCEPT udp 31122\n双栈 DROP tcp 9000'
+            [[ $records == "$expected" ]]
+            """
+        )
+        result = self.run_bash(body)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_note_prompt_trims_blank_and_rejects_control_characters(self):
         body = textwrap.dedent(
             f"""
@@ -163,7 +183,13 @@ class FirewallHistoryTest(unittest.TestCase):
                 [[ $FIREWALL_LOOKED_UP_NOTE == 游戏服务 ]]
                 detect_firewall_backend() {{ printf 'iptables\\n'; }}
                 protected_ssh_ports() {{ printf '22\\n'; }}
-                firewall_rule_records() {{ printf '%s\\n' 'IPv4 ACCEPT tcp 31122' 'IPv4 ACCEPT udp 31122'; }}
+                firewall_rule_records() {{
+                    printf '%s\\n' \
+                        'IPv4 ACCEPT tcp 31122' \
+                        'IPv6 ACCEPT tcp 31122' \
+                        'IPv4 ACCEPT udp 31122' \
+                        'IPv6 ACCEPT udp 31122'
+                }}
                 iptables() {{
                     case "$*" in
                         '-S INPUT') printf '%s\\n' '-P INPUT DROP' ;;
@@ -180,6 +206,8 @@ class FirewallHistoryTest(unittest.TestCase):
         self.assertIn("准备开放：31122/tcp+udp，备注：游戏服务", result.stdout)
         self.assertIn("已开放端口 31122（tcp+udp）", result.stdout)
         self.assertEqual(result.stdout.count("备注：游戏服务"), 3)
+        self.assertIn("双栈  31122/tcp", result.stdout)
+        self.assertIn("双栈  31122/udp", result.stdout)
 
     def test_failed_open_is_recorded_without_creating_notes(self):
         with tempfile.TemporaryDirectory() as directory:

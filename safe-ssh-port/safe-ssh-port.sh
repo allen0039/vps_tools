@@ -1158,6 +1158,29 @@ firewall_rule_records() {
     esac | sort -k1,1 -k2,2 -k4,4n -k3,3 -u
 }
 
+collapse_firewall_rule_families() {
+    awk '
+        NF >= 4 {
+            family=$1; verdict=$2; protocol=$3; port=$4
+            key=verdict SUBSEP protocol SUBSEP port
+            keys[key]=1
+            if (family == "双栈") dual[key]=1
+            else if (family == "IPv4") ipv4[key]=1
+            else if (family == "IPv6") ipv6[key]=1
+        }
+        END {
+            for (key in keys) {
+                split(key, fields, SUBSEP)
+                if (dual[key] || (ipv4[key] && ipv6[key])) family="双栈"
+                else if (ipv4[key]) family="IPv4"
+                else if (ipv6[key]) family="IPv6"
+                else continue
+                print family, fields[1], fields[2], fields[3]
+            }
+        }
+    ' | sort -k2,2 -k4,4n -k3,3 -k1,1 -u
+}
+
 ensure_firewall_metadata_state_dir() {
     mkdir -p "$STATE_DIR" || return 1
     chmod 700 "$STATE_DIR" || return 1
@@ -1338,7 +1361,7 @@ show_firewall_port_records() {
     local records=$1 wanted_verdict=$2 family verdict protocol port
     while read -r family verdict protocol port; do
         [[ -n $family && $verdict == "$wanted_verdict" ]] || continue
-        printf '  %-6s %s/%s' "$family" "$port" "$protocol"
+        printf '  %s  %s/%s' "$family" "$port" "$protocol"
         if [[ $wanted_verdict == ACCEPT ]] && firewall_port_note "$port" "$protocol"; then
             printf '  备注：%s' "$(firewall_note_label "$FIREWALL_LOOKED_UP_NOTE")"
         fi
@@ -1351,6 +1374,7 @@ show_firewall_port_overview() {
     local policy command_name family family_protected
     backend=$(detect_firewall_backend)
     records=$(firewall_rule_records "$backend" || true)
+    records=$(collapse_firewall_rule_families <<< "$records")
 
     printf '\n防火墙端口规则\n'
     printf '%s\n' '----------------------------------------'
