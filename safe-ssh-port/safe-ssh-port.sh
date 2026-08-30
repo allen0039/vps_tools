@@ -1155,7 +1155,7 @@ firewall_rule_records() {
             ;;
         ufw) ufw_rule_records ;;
         firewalld) firewalld_rule_records ;;
-    esac | sort -k2,2 -k3,3 -k4,4n -u
+    esac | sort -k1,1 -k2,2 -k4,4n -k3,3 -u
 }
 
 ensure_firewall_metadata_state_dir() {

@@ -47,6 +47,26 @@ class FirewallHistoryTest(unittest.TestCase):
         self.assertIn("TCP（默认）", result.stdout)
         self.assertIn("默认 1", result.stdout)
 
+    def test_firewall_records_group_tcp_and_udp_by_port(self):
+        body = textwrap.dedent(
+            f"""
+            source {SCRIPT!s}
+            ufw() {{
+                printf '%s\n' \
+                    'Status: active' \
+                    '48901/tcp ALLOW Anywhere' \
+                    '48902/tcp ALLOW Anywhere' \
+                    '48901/udp ALLOW Anywhere' \
+                    '48902/udp ALLOW Anywhere'
+            }}
+            records=$(firewall_rule_records ufw)
+            expected=$'IPv4 ACCEPT tcp 48901\nIPv4 ACCEPT udp 48901\nIPv4 ACCEPT tcp 48902\nIPv4 ACCEPT udp 48902'
+            [[ $records == "$expected" ]]
+            """
+        )
+        result = self.run_bash(body)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_note_prompt_trims_blank_and_rejects_control_characters(self):
         body = textwrap.dedent(
             f"""
