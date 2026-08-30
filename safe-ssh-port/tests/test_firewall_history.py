@@ -73,10 +73,11 @@ class FirewallHistoryTest(unittest.TestCase):
             source {SCRIPT!s}
             prompt_firewall_note <<< '  游戏服务  '
             [[ $SELECTED_FIREWALL_NOTE == 游戏服务 ]]
-            printf '服务\tA\n中文备注\n' | prompt_firewall_note
+            prompt_firewall_note <<< $'服务\tA\n中文备注'
             [[ $SELECTED_FIREWALL_NOTE == 中文备注 ]]
             too_long=$(printf '%081d' 0 | tr 0 a)
-            printf '%s\n有效备注\n' "$too_long" | prompt_firewall_note
+            note_inputs=$(printf '%s\n有效备注\n' "$too_long")
+            prompt_firewall_note <<< "$note_inputs"
             [[ $SELECTED_FIREWALL_NOTE == 有效备注 ]]
             prompt_firewall_note <<< ''
             [[ -z $SELECTED_FIREWALL_NOTE ]]
@@ -170,6 +171,7 @@ class FirewallHistoryTest(unittest.TestCase):
                         *) return 2 ;;
                     esac
                 }}
+                ip6tables() {{ return 4; }}
                 show_firewall_port_overview
                 """
             )

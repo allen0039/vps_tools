@@ -1368,7 +1368,7 @@ show_firewall_port_overview() {
                 protected_families="${protected_families:+$protected_families+}$family"
                 family_protected=yes
             fi
-            policy=$("$command_name" -S INPUT 2>/dev/null | awk '$1=="-P" && $2=="INPUT" {print $3; exit}')
+            policy=$("$command_name" -S INPUT 2>/dev/null | awk '$1=="-P" && $2=="INPUT" {print $3; exit}' || true)
             printf '%s 默认入站策略: %s\n' "$family" "${policy:-未知}"
             if [[ $policy == ACCEPT && $family_protected == no ]]; then
                 default_allowed_families="${default_allowed_families:+$default_allowed_families+}$family"
