@@ -96,16 +96,16 @@ curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/dns_tool/
 ```
 
 安装后直接运行 `dnstool` 进入中文菜单；脚本会自动通过 `sudo` 获取管理员权限。
-也可以使用命令模式直接切换并查看状态：
+首次安装会立即保存初始 DNS 配置，菜单可随时一键恢复。也可以使用命令模式：
 
 ```bash
 sudo dnstool set cloudflare
-dnstool status
+sudo dnstool status
 ```
 
-工具支持 Cloudflare、Google、Quad9、AdGuard、AliDNS 和自定义 IPv4/IPv6 地址，
-不会重启网卡。安装时会立即保存初始 DNS 配置，后续重复安装或切换不会覆盖；运行
-`sudo dnstool restore` 可随时一键恢复该初始版本。
+工具支持 Cloudflare、Google、Quad9、AdGuard、AliDNS 和 1 至 4 个自定义 IPv4/IPv6
+地址，不会重启网卡。后续重复安装或切换不会覆盖初始备份。完整菜单、多个 DNS 的
+使用方式和不同系统的处理逻辑请查看 [dns_tool 详细说明](dns_tool/README.md)。
 
 ## 安全原则
 

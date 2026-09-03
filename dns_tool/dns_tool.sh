@@ -269,11 +269,16 @@ restore_snapshot() {
 }
 
 refresh_dns_manager() {
+    local resolv_target=
     if service_is_active systemd-resolved; then
         systemctl restart systemd-resolved
         command -v resolvectl >/dev/null 2>&1 && resolvectl flush-caches >/dev/null 2>&1 || true
     fi
-    if command -v resolvconf >/dev/null 2>&1 && [[ -e $RESOLVCONF_HEAD ]]; then
+    if [[ -L $RESOLV_CONF ]]; then
+        resolv_target=$(readlink "$RESOLV_CONF" 2>/dev/null || true)
+    fi
+    if command -v resolvconf >/dev/null 2>&1 &&
+       { [[ -e $RESOLVCONF_HEAD ]] || [[ $resolv_target == *resolvconf* ]]; }; then
         resolvconf -u
     fi
     if service_is_active NetworkManager && command -v nmcli >/dev/null 2>&1; then

@@ -191,6 +191,27 @@ printf '%s\\n' \"$*\" >>\"$COMMAND_LOG\"
         )
         self.assertTrue(self.resolv.is_symlink())
 
+    def test_resolvconf_refreshes_restore_when_original_head_was_missing(self):
+        head = Path(self.env["DNS_TOOL_RESOLVCONF_HEAD"])
+        generated = self.root / "run/resolvconf/resolv.conf"
+        generated.parent.mkdir(parents=True)
+        generated.write_text("nameserver 10.0.0.3\n")
+        self.resolv.unlink()
+        self.resolv.symlink_to(generated)
+        self.write_command(
+            "resolvconf",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$COMMAND_LOG\"\n",
+        )
+
+        self.run_script("set", "custom", "4.2.2.1")
+        self.assertTrue(head.exists())
+        self.log.write_text("")
+
+        self.run_script("restore")
+        self.assertFalse(head.exists())
+        self.assertIn("-u", self.log.read_text())
+        self.assertTrue(self.resolv.is_symlink())
+
     def test_failed_service_restart_rolls_back_files(self):
         resolved_resolv = self.root / "run/systemd/resolve/stub-resolv.conf"
         resolved_resolv.parent.mkdir(parents=True)
