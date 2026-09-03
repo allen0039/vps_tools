@@ -34,7 +34,7 @@ class DnsToolTests(unittest.TestCase):
                     self.root / "etc/resolvconf/resolv.conf.d/head"
                 ),
                 "DNS_TOOL_STATE_DIR": str(self.root / "state"),
-                "DNS_TOOL_INSTALL_PATH": str(self.root / "sbin/dns_tool"),
+                "DNS_TOOL_INSTALL_PATH": str(self.root / "bin/dnstool"),
                 "COMMAND_LOG": str(self.log),
             }
         )
@@ -82,7 +82,7 @@ printf '%s\\n' \"$*\" >>\"$COMMAND_LOG\"
             "search internal.example\nnameserver 10.0.0.2\n",
         )
         restored_status = self.run_script("status").stdout
-        self.assertIn("dns_tool 当前配置: 未应用", restored_status)
+        self.assertIn("dnstool 当前配置: 未应用", restored_status)
         self.assertIn("原始配置备份: 可恢复", restored_status)
 
     def test_repeated_switch_restores_configuration_before_first_switch(self):
@@ -234,6 +234,9 @@ exit 0
         self.resolv.chmod(0o640)
         install_result = self.run_script("install")
         self.assertIn("已自动保存首次部署时的初始 DNS 配置", install_result.stdout)
+        installed_command = Path(self.env["DNS_TOOL_INSTALL_PATH"])
+        self.assertEqual(installed_command.name, "dnstool")
+        self.assertTrue(os.access(installed_command, os.X_OK))
 
         self.resolv.write_text("nameserver 192.0.2.53\n")
         menu_result = self.run_script("menu", input_text="8\ny\n0\n")

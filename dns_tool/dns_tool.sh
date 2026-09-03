@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
-INSTALL_PATH=${DNS_TOOL_INSTALL_PATH:-/usr/local/sbin/dns_tool}
+INSTALL_PATH=${DNS_TOOL_INSTALL_PATH:-/usr/local/bin/dnstool}
 RESOLV_CONF=${DNS_TOOL_RESOLV_CONF:-/etc/resolv.conf}
 RESOLVED_DROPIN=${DNS_TOOL_RESOLVED_DROPIN:-/etc/systemd/resolved.conf.d/90-vps-tools-dns.conf}
 NM_DROPIN=${DNS_TOOL_NM_DROPIN:-/etc/NetworkManager/conf.d/90-vps-tools-dns.conf}
@@ -18,15 +18,15 @@ ROLLBACK_DIR=
 PROVIDER_ADDRESSES=()
 
 log() {
-    printf '[dns_tool] %s\n' "$*"
+    printf '[dnstool] %s\n' "$*"
 }
 
 warn() {
-    printf '[dns_tool] 警告: %s\n' "$*" >&2
+    printf '[dnstool] 警告: %s\n' "$*" >&2
 }
 
 die() {
-    printf '[dns_tool] 错误: %s\n' "$*" >&2
+    printf '[dnstool] 错误: %s\n' "$*" >&2
     exit 1
 }
 
@@ -307,12 +307,12 @@ write_generated_file() {
 resolv_content() {
     local source=$1 address
     shift
-    printf '# Managed by dns_tool. Use dns_tool restore to recover the original.\n'
+    printf '# Managed by dnstool. Use dnstool restore to recover the original.\n'
     for address in "$@"; do
         printf 'nameserver %s\n' "$address"
     done
     if [[ -r $source && ! -d $source ]]; then
-        awk '$1 != "nameserver" && $0 !~ /^# Managed by dns_tool\./' "$source"
+        awk '$1 != "nameserver" && $0 !~ /^# Managed by (dns_tool|dnstool)\./' "$source"
     fi
 }
 
@@ -320,11 +320,11 @@ resolved_content() {
     local joined
     joined=$(printf '%s ' "$@")
     joined=${joined% }
-    printf '# Managed by dns_tool.\n[Resolve]\nDNS=%s\nFallbackDNS=%s\nDomains=~.\n' "$joined" "$joined"
+    printf '# Managed by dnstool.\n[Resolve]\nDNS=%s\nFallbackDNS=%s\nDomains=~.\n' "$joined" "$joined"
 }
 
 network_manager_content() {
-    printf '# Managed by dns_tool.\n[main]\ndns=none\nrc-manager=unmanaged\n'
+    printf '# Managed by dnstool.\n[main]\ndns=none\nrc-manager=unmanaged\n'
 }
 
 apply_resolved() {
@@ -458,12 +458,12 @@ show_status() {
         awk '$1 == "nameserver" { print "  " $2 }' "$RESOLV_CONF"
     fi
     if [[ -r $ACTIVE_CONFIG_FILE ]]; then
-        printf 'dns_tool 当前配置:\n'
+        printf 'dnstool 当前配置:\n'
         awk -F= '$1 == "provider" { print "  提供商: " $2 }
                    $1 == "manager" { print "  应用方式: " $2 }
                    $1 == "dns" { print "  DNS: " $2 }' "$ACTIVE_CONFIG_FILE"
     else
-        printf 'dns_tool 当前配置: 未应用\n'
+        printf 'dnstool 当前配置: 未应用\n'
     fi
     if original_backup_dir >/dev/null 2>&1; then
         printf '原始配置备份: 可恢复\n'
@@ -559,7 +559,7 @@ install_tool() {
     install -m 755 "$source_file" "$INSTALL_PATH"
     log "已安装: $INSTALL_PATH"
     ensure_initial_backup
-    log '运行 dns_tool 即可进入中文菜单。'
+    log '以后直接运行 dnstool 即可进入中文菜单。'
 }
 
 main() {

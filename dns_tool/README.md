@@ -22,8 +22,10 @@ curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/dns_tool/
 安装后打开交互菜单：
 
 ```bash
-sudo dns_tool
+dnstool
 ```
+
+普通用户在交互终端运行时，脚本会自动通过 `sudo` 获取所需权限。
 
 菜单顶部会显示“初始 DNS 备份”状态和备份中的 DNS 地址，并始终提供中文选项
 “一键恢复首次修改前的初始配置”。首次安装完成后，即使尚未切换 DNS，也可以使用
@@ -37,27 +39,27 @@ IPv4/IPv6 DNS 地址。
 直接切换公共 DNS：
 
 ```bash
-sudo dns_tool set cloudflare
-sudo dns_tool set alidns
+sudo dnstool set cloudflare
+sudo dnstool set alidns
 ```
 
 使用自定义 DNS：
 
 ```bash
-sudo dns_tool set custom 151.243.229.229
-sudo dns_tool set custom 1.1.1.1 2606:4700:4700::1111
+sudo dnstool set custom 151.243.229.229
+sudo dnstool set custom 1.1.1.1 2606:4700:4700::1111
 ```
 
 查看当前管理方式、`resolv.conf` 中的 nameserver 和工具配置：
 
 ```bash
-dns_tool status
+dnstool status
 ```
 
 一键恢复首次使用本工具修改前的初始 DNS 配置：
 
 ```bash
-sudo dns_tool restore
+sudo dnstool restore
 ```
 
 无论中间切换过多少次，初始备份都不会被覆盖。恢复不仅改回 DNS 地址，也会还原

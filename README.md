@@ -95,16 +95,17 @@ sudo restart-mmw-agent
 curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/dns_tool/dns_tool.sh' -o /tmp/dns_tool.sh && sudo bash /tmp/dns_tool.sh install
 ```
 
-安装后运行 `sudo dns_tool` 进入中文菜单，或直接切换并查看状态：
+安装后直接运行 `dnstool` 进入中文菜单；脚本会自动通过 `sudo` 获取管理员权限。
+也可以使用命令模式直接切换并查看状态：
 
 ```bash
-sudo dns_tool set cloudflare
-dns_tool status
+sudo dnstool set cloudflare
+dnstool status
 ```
 
 工具支持 Cloudflare、Google、Quad9、AdGuard、AliDNS 和自定义 IPv4/IPv6 地址，
 不会重启网卡。安装时会立即保存初始 DNS 配置，后续重复安装或切换不会覆盖；运行
-`sudo dns_tool restore` 可随时一键恢复该初始版本。
+`sudo dnstool restore` 可随时一键恢复该初始版本。
 
 ## 安全原则
 
