@@ -95,7 +95,7 @@ printf '%s\\n' \"$*\" >>\"$COMMAND_LOG\"
         )
 
         self.resolv.write_text("nameserver 192.0.2.53\n")
-        self.run_script("set", "zouter")
+        self.run_script("set", "custom", "151.243.229.229")
         self.run_script("restore")
         self.assertEqual(
             self.resolv.read_text(),
@@ -105,7 +105,7 @@ printf '%s\\n' \"$*\" >>\"$COMMAND_LOG\"
     def test_repeated_switch_in_one_menu_process_keeps_original_backup(self):
         result = self.run_script(
             "menu",
-            input_text="2\ny\n3\ny\n9\ny\n0\n",
+            input_text="1\ny\n2\ny\n8\ny\n0\n",
         )
         self.assertIn("DNS 已切换为 cloudflare", result.stdout)
         self.assertIn("DNS 已切换为 google", result.stdout)
@@ -215,10 +215,10 @@ exit 0
         self.assertEqual(os.readlink(self.resolv), original_target)
         self.assertFalse(Path(self.env["DNS_TOOL_RESOLVED_DROPIN"]).exists())
 
-    def test_zouter_preset_uses_only_unlock_dns_and_restores_initial_mode(self):
+    def test_single_custom_dns_restores_initial_mode(self):
         self.resolv.chmod(0o640)
 
-        self.run_script("set", "zouter")
+        self.run_script("set", "custom", "151.243.229.229")
         content = self.resolv.read_text()
         self.assertIn("nameserver 151.243.229.229", content)
         self.assertEqual(content.count("nameserver "), 1)
@@ -236,7 +236,7 @@ exit 0
         self.assertIn("已自动保存首次部署时的初始 DNS 配置", install_result.stdout)
 
         self.resolv.write_text("nameserver 192.0.2.53\n")
-        menu_result = self.run_script("menu", input_text="9\ny\n0\n")
+        menu_result = self.run_script("menu", input_text="8\ny\n0\n")
         self.assertIn(
             "初始 DNS 备份: 已保存（DNS: 10.0.0.2）",
             menu_result.stdout,

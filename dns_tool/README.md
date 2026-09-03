@@ -29,26 +29,22 @@ sudo dns_tool
 “一键恢复首次修改前的初始配置”。首次安装完成后，即使尚未切换 DNS，也可以使用
 该恢复选项。
 
-菜单首项是 Zouter 流媒体解锁 DNS `151.243.229.229`，此外还内置 Cloudflare、
-Google、Quad9、AdGuard 和 AliDNS，也可以输入 1 到 4 个自定义 IPv4/IPv6 DNS 地址。
+菜单内置 Cloudflare、Google、Quad9、AdGuard 和 AliDNS，也可以输入 1 到 4 个自定义
+IPv4/IPv6 DNS 地址。
 
 ## 命令模式
 
 直接切换公共 DNS：
 
 ```bash
-sudo dns_tool set zouter
 sudo dns_tool set cloudflare
 sudo dns_tool set alidns
 ```
 
-Zouter 预设只配置服务商指定的 `151.243.229.229`，不会混入其他备用 DNS，以免流媒体
-查询绕过解锁服务。在 Zouter 日本 VPS 上已验证该地址的 UDP DNS 查询可用；服务商
-当前未开放 TCP/53，因此极少数必须回退到 TCP 的超大 DNS 响应可能失败。
-
 使用自定义 DNS：
 
 ```bash
+sudo dns_tool set custom 151.243.229.229
 sudo dns_tool set custom 1.1.1.1 2606:4700:4700::1111
 ```
 

@@ -37,7 +37,7 @@ usage() {
 用法：
   $PROGRAM
   $PROGRAM status
-  $PROGRAM set <zouter|cloudflare|google|quad9|adguard|alidns>
+  $PROGRAM set <cloudflare|google|quad9|adguard|alidns>
   $PROGRAM set custom <DNS地址> [DNS地址...]
   $PROGRAM restore
   $PROGRAM install
@@ -72,9 +72,6 @@ require_absolute_paths() {
 
 provider_addresses() {
     case $(lowercase "$1") in
-        zouter)
-            printf '%s\n' 151.243.229.229
-            ;;
         cloudflare)
             printf '%s\n' 1.1.1.1 1.0.0.1 2606:4700:4700::1111 2606:4700:4700::1001
             ;;
@@ -511,21 +508,19 @@ interactive_menu() {
         printf '\n=== VPS DNS 切换工具 ===\n'
         show_initial_backup_summary
         printf '\n'
-        printf '1. Zouter 流媒体解锁 DNS\n2. Cloudflare\n3. Google\n'
-        printf '4. Quad9\n5. AdGuard\n6. AliDNS\n'
-        printf '7. 自定义 DNS\n8. 查看状态\n9. 一键恢复首次修改前的初始配置\n0. 退出\n'
+        printf '1. Cloudflare\n2. Google\n3. Quad9\n4. AdGuard\n5. AliDNS\n'
+        printf '6. 自定义 DNS\n7. 查看状态\n8. 一键恢复首次修改前的初始配置\n0. 退出\n'
         printf '请选择: '
         local choice provider input
         local -a addresses
         IFS= read -r choice || return 0
         case $choice in
-            1) provider=zouter ;;
-            2) provider=cloudflare ;;
-            3) provider=google ;;
-            4) provider=quad9 ;;
-            5) provider=adguard ;;
-            6) provider=alidns ;;
-            7)
+            1) provider=cloudflare ;;
+            2) provider=google ;;
+            3) provider=quad9 ;;
+            4) provider=adguard ;;
+            5) provider=alidns ;;
+            6)
                 printf '请输入 1-4 个 IPv4/IPv6 DNS 地址（空格分隔）: '
                 IFS= read -r input || continue
                 read -r -a addresses <<<"$input"
@@ -533,8 +528,8 @@ interactive_menu() {
                 prompt_yes_no "确认切换为 ${addresses[*]}？" && set_dns custom "${addresses[@]}"
                 continue
                 ;;
-            8) show_status; continue ;;
-            9)
+            7) show_status; continue ;;
+            8)
                 prompt_yes_no '确认一键恢复首次修改前的初始 DNS 配置？' && restore_original
                 continue
                 ;;

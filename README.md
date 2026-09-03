@@ -102,9 +102,9 @@ sudo dns_tool set cloudflare
 dns_tool status
 ```
 
-工具支持 Zouter 流媒体解锁 DNS、Cloudflare、Google、Quad9、AdGuard、AliDNS 和
-自定义 IPv4/IPv6 地址，不会重启网卡。安装时会立即保存初始 DNS 配置，后续重复
-安装或切换不会覆盖；运行 `sudo dns_tool restore` 可随时一键恢复该初始版本。
+工具支持 Cloudflare、Google、Quad9、AdGuard、AliDNS 和自定义 IPv4/IPv6 地址，
+不会重启网卡。安装时会立即保存初始 DNS 配置，后续重复安装或切换不会覆盖；运行
+`sudo dns_tool restore` 可随时一键恢复该初始版本。
 
 ## 安全原则
 
