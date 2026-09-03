@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | `restart-mmw-agent` | 完整重启并验证 `mmw-agent.service`，显示 PID、内存和 TCP 连接变化 | [查看说明](restart-mmw-agent/README.md) |
 | `safe-ssh-port` | 安全切换 OpenSSH 单端口，并管理端口、IP 与国家黑白名单 | [查看说明](safe-ssh-port/README.md) |
+| `dns_tool` | 一键切换公共或自定义 DNS，自动适配常见管理服务并支持原始配置恢复 | [查看说明](dns_tool/README.md) |
 | `vpspc` | 审计 SSH、订阅访问及可选 Falco 行为，按规则向 Telegram 预警，不自动封禁 | [查看说明](vpspc/README.md) |
 
 ## vpspc 快速使用
@@ -85,6 +86,25 @@ ssh -p 新端口 root@服务器IP
 ```bash
 sudo restart-mmw-agent
 ```
+
+## dns_tool 快速使用
+
+下载安装脚本：
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/dns_tool/dns_tool.sh' -o /tmp/dns_tool.sh && sudo bash /tmp/dns_tool.sh install
+```
+
+安装后运行 `sudo dns_tool` 进入中文菜单，或直接切换并查看状态：
+
+```bash
+sudo dns_tool set cloudflare
+dns_tool status
+```
+
+工具支持 Zouter 流媒体解锁 DNS、Cloudflare、Google、Quad9、AdGuard、AliDNS 和
+自定义 IPv4/IPv6 地址，不会重启网卡。安装时会立即保存初始 DNS 配置，后续重复
+安装或切换不会覆盖；运行 `sudo dns_tool restore` 可随时一键恢复该初始版本。
 
 ## 安全原则
 
