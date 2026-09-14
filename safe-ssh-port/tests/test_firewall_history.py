@@ -87,6 +87,46 @@ class FirewallHistoryTest(unittest.TestCase):
         result = self.run_bash(body)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_country_cidr_validation_uses_mawk_compatible_quantifiers(self):
+        script = SCRIPT.read_text(encoding="utf-8")
+        country_set_builder = script[
+            script.index("build_country_temp_set()") : script.index(
+                "rollback_activated_country_set()"
+            )
+        ]
+        self.assertNotIn("{1,2}", country_set_builder)
+        self.assertNotIn("{1,3}", country_set_builder)
+        self.assertIn("[0-9][0-9]?", country_set_builder)
+        self.assertIn("[0-9][0-9]?[0-9]?", country_set_builder)
+
+    def test_country_cidr_validation_accepts_prefix_lengths_on_both_families(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temp_dir = Path(directory)
+            ipv4_file = temp_dir / "ipv4.zone"
+            ipv6_file = temp_dir / "ipv6.zone"
+            restored_file = temp_dir / "restored.txt"
+            ipv4_file.write_text("1.0.0.0/8\n203.0.113.0/24\n", encoding="utf-8")
+            ipv6_file.write_text("2001:db8::/9\n2001:db8:1::/128\n", encoding="utf-8")
+            body = textwrap.dedent(
+                f"""
+                source {SCRIPT!s}
+                restored_file={restored_file!s}
+                ipset() {{
+                    case "$1" in
+                        create|destroy) return 0 ;;
+                        restore) cat "$3" >> "$restored_file" ;;
+                        *) return 1 ;;
+                    esac
+                }}
+                build_country_temp_set {ipv4_file!s} 4 test_ipv4
+                build_country_temp_set {ipv6_file!s} 6 test_ipv6
+                expected=$'add test_ipv4 1.0.0.0/8\nadd test_ipv4 203.0.113.0/24\nadd test_ipv6 2001:db8::/9\nadd test_ipv6 2001:db8:1::/128'
+                [[ $(cat "$restored_file") == "$expected" ]]
+                """
+            )
+            result = self.run_bash(body)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_note_prompt_trims_blank_and_rejects_control_characters(self):
         body = textwrap.dedent(
             f"""

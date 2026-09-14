@@ -1837,8 +1837,10 @@ build_country_temp_set() {
         {
             sub(/\r$/, "")
             if (NF != 1) { valid=0; next }
-            if (family == 4 && $1 !~ /^[0-9.]+\/[0-9]{1,2}$/) { valid=0; next }
-            if (family == 6 && $1 !~ /^[0-9A-Fa-f:]+\/[0-9]{1,3}$/) { valid=0; next }
+            # Avoid ERE interval quantifiers here: default Debian mawk treats
+            # interval syntax literally, which rejects every valid CIDR.
+            if (family == 4 && $1 !~ /^[0-9.]+\/[0-9][0-9]?$/) { valid=0; next }
+            if (family == 6 && $1 !~ /^[0-9A-Fa-f:]+\/[0-9][0-9]?[0-9]?$/) { valid=0; next }
             print "add", set_name, $1
             count++
         }

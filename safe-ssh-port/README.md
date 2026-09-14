@@ -237,6 +237,7 @@ sudo safe-ssh-port switch 21919 --cloud-firewall-ready --enable-main-password
 现有集合，不会应用网页错误内容或只更新一个协议族。屏蔽国家前还会检查当前 SSH
 客户端是否位于下载后的集合中；若命中则拒绝应用。国家白名单模式会为当前 SSH
 客户端添加精确 `RETURN` 例外，但该来源仍需通过已有端口规则。
+CIDR 格式检查使用兼容 Debian/Ubuntu 默认 `mawk` 的写法，不要求额外安装 `gawk`。
 
 IP/国家功能目前只在 iptables/iptables-nft 后端提供。UFW、firewalld 仍可管理
 端口，但脚本不会在它们背后混入隐藏的 raw iptables 来源规则；原生自定义
