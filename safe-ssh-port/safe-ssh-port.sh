@@ -1073,12 +1073,13 @@ public_listeners() {
 
 iptables_rule_records_for_command() {
     local command_name=$1 family=$2
-    if "$command_name" -S "$FIREWALL_CHAIN" >/dev/null 2>&1 &&
-       "$command_name" -C INPUT -j "$FIREWALL_CHAIN" >/dev/null 2>&1; then
-        "$command_name" -S "$FIREWALL_CHAIN" 2>/dev/null
-    else
+    {
         "$command_name" -S INPUT 2>/dev/null
-    fi | awk -v family="$family" '
+        if "$command_name" -S "$FIREWALL_CHAIN" >/dev/null 2>&1 &&
+           "$command_name" -C INPUT -j "$FIREWALL_CHAIN" >/dev/null 2>&1; then
+            "$command_name" -S "$FIREWALL_CHAIN" 2>/dev/null
+        fi
+    } | awk -v family="$family" '
         $1 == "-A" {
             protocol=""; port=""; verdict=""
             for (i=1; i<=NF; i++) {
@@ -1199,6 +1200,7 @@ firewall_action_label() {
     case ${1:-} in
         open) printf '开放\n' ;;
         close) printf '关闭\n' ;;
+        allow-all) printf '放行所有端口\n' ;;
         *) printf '%s\n' "${1:-未知}" ;;
     esac
 }
@@ -2074,8 +2076,8 @@ prompt_firewall_protocols() {
             printf '请选择协议：\n  1. TCP\n  2. UDP\n  3. TCP + UDP（推荐）\n  0. 取消\n'
             ;;
         close)
-            default_choice=1
-            printf '请选择协议：\n  1. TCP（默认）\n  2. UDP\n  3. TCP + UDP\n  0. 取消\n'
+            default_choice=3
+            printf '请选择协议：\n  1. TCP\n  2. UDP\n  3. TCP + UDP（默认）\n  0. 取消\n'
             ;;
         *)
             warn "不支持的协议选择操作：$action"
@@ -2151,23 +2153,23 @@ iptables_remove_lockdown_allow_rule() {
 }
 
 iptables_apply_tagged_port() {
-    local action=$1 port=$2 protocols=$3 command_name protocol chain verdict opposite failed=no
+    local action=$1 port=$2 protocols=$3 command_name protocol chain
     for command_name in iptables ip6tables; do
         command -v "$command_name" >/dev/null 2>&1 || continue
         chain=$(iptables_target_chain "$command_name")
         for protocol in $protocols; do
-            if [[ $action == open ]]; then verdict=ACCEPT; opposite=DROP; else verdict=DROP; opposite=ACCEPT; fi
-            if [[ $action == close ]] &&
-               ! iptables_remove_lockdown_allow_rule "$command_name" "$chain" "$protocol" "$port"; then
-                failed=yes
-            elif ! iptables_remove_tagged_rule "$command_name" "$chain" "$protocol" "$port" "$opposite"; then
-                failed=yes
-            elif ! "$command_name" -C "$chain" -p "$protocol" --dport "$port" -m comment --comment allentool-managed -j "$verdict" 2>/dev/null; then
-                "$command_name" -I "$chain" 1 -p "$protocol" --dport "$port" -m comment --comment allentool-managed -j "$verdict" || failed=yes
+            # A deny in the managed subchain can be bypassed by an earlier INPUT allow.
+            # Keep explicit denies at the head of INPUT; remove older managed copies.
+            iptables_remove_tagged_rule "$command_name" INPUT "$protocol" "$port" DROP || return 1
+            if [[ $chain != INPUT ]]; then
+                iptables_remove_tagged_rule "$command_name" "$chain" "$protocol" "$port" DROP || return 1
             fi
-            if [[ $failed == yes ]]; then
-                warn '防火墙端口规则修改失败；已完成的规则保持现状，请查看菜单中的实时规则。'
-                return 1
+            iptables_remove_tagged_rule "$command_name" "$chain" "$protocol" "$port" ACCEPT || return 1
+            if [[ $action == close ]]; then
+                iptables_remove_lockdown_allow_rule "$command_name" "$chain" "$protocol" "$port" || return 1
+                "$command_name" -I INPUT 1 -p "$protocol" --dport "$port" -m comment --comment allentool-managed -j DROP || return 1
+            else
+                "$command_name" -I "$chain" 1 -p "$protocol" --dport "$port" -m comment --comment allentool-managed -j ACCEPT || return 1
             fi
         done
     done
@@ -2203,18 +2205,21 @@ firewall_apply_port() {
                     ufw allow "${port}/${protocol}" || return 1
                 else
                     ufw --force delete allow "${port}/${protocol}" >/dev/null 2>&1 || true
-                    ufw deny "${port}/${protocol}" || return 1
+                    ufw --force delete deny "${port}/${protocol}" >/dev/null 2>&1 || true
+                    ufw insert 1 deny "${port}/${protocol}" || return 1
                 fi
             done
             ;;
         firewalld)
             for protocol in $protocols; do
-                rich_rule="rule priority=\"-100\" port port=\"${port}\" protocol=\"${protocol}\" drop"
+                rich_rule="rule priority=\"-101\" port port=\"${port}\" protocol=\"${protocol}\" drop"
                 if [[ $action == open ]]; then
                     firewall-cmd --permanent --remove-rich-rule="$rich_rule" >/dev/null 2>&1 || true
+                    firewall-cmd --permanent --remove-rich-rule="rule priority=\"-100\" port port=\"${port}\" protocol=\"${protocol}\" drop" >/dev/null 2>&1 || true
                     firewall-cmd --permanent --add-port="${port}/${protocol}" || return 1
                 else
                     firewall-cmd --permanent --remove-port="${port}/${protocol}" || true
+                    firewall-cmd --permanent --remove-rich-rule="rule priority=\"-100\" port port=\"${port}\" protocol=\"${protocol}\" drop" >/dev/null 2>&1 || true
                     firewall-cmd --permanent --add-rich-rule="$rich_rule" || return 1
                 fi
             done
@@ -2232,6 +2237,86 @@ firewall_apply_port() {
     esac
     if [[ $action == open ]]; then action_label=开放; else action_label=关闭; fi
     log "已${action_label}端口 ${port}（${protocols// /+}）。"
+}
+
+iptables_apply_allow_all() {
+    local command_name target_chain protocol port
+    for command_name in iptables ip6tables; do
+        command -v "$command_name" >/dev/null 2>&1 || continue
+        # Only remove this tool's explicit port denies; source blacklists remain active.
+        while read -r protocol port; do
+            [[ -n $protocol && -n $port ]] || continue
+            iptables_remove_tagged_rule "$command_name" INPUT "$protocol" "$port" DROP || return 1
+        done < <("$command_name" -S INPUT 2>/dev/null | awk '
+            $1 == "-A" && $2 == "INPUT" {
+                protocol=""; port=""; comment=""; verdict=""
+                for (i=1; i<=NF; i++) {
+                    if ($i == "-p") protocol=$(i+1)
+                    if ($i == "--dport") port=$(i+1)
+                    if ($i == "--comment") { comment=$(i+1); gsub(/"/, "", comment) }
+                    if ($i == "-j") verdict=$(i+1)
+                }
+                if ((protocol == "tcp" || protocol == "udp") && port ~ /^[0-9]+$/ &&
+                    comment == "allentool-managed" && verdict == "DROP") print protocol, port
+            }
+        ' | sort -u)
+        for target_chain in INPUT "$FIREWALL_CHAIN"; do
+            while "$command_name" -C "$target_chain" -m comment --comment allentool-managed-allow-all -j ACCEPT 2>/dev/null; do
+                "$command_name" -D "$target_chain" -m comment --comment allentool-managed-allow-all -j ACCEPT || return 1
+            done
+        done
+        target_chain=$(iptables_target_chain "$command_name")
+        "$command_name" -I "$target_chain" 1 -m comment --comment allentool-managed-allow-all -j ACCEPT || return 1
+    done
+    persist_iptables_rules yes
+}
+
+firewall_apply_allow_all() {
+    local backend rich_rule
+    backend=$(detect_firewall_backend)
+    case $backend in
+        ufw)
+            if ! ufw status 2>/dev/null | grep -Eq 'Anywhere[[:space:]]+ALLOW IN[[:space:]]+Anywhere'; then
+                ufw insert 1 allow in || return 1
+            fi
+            ;;
+        firewalld)
+            rich_rule='rule priority="-100" accept'
+            if ! firewall-cmd --permanent --query-rich-rule="$rich_rule" >/dev/null 2>&1; then
+                firewall-cmd --permanent --add-rich-rule="$rich_rule" || return 1
+            fi
+            firewall-cmd --reload || return 1
+            ;;
+        iptables)
+            iptables_apply_allow_all || return 1
+            ;;
+        nftables)
+            warn '检测到原生 nftables 自定义规则，拒绝猜测表和链；请人工处理。'
+            return 1
+            ;;
+        none)
+            warn '没有检测到可管理的主机防火墙。'
+            return 1
+            ;;
+    esac
+}
+
+firewall_allow_all_interactive() {
+    local backend confirmation
+    warn '此操作将允许所有 IPv4/IPv6 入站端口，现有端口限制规则可能不再生效。'
+    printf '请输入 yes 确认放行所有端口，其他输入取消: '
+    read -r confirmation
+    [[ $confirmation == yes ]] || {
+        printf '已取消。\n'
+        return 0
+    }
+    backend=$(detect_firewall_backend)
+    if firewall_apply_allow_all; then
+        firewall_record_operation success allow-all all 'tcp udp' "$backend" '放行所有入站端口' || true
+        log '已放行所有 IPv4/IPv6 入站端口。'
+    else
+        firewall_record_operation failed allow-all all 'tcp udp' "$backend" '放行所有入站端口' || true
+    fi
 }
 
 firewall_open_interactive() {
@@ -2439,10 +2524,10 @@ firewall_menu() {
         printf '  6. 保留 SSH 和当前公网监听端口\n'
         printf '  7. 安装/修复防火墙持久化\n'
         printf '  8. IP 黑白名单         9. 国家黑白名单\n'
-        printf ' 10. 查看最近端口操作\n'
+        printf ' 10. 查看最近端口操作   11. 放行所有端口\n'
         printf '%s\n' '----------------------------------------'
         printf '  0. 返回上一级菜单\n'
-        printf '请选择 [0-10]: '
+        printf '请选择 [0-11]: '
         read -r choice
         case $choice in
             1) firewall_open_interactive ;;
@@ -2455,6 +2540,7 @@ firewall_menu() {
             8) ip_access_menu ;;
             9) country_access_menu ;;
             10) show_firewall_operation_history ;;
+            11) firewall_allow_all_interactive ;;
             0|q|Q) return 0 ;;
             *) printf '选项无效，请重新输入。\n' ;;
         esac
