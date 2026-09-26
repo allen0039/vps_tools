@@ -3,6 +3,7 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
+ALLENTOOL_VERSION=2026.09.26.1
 INSTALL_PATH=${SAFE_SSH_PORT_INSTALL_PATH:-/usr/local/sbin/safe-ssh-port}
 ALLENTOOL_PATH=${ALLENTOOL_PATH:-/usr/local/bin/allentool}
 SSHD_CONFIG=${SAFE_SSH_PORT_CONFIG:-/etc/ssh/sshd_config}
@@ -81,6 +82,7 @@ usage() {
   $PROGRAM firewall
   $PROGRAM install
   $PROGRAM install-shortcut
+  $PROGRAM --version
   sudo $PROGRAM switch <新端口> [--cloud-firewall-ready] [--skip-host-firewall]
                                [--enable-main-password]
   sudo $PROGRAM status
@@ -2807,7 +2809,11 @@ show_status() {
 menu_mode() {
     local choice
     while true; do
-        printf '\nallentool VPS 工具\n'
+        if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
+            printf '\nallentool VPS 工具  \033[2;33mv%s\033[0m\n' "$ALLENTOOL_VERSION"
+        else
+            printf '\nallentool VPS 工具  v%s\n' "$ALLENTOOL_VERSION"
+        fi
         printf '  1. 修改 SSH 端口\n'
         printf '  2. 从备份恢复 SSH 设置\n'
         printf '  3. 查看 SSH 状态\n'
@@ -2837,6 +2843,11 @@ main() {
     case $action in
         -h|--help|help)
             usage
+            return 0
+            ;;
+        -V|--version|version)
+            (($# == 0)) || die 'version 不接受额外参数。'
+            printf 'allentool v%s\n' "$ALLENTOOL_VERSION"
             return 0
             ;;
         menu)
