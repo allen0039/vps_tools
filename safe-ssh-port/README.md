@@ -70,7 +70,7 @@ allentool
 会显示：
 
 ```text
-allentool VPS 工具  v2026.09.26.1
+allentool VPS 工具  v0.1.5
 1. 修改 SSH 端口
 2. 从备份恢复 SSH 设置
 3. 查看 SSH 状态
@@ -80,6 +80,8 @@ allentool VPS 工具  v2026.09.26.1
 
 交互终端中的版本号以低亮度黄色显示；不支持颜色或设置了 `NO_COLOR` 时使用普通文字。
 也可以运行 `safe-ssh-port --version` 查询当前安装版本。
+后续每次向 `main` 推送脚本更新，GitHub Actions 测试通过后会自动递增补丁版本号；
+若该次更新已手动修改版本号，则保留手动设置的版本。
 
 也可以直接运行 `sudo safe-ssh-port interactive` 进入端口修改流程，或运行
 `sudo safe-ssh-port restore` 进入备份恢复流程。防火墙菜单可直接运行：

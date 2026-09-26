@@ -16,7 +16,7 @@ permissions:
 
 concurrency:
   group: safe-ssh-port-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   verify:
@@ -29,3 +29,28 @@ jobs:
         run: bash -n safe-ssh-port/safe-ssh-port.sh
       - name: Run safe-ssh-port tests
         run: python3 -m unittest discover -s safe-ssh-port/tests -p 'test_*.py'
+
+  bump-version:
+    if: github.event_name == 'push' && github.actor != 'github-actions[bot]'
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Increment script version
+        env:
+          PREVIOUS_SHA: ${{ github.event.before }}
+        run: |
+          python3 safe-ssh-port/tools/bump_version.py
+          if ! git diff --quiet -- safe-ssh-port/safe-ssh-port.sh; then
+            bash -n safe-ssh-port/safe-ssh-port.sh
+            python3 -m unittest discover -s safe-ssh-port/tests -p 'test_*.py'
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add safe-ssh-port/safe-ssh-port.sh
+            git commit -m 'chore: bump allentool patch version'
+            git push origin HEAD:main
+          fi

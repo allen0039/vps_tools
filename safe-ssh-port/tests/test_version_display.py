@@ -1,6 +1,7 @@
 import errno
 import os
 import pty
+import re
 import select
 import shlex
 import subprocess
@@ -10,6 +11,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = PROJECT_ROOT / "safe-ssh-port" / "safe-ssh-port.sh"
+VERSION = re.search(r"(?m)^ALLENTOOL_VERSION=(\d+\.\d+\.\d+)$", SCRIPT.read_text()).group(1)
 
 
 class VersionDisplayTest(unittest.TestCase):
@@ -54,7 +56,7 @@ class VersionDisplayTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "allentool v2026.09.26.1\n")
+        self.assertEqual(result.stdout, f"allentool v{VERSION}\n")
 
     def test_menu_version_is_plain_text_when_redirected(self):
         result = subprocess.run(
@@ -65,18 +67,18 @@ class VersionDisplayTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("allentool VPS 工具  v2026.09.26.1", result.stdout)
+        self.assertIn(f"allentool VPS 工具  v{VERSION}", result.stdout)
         self.assertNotIn("\x1b[", result.stdout)
 
     def test_menu_version_is_dim_yellow_in_terminal(self):
         returncode, output = self.run_menu_in_terminal()
         self.assertEqual(returncode, 0)
-        self.assertIn(b"\x1b[2;33mv2026.09.26.1\x1b[0m", output)
+        self.assertIn(f"\x1b[2;33mv{VERSION}\x1b[0m".encode(), output)
 
     def test_no_color_disables_terminal_escape_codes(self):
         returncode, output = self.run_menu_in_terminal(no_color=True)
         self.assertEqual(returncode, 0)
-        self.assertIn(b"v2026.09.26.1", output)
+        self.assertIn(f"v{VERSION}".encode(), output)
         self.assertNotIn(b"\x1b[", output)
 
 
