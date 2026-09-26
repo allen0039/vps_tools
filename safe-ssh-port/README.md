@@ -67,15 +67,16 @@ sudo safe-ssh-port install-shortcut
 allentool
 ```
 
-会显示：
+例如会显示：
 
 ```text
-allentool VPS 工具  v0.1.5
-1. 修改 SSH 端口
-2. 从备份恢复 SSH 设置
-3. 查看 SSH 状态
-4. 防火墙管理
-5. 退出
+allentool VPS 工具
+      v0.1.x
+  1. 修改 SSH 端口
+  2. 从备份恢复 SSH 设置
+  3. 查看 SSH 状态
+  4. 防火墙管理
+  5. 退出
 ```
 
 交互终端中的版本号以低亮度黄色显示；不支持颜色或设置了 `NO_COLOR` 时使用普通文字。

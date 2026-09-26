@@ -2807,12 +2807,16 @@ show_status() {
 }
 
 menu_mode() {
-    local choice
+    local choice version_indent=$(( (18 - ${#ALLENTOOL_VERSION} - 1) / 2 ))
+    if ((version_indent < 0)); then
+        version_indent=0
+    fi
     while true; do
+        printf '\nallentool VPS 工具\n'
         if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
-            printf '\nallentool VPS 工具  \033[2;33mv%s\033[0m\n' "$ALLENTOOL_VERSION"
+            printf '%*s\033[2;33mv%s\033[0m\n' "$version_indent" '' "$ALLENTOOL_VERSION"
         else
-            printf '\nallentool VPS 工具  v%s\n' "$ALLENTOOL_VERSION"
+            printf '%*sv%s\n' "$version_indent" '' "$ALLENTOOL_VERSION"
         fi
         printf '  1. 修改 SSH 端口\n'
         printf '  2. 从备份恢复 SSH 设置\n'
