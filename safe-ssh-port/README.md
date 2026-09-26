@@ -70,8 +70,7 @@ allentool
 例如会显示：
 
 ```text
-allentool VPS 工具
-      v0.1.x
+allentool VPS 工具  v0.1.x
   1. 修改 SSH 端口
   2. 从备份恢复 SSH 设置
   3. 查看 SSH 状态

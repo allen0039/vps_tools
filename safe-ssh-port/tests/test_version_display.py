@@ -12,7 +12,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = PROJECT_ROOT / "safe-ssh-port" / "safe-ssh-port.sh"
 VERSION = re.search(r"(?m)^ALLENTOOL_VERSION=(\d+\.\d+\.\d+)$", SCRIPT.read_text()).group(1)
-VERSION_INDENT = " " * max(0, (18 - len(VERSION) - 1) // 2)
 
 
 class VersionDisplayTest(unittest.TestCase):
@@ -68,24 +67,21 @@ class VersionDisplayTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"allentool VPS 工具\n{VERSION_INDENT}v{VERSION}\n", result.stdout)
+        self.assertIn(f"allentool VPS 工具  v{VERSION}\n", result.stdout)
         self.assertNotIn("\x1b[", result.stdout)
 
     def test_menu_version_is_dim_yellow_in_terminal(self):
         returncode, output = self.run_menu_in_terminal()
         self.assertEqual(returncode, 0)
-        self.assertIn(
-            f"allentool VPS 工具\r\n{VERSION_INDENT}\x1b[2;33mv{VERSION}\x1b[0m\r\n".encode(),
-            output,
-        )
+        self.assertIn(f"allentool VPS 工具  \x1b[2;33mv{VERSION}\x1b[0m\r\n".encode(), output)
 
     def test_no_color_disables_terminal_escape_codes(self):
         returncode, output = self.run_menu_in_terminal(no_color=True)
         self.assertEqual(returncode, 0)
-        self.assertIn(f"allentool VPS 工具\r\n{VERSION_INDENT}v{VERSION}\r\n".encode(), output)
+        self.assertIn(f"allentool VPS 工具  v{VERSION}\r\n".encode(), output)
         self.assertNotIn(b"\x1b[", output)
 
-    def test_longer_version_is_centered(self):
+    def test_longer_version_stays_on_title_line(self):
         result = subprocess.run(
             ["bash", "-c", f"source {shlex.quote(str(SCRIPT))}; ALLENTOOL_VERSION=0.1.1234; menu_mode"],
             input="5\n",
@@ -94,7 +90,7 @@ class VersionDisplayTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("allentool VPS 工具\n    v0.1.1234\n", result.stdout)
+        self.assertIn("allentool VPS 工具  v0.1.1234\n", result.stdout)
 
 
 if __name__ == "__main__":
