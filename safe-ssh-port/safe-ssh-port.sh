@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
-ALLENTOOL_VERSION=0.1.5
+ALLENTOOL_VERSION=0.1.6
 INSTALL_PATH=${SAFE_SSH_PORT_INSTALL_PATH:-/usr/local/sbin/safe-ssh-port}
 ALLENTOOL_PATH=${ALLENTOOL_PATH:-/usr/local/bin/allentool}
 SSHD_CONFIG=${SAFE_SSH_PORT_CONFIG:-/etc/ssh/sshd_config}
