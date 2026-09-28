@@ -10,6 +10,7 @@ TEMP_SWAP=
 OLD_BACKUP=
 NEW_AT_TARGET=0
 ACTIVATED=0
+OLD_DISABLED=0
 
 log() { printf '[swaptool] %s\n' "$*"; }
 die() { printf '[swaptool] 错误: %s\n' "$*" >&2; exit 1; }
@@ -17,11 +18,12 @@ die() { printf '[swaptool] 错误: %s\n' "$*" >&2; exit 1; }
 usage() {
     cat <<'EOF'
 用法：
-  sudo bash swap_tool.sh install [大小] 一键安装 swaptool 并创建或修复 /swapfile
+  sudo bash swap_tool.sh install        安装 swaptool 并打开交互菜单
+  swaptool                             打开交互菜单，自选或输入 swap 大小
   sudo bash swap_tool.sh setup [大小]   创建或修复 /swapfile；默认沿用旧文件大小，无旧文件时为 2G
   swaptool status                       查看实际启用状态
 
-大小示例：512M、2G。现有 /swapfile 已启用时，不会中断它；可补齐 fstab 配置。
+安装时也可指定大小以跳过菜单，例如 install 1536M。交互菜单支持直接输入 MiB 数字。
 EOF
 }
 
@@ -89,6 +91,9 @@ on_exit() {
             if [[ -n $OLD_BACKUP ]]; then
                 mv -- "$OLD_BACKUP" "$SWAP_FILE" || printf '[swaptool] 错误: 无法自动恢复旧文件：%s\n' "$OLD_BACKUP" >&2
             fi
+            if (( OLD_DISABLED == 1 )) && [[ -f $SWAP_FILE ]] && ! active_swapfile; then
+                swapon "$SWAP_FILE" || printf '[swaptool] 错误: 无法重新启用旧 /swapfile，请检查备份和系统状态。\n' >&2
+            fi
         fi
     elif (( code != 0 && ACTIVATED == 1 )); then
         printf '[swaptool] /swapfile 已启用，但后续步骤失败；请重新运行 setup 检查开机配置。\n' >&2
@@ -97,6 +102,8 @@ on_exit() {
     exit "$code"
 }
 trap 'on_exit $?' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 create_swapfile() {
     local fs_type=$1 size=$2
@@ -120,10 +127,15 @@ create_swapfile() {
 }
 
 setup() {
-    local fs_type size old_size backup_path requested=${1:-}
+    local fs_type size old_size old_used_kib backup_path requested=${1:-}
+    TEMP_SWAP=
+    OLD_BACKUP=
+    NEW_AT_TARGET=0
+    ACTIVATED=0
+    OLD_DISABLED=0
     [[ $(uname -s) == Linux ]] || die '此脚本只能在 Linux 上运行。'
     (( EUID == 0 )) || die 'setup 必须以 root 身份运行。'
-    for cmd in awk blkid fallocate findmnt mkswap stat swapon mktemp; do
+    for cmd in awk blkid fallocate findmnt mkswap stat swapon swapoff mktemp; do
         command -v "$cmd" >/dev/null 2>&1 || die "缺少命令: $cmd"
     done
     [[ -f $FSTAB && ! -L $FSTAB ]] || die '找不到普通文件 /etc/fstab。'
@@ -131,15 +143,24 @@ setup() {
     [[ ! -e $SWAP_FILE || -f $SWAP_FILE ]] || die '/swapfile 不是普通文件，拒绝覆盖。'
 
     if active_swapfile; then
-        if [[ -n $requested ]]; then
-            size=$(parse_size "$requested")
-            old_size=$(stat -c %s "$SWAP_FILE")
-            (( size == old_size )) || die '/swapfile 已启用；为避免耗尽内存，不会执行 swapoff。请先确认可安全切换。'
+        old_size=$(stat -c %s "$SWAP_FILE")
+        if [[ -z $requested ]]; then
+            if ! fstab_is_canonical; then ensure_fstab; fi
+            log '/swapfile 已在运行，保留当前交换空间。'
+            status
+            return
         fi
-        if ! fstab_is_canonical; then ensure_fstab; fi
-        log '/swapfile 已在运行，保留当前交换空间。'
-        status
-        return
+        size=$(parse_size "$requested")
+        if (( size == old_size )); then
+            if ! fstab_is_canonical; then ensure_fstab; fi
+            log '/swapfile 已是指定大小，保留当前交换空间。'
+            status
+            return
+        fi
+        old_used_kib=$(awk -v path="$SWAP_FILE" 'NR > 1 && $1 == path { print $4 }' /proc/swaps)
+        [[ $old_used_kib =~ ^[0-9]+$ ]] || die '无法读取现有 /swapfile 的使用量。'
+        (( old_used_kib == 0 )) || die '/swapfile 正在使用中；为避免影响运行，不自动调整大小。'
+        log '当前 /swapfile 使用量为 0，准备安全切换到新大小。'
     fi
 
     if [[ -e $SWAP_FILE ]]; then
@@ -160,6 +181,15 @@ setup() {
     [[ ! -e $TEMP_SWAP && ! -L $TEMP_SWAP ]] || die '临时路径已存在，请重试。'
     create_swapfile "$fs_type" "$size"
 
+    if active_swapfile; then
+        old_used_kib=$(awk -v path="$SWAP_FILE" 'NR > 1 && $1 == path { print $4 }' /proc/swaps)
+        (( ${old_used_kib:-1} == 0 )) || die '创建新文件期间，旧 /swapfile 开始被使用；已停止切换。'
+        if ! swapoff "$SWAP_FILE"; then
+            if ! active_swapfile; then OLD_DISABLED=1; fi
+            die '无法完成旧 /swapfile 的关闭，已停止切换。'
+        fi
+        OLD_DISABLED=1
+    fi
     if [[ -e $SWAP_FILE ]]; then
         backup_path="/swapfile.swaptool.bak.$(date +%Y%m%d%H%M%S).$$"
         [[ ! -e $backup_path && ! -L $backup_path ]] || die "备份路径已存在: $backup_path"
@@ -181,6 +211,48 @@ setup() {
     if [[ -n $OLD_BACKUP ]]; then
         log "确认运行稳定后，可自行删除旧文件以释放空间: $OLD_BACKUP"
     fi
+    OLD_BACKUP=
+    NEW_AT_TARGET=0
+    ACTIVATED=0
+    OLD_DISABLED=0
+}
+
+menu() {
+    local choice custom size summary
+    [[ $(uname -s) == Linux ]] || die '此脚本只能在 Linux 上运行。'
+    [[ -t 0 && -t 1 ]] || die '交互菜单需要终端；自动化场景请使用 setup <大小>。'
+    if (( EUID != 0 )); then
+        command -v sudo >/dev/null 2>&1 || die '请使用 sudo swaptool 打开菜单。'
+        exec sudo -- "$0" menu
+    fi
+    while :; do
+        summary=$(awk '
+            /^SwapTotal:/ { total=$2 }
+            /^SwapFree:/ { free=$2 }
+            END { used=total-free; pct=(total > 0 ? int(used*100/total) : 0);
+                  printf "%dM/%dM (%d%%)", int(used/1024), int(total/1024), pct }
+        ' /proc/meminfo)
+        printf '\n设置虚拟内存（swap）\n当前虚拟内存：%s\n' "$summary"
+        printf '%s\n' '------------------------------'
+        printf '%s\n' '1. 分配 1024M    2. 分配 2048M    3. 分配 4096M    4. 自定义大小'
+        printf '%s\n' '------------------------------' '0. 退出' '------------------------------'
+        read -r -p '请输入你的选择：' choice || return
+        case $choice in
+            1) size=1024M ;;
+            2) size=2048M ;;
+            3) size=4096M ;;
+            4)
+                read -r -p '请输入大小（例如 1536M、3G；纯数字按 M）：' custom || return
+                [[ $custom =~ ^[1-9][0-9]*$ ]] && custom="${custom}M"
+                if ! (parse_size "$custom" >/dev/null); then continue; fi
+                size=$custom
+                ;;
+            0) return ;;
+            *) log '无效选项，请重新输入。'; continue ;;
+        esac
+        setup "$size"
+        read -r -p '按回车返回菜单...' choice || return
+    done
 }
 
 status() {
@@ -212,13 +284,20 @@ install_tool() {
         install -m 0755 -- "$0" "$INSTALL_PATH" || die "无法安装到 $INSTALL_PATH。"
         log "命令已安装: $INSTALL_PATH"
     fi
-    "$INSTALL_PATH" setup "${1:-}"
+    if [[ -n ${1:-} ]]; then
+        "$INSTALL_PATH" setup "$1"
+    elif [[ -t 0 && -t 1 ]]; then
+        "$INSTALL_PATH" menu
+    else
+        log '安装完成。请在终端运行 swaptool，进入大小选择菜单。'
+    fi
 }
 
 case ${1:-} in
     install) (( $# <= 2 )) || die 'install 最多接受一个大小参数。'; install_tool "${2:-}" ;;
+    menu|'') (( $# <= 1 )) || die '菜单不接受参数。'; menu ;;
     setup) (( $# <= 2 )) || die 'setup 最多接受一个大小参数。'; setup "${2:-}" ;;
     status) (( $# == 1 )) || die 'status 不接受参数。'; status ;;
-    -h|--help|help|'') usage ;;
+    -h|--help|help) usage ;;
     *) usage >&2; exit 2 ;;
 esac

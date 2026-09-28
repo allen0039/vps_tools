@@ -14,34 +14,37 @@ Btrfs 上直接 `fallocate /swapfile` 后 `mkswap`，如果文件仍启用写时
 
 ## 使用
 
-先下载到 VPS，检查内容后执行。`install` 会安装 `/usr/local/bin/swaptool`，
-并立即创建或修复 `/swapfile`。以下为 GitHub 来源（仓库更新发布后可用）：
+在 VPS 终端运行下面的一行命令。`install` 会安装 `/usr/local/bin/swaptool`，然后
+打开交互菜单；只有选定大小后才创建或调整 `/swapfile`：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/swap_tool/swap_tool.sh' -o /tmp/swap_tool.sh
-less /tmp/swap_tool.sh
-sudo bash /tmp/swap_tool.sh install
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/swap_tool/swap_tool.sh' -o /tmp/swap_tool.sh && sudo bash /tmp/swap_tool.sh install
 ```
 
-Gitee 来源：
+菜单示例：
 
-```bash
-curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/swap_tool/swap_tool.sh' -o /tmp/swap_tool.sh
-less /tmp/swap_tool.sh
-sudo bash /tmp/swap_tool.sh install
+```text
+设置虚拟内存（swap）
+当前虚拟内存：0M/1023M (0%)
+------------------------------
+1. 分配 1024M    2. 分配 2048M    3. 分配 4096M    4. 自定义大小
+------------------------------
+0. 退出
+------------------------------
+请输入你的选择：
 ```
 
-现有 `/swapfile` 若有 swap 签名且未启用，`install` 默认沿用它的大小；不存在时默认
-创建 2G。也可以指定大小：
+自定义输入支持 `1536M`、`3G`，或者只输入 `1536`（按 MiB 计算），范围为
+64M 至 1024G。安装后再次进入菜单：
 
 ```bash
-sudo bash /tmp/swap_tool.sh install 1G
+swaptool
 swaptool status
 ```
 
-安装后再次修复或调整配置，运行 `sudo swaptool setup`；如果已有正在使用的
-`/swapfile`，脚本不会关闭它。尚未发布到 GitHub/Gitee 时，可以将本目录的
-`swap_tool.sh` 上传至 VPS 后执行同样的 `sudo bash /tmp/swap_tool.sh install`。
+自动化场景可跳过菜单，运行 `sudo swaptool setup 1536M`，或安装时运行
+`sudo bash /tmp/swap_tool.sh install 1536M`。不带大小的 `setup` 仍沿用现有
+`/swapfile` 的大小；没有旧文件时默认 2G。
 
 `status` 会显示根分区文件系统、`/swapfile` 是否实际启用、fstab 配置和全部当前
 交换空间。也可用系统命令独立检查：
@@ -53,8 +56,9 @@ cat /proc/swaps
 
 ## 安全行为与限制
 
-- 已启用的 `/swapfile` 不会被关闭或重建；若指定的大小与当前文件不一致，脚本会
-  停止，避免在内存紧张时调用 `swapoff`。
+- 调整已启用 `/swapfile` 的大小时，先创建新文件；只有当前文件使用量为 0，才会
+  关闭旧文件并切换。切换失败会尝试恢复并重新启用旧文件。使用量大于 0 时停止，
+  避免在内存紧张时调用 `swapoff`。
 - 修复失败的旧 `/swapfile` 会被重命名为 `/swapfile.swaptool.bak.*`；新文件成功启用
   后，确认稳定再自行删除旧备份以释放磁盘空间。创建新文件时需要额外的可用空间。
 - 修改 `/etc/fstab` 前会备份到 `/etc/fstab.swaptool.bak.*`；仅替换其中的

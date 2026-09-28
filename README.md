@@ -148,16 +148,15 @@ sudo dnstool status
 
 ## swap_tool 快速使用
 
-在 VPS 上下载并安装；默认会沿用失败的旧 `/swapfile` 大小，新建时默认 2G
-（仓库更新发布后可用）：
+在 VPS 上一键下载安装，然后通过菜单选择 1024M、2048M、4096M 或自定义大小：
 
 ```bash
 curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/swap_tool/swap_tool.sh' -o /tmp/swap_tool.sh && sudo bash /tmp/swap_tool.sh install
 ```
 
-指定大小可运行 `sudo swaptool setup 1G`；用
-`swaptool status` 或 `swapon --show` 检查实际启用状态。Gitee 下载地址
-及安全行为见 [swap_tool 详细说明](swap_tool/README.md)。
+安装后运行 `swaptool` 可以再次打开菜单；用 `swaptool status` 或
+`swapon --show` 检查实际启用状态。详细使用方式和安全行为见
+[swap_tool 详细说明](swap_tool/README.md)。
 
 ## 安全原则
 
