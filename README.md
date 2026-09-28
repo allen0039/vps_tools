@@ -10,6 +10,7 @@
 | `restart-mmw-agent` | 完整重启并验证 `mmw-agent.service`，显示 PID、内存和 TCP 连接变化 | [查看说明](restart-mmw-agent/README.md) |
 | `safe-ssh-port` | 安全切换 OpenSSH 单端口，并管理端口、IP 与国家黑白名单 | [查看说明](safe-ssh-port/README.md) |
 | `dns_tool` | 一键切换公共或自定义 DNS，自动适配常见管理服务并支持原始配置恢复 | [查看说明](dns_tool/README.md) |
+| `swap_tool` | 创建或修复 Btrfs 等文件系统上的 `/swapfile`，确认实际启用后写入开机配置 | [查看说明](swap_tool/README.md) |
 | `vpspc` | 审计 SSH、订阅访问及可选 Falco 行为，按规则向 Telegram 预警，不自动封禁 | [查看说明](vpspc/README.md) |
 
 ## vpspc 快速使用
@@ -144,6 +145,19 @@ sudo dnstool status
 工具支持 Cloudflare、Google、Quad9、AdGuard、AliDNS 和 1 至 4 个自定义 IPv4/IPv6
 地址，不会重启网卡。后续重复安装或切换不会覆盖初始备份。完整菜单、多个 DNS 的
 使用方式和不同系统的处理逻辑请查看 [dns_tool 详细说明](dns_tool/README.md)。
+
+## swap_tool 快速使用
+
+在 VPS 上下载并安装；默认会沿用失败的旧 `/swapfile` 大小，新建时默认 2G
+（仓库更新发布后可用）：
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/swap_tool/swap_tool.sh' -o /tmp/swap_tool.sh && sudo bash /tmp/swap_tool.sh install
+```
+
+指定大小可运行 `sudo swaptool setup 1G`；用
+`swaptool status` 或 `swapon --show` 检查实际启用状态。Gitee 下载地址
+及安全行为见 [swap_tool 详细说明](swap_tool/README.md)。
 
 ## 安全原则
 
