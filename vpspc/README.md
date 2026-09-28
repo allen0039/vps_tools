@@ -2,12 +2,12 @@
 
 这是一个“规则取证 + AI 复核”的常态化巡查服务，用于审计 VPS 用户的异常登录和疑似批量自动化行为。默认不会自动封号，也不会把原始日志或原始 IP 发给 AI。
 
-## 从 GitHub 一键部署
+## 从 Gitee 一键部署
 
-当前提供基于 systemd 的拉取部署方式。脚本会从 GitHub 下载公开源码，将部署副本保存到 `/opt/vps-audit-src`，然后进入交互安装：
+当前提供基于 systemd 的拉取部署方式。脚本会从 Gitee 下载公开源码，将部署副本保存到 `/opt/vps-audit-src`，然后进入交互安装。也可以设置 `VPSPC_DOWNLOAD_BASE` 或 `VPSPC_ARCHIVE_URL` 使用自建镜像：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh
+curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh
 ```
 
 建议在生产环境先下载并检查脚本内容，再使用 `sudo` 执行。需要固定版本时，可以下载脚本后指定提交 SHA 或标签：
@@ -36,7 +36,7 @@ sudo vpspc
 彻底删除一键安装器创建的程序、配置、审计数据、源码和可选 Falco 组件：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh destroy
+curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh destroy
 ```
 
 `destroy` 只删除带有 vpspc 管理标记的路径。若 Falco 在安装后出现其他规则或配置修改，会将它视为共享服务：只删除 vpspc 规则、输出和日志，保留 Falco 软件包与官方仓库，避免影响其他使用方。

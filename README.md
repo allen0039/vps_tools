@@ -16,16 +16,16 @@
 下载并执行 systemd 交互安装器：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh
+curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh
 ```
 
-当前提供 GitHub 拉取部署方式，Docker 部署将在后续版本增加。安装器会自动检测 SSH/妙妙屋 X 日志及各自时区，也会检测 Falco；未安装 Falco 时解释用途并询问是否自动安装，选择跳过不影响 SSH 和订阅多 IP 审计。完整功能、数据目录、保留时间、Telegram 和妙妙屋 X 日志接入说明请查看 [vpspc 文档](vpspc/README.md)。
+当前提供 Gitee 拉取部署方式，Docker 部署将在后续版本增加。安装器会自动检测 SSH/妙妙屋 X 日志及各自时区，也会检测 Falco；未安装 Falco 时解释用途并询问是否自动安装，选择跳过不影响 SSH 和订阅多 IP 审计。完整功能、数据目录、保留时间、Telegram 和妙妙屋 X 日志接入说明请查看 [vpspc 文档](vpspc/README.md)。
 
 恢复上一次配置或彻底删除 vpspc：
 
 ```bash
 sudo /opt/vps-audit-src/install.sh rollback
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh destroy
+curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh destroy
 ```
 
 ## safe-ssh-port 快速使用
@@ -33,7 +33,7 @@ curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/rem
 下载安装脚本：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/safe-ssh-port/safe-ssh-port.sh' -o /tmp/safe-ssh-port.sh && sudo bash /tmp/safe-ssh-port.sh install
+curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/safe-ssh-port/safe-ssh-port.sh' -o /tmp/safe-ssh-port.sh && sudo bash /tmp/safe-ssh-port.sh install
 ```
 
 这是可直接复制的一整行命令，安装过程中不会进入 `less` 查看器。
@@ -92,7 +92,7 @@ sudo restart-mmw-agent
 下载安装脚本：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/dns_tool/dns_tool.sh' -o /tmp/dns_tool.sh && sudo bash /tmp/dns_tool.sh install
+curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/dns_tool/dns_tool.sh' -o /tmp/dns_tool.sh && sudo bash /tmp/dns_tool.sh install
 ```
 
 安装后直接运行 `dnstool` 进入中文菜单；脚本会自动通过 `sudo` 获取管理员权限。

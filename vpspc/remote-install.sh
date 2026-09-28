@@ -4,6 +4,8 @@ set -Eeuo pipefail
 REPOSITORY="${VPSPC_REPOSITORY:-allen0039/vps_tools}"
 REVISION="${VPSPC_REF:-main}"
 SOURCE_ROOT="${VPSPC_SOURCE_ROOT:-/opt/vps-audit-src}"
+# 国内默认从 Gitee 获取源码压缩包；可通过 VPSPC_DOWNLOAD_BASE 指向自建镜像。
+DOWNLOAD_BASE="${VPSPC_DOWNLOAD_BASE:-https://gitee.com/$REPOSITORY/repository/archive}"
 ACTION="${1:-install}"
 TEMP_ROOT=""
 
@@ -41,7 +43,7 @@ case "$ACTION" in install|rollback|destroy) ;; *) die "用法: sudo bash remote-
 TEMP_ROOT="$(mktemp -d /tmp/vpspc-install.XXXXXX)"
 trap cleanup EXIT
 ARCHIVE="$TEMP_ROOT/source.tar.gz"
-ARCHIVE_URL="https://github.com/$REPOSITORY/archive/$REVISION.tar.gz"
+ARCHIVE_URL="${VPSPC_ARCHIVE_URL:-$DOWNLOAD_BASE/$REVISION.tar.gz}"
 
 echo "正在下载 $REPOSITORY ($REVISION)..."
 download "$ARCHIVE_URL" "$ARCHIVE"
