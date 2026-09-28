@@ -434,6 +434,101 @@ class FirewallHistoryTest(unittest.TestCase):
         self.assertIn("已取消", result.stdout)
         self.assertNotIn("unexpected", result.stdout)
 
+    def test_ssh_only_records_lockdown_and_preserved_ports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            history_file = Path(directory) / "history.tsv"
+            body = textwrap.dedent(
+                f"""
+                source {SCRIPT!s}
+                STATE_DIR={directory!s}
+                FIREWALL_HISTORY_FILE={history_file!s}
+                detect_firewall_backend() {{ printf 'iptables\\n'; }}
+                protected_ssh_ports() {{ printf '21919\\n'; }}
+                build_lockdown_chain() {{ :; }}
+                persist_iptables_rules() {{ :; }}
+                iptables() {{ :; }}
+                ip6tables() {{ :; }}
+                firewall_lockdown_interactive ssh <<< 'y'
+                show_latest_firewall_operation
+                """
+            )
+            result = self.run_bash(body)
+            self.assertTrue(history_file.exists(), result.stdout + result.stderr)
+            history = history_file.read_text(encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("\tsuccess\tssh-only\tother\ttcp udp\tiptables\t保留：21919/tcp", history)
+        self.assertIn("操作：仅保留 SSH 入站", result.stdout)
+        self.assertIn("备注：保留：21919/tcp", result.stdout)
+
+    def test_lockdown_failure_records_partial_application(self):
+        with tempfile.TemporaryDirectory() as directory:
+            history_file = Path(directory) / "history.tsv"
+            body = textwrap.dedent(
+                f"""
+                source {SCRIPT!s}
+                STATE_DIR={directory!s}
+                FIREWALL_HISTORY_FILE={history_file!s}
+                detect_firewall_backend() {{ printf 'iptables\\n'; }}
+                protected_ssh_ports() {{ printf '21919\\n'; }}
+                public_listeners() {{ printf 'tcp 8080\\n'; }}
+                build_lockdown_chain() {{ [[ $1 != ip6tables ]]; }}
+                persist_iptables_rules() {{ :; }}
+                iptables() {{ :; }}
+                ip6tables() {{ :; }}
+                firewall_lockdown_interactive listeners <<< 'y' || true
+                show_latest_firewall_operation
+                """
+            )
+            result = self.run_bash(body)
+            self.assertTrue(history_file.exists(), result.stdout + result.stderr)
+            history = history_file.read_text(encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("\tfailed\tssh-listeners\tother\ttcp udp\tiptables\t", history)
+        self.assertIn("8080/tcp", history)
+        self.assertIn("可能部分应用", result.stdout)
+        self.assertIn("结果：失败", result.stdout)
+
+    def test_cancelled_lockdown_does_not_record_operation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            history_file = Path(directory) / "history.tsv"
+            body = textwrap.dedent(
+                f"""
+                source {SCRIPT!s}
+                STATE_DIR={directory!s}
+                FIREWALL_HISTORY_FILE={history_file!s}
+                detect_firewall_backend() {{ printf 'iptables\\n'; }}
+                protected_ssh_ports() {{ printf '21919\\n'; }}
+                firewall_lockdown_interactive ssh <<< 'n'
+                [[ ! -e {history_file!s} ]]
+                """
+            )
+            result = self.run_bash(body)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_overview_shows_live_lockdown_allowlist_and_drop(self):
+        body = textwrap.dedent(
+            f"""
+            source {SCRIPT!s}
+            detect_firewall_backend() {{ printf 'iptables\\n'; }}
+            protected_ssh_ports() {{ printf '21919\\n'; }}
+            firewall_rule_records() {{ printf 'IPv4 ACCEPT tcp 21919\\n'; }}
+            iptables() {{
+                case "$*" in
+                    '-S INPUT') printf '%s\\n' '-P INPUT ACCEPT' '-A INPUT -j ALLENTOOL_INPUT' ;;
+                    '-S ALLENTOOL_INPUT') printf '%s\\n' '-N ALLENTOOL_INPUT' '-A ALLENTOOL_INPUT -p tcp --dport 21919 -j ACCEPT' '-A ALLENTOOL_INPUT -j DROP' ;;
+                    '-C INPUT -j ALLENTOOL_INPUT') return 0 ;;
+                esac
+            }}
+            ip6tables() {{ return 1; }}
+            show_firewall_port_overview
+            """
+        )
+        result = self.run_bash(body)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("当前入站保护清单（实时规则）", result.stdout)
+        self.assertIn("IPv4  21919/tcp", result.stdout)
+        self.assertIn("IPv4  其他宿主机新入站：DROP", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

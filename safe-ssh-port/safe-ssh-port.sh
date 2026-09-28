@@ -1203,6 +1203,8 @@ firewall_action_label() {
         open) printf '开放\n' ;;
         close) printf '关闭\n' ;;
         allow-all) printf '放行所有端口\n' ;;
+        ssh-only) printf '仅保留 SSH 入站\n' ;;
+        ssh-listeners) printf '保留 SSH 和公网监听端口\n' ;;
         *) printf '%s\n' "${1:-未知}" ;;
     esac
 }
@@ -1411,6 +1413,32 @@ show_firewall_port_overview() {
     printf '入站保护模式: %s\n' "$protection"
     if [[ -n $protected_families ]]; then
         printf '  %s 中未列入保留清单的宿主机入站将被统一拒绝。\n' "$protected_families"
+        printf '当前入站保护清单（实时规则）：\n'
+        for command_name in iptables ip6tables; do
+            command -v "$command_name" >/dev/null 2>&1 || continue
+            if [[ $command_name == iptables ]]; then family=IPv4; else family=IPv6; fi
+            if ! "$command_name" -C INPUT -j "$FIREWALL_CHAIN" >/dev/null 2>&1; then
+                continue
+            fi
+            "$command_name" -S "$FIREWALL_CHAIN" 2>/dev/null | awk -v family="$family" -v chain="$FIREWALL_CHAIN" '
+                $1 == "-A" && $2 == chain {
+                    protocol=""; port=""; verdict=""
+                    for (i=1; i<=NF; i++) {
+                        if ($i == "-p") protocol=$(i+1)
+                        if ($i == "--dport") port=$(i+1)
+                        if ($i == "-j") verdict=$(i+1)
+                    }
+                    if (verdict == "ACCEPT" && (protocol == "tcp" || protocol == "udp") && port ~ /^[0-9]+$/)
+                        printf "  %s  %s/%s\n", family, port, protocol
+                    last_verdict=verdict
+                }
+                END {
+                    if (last_verdict == "DROP") printf "  %s  其他宿主机新入站：DROP\n", family
+                    else printf "  %s  警告：保护链末尾不是 DROP，请查看详细状态\n", family
+                }
+            '
+        done
+        printf '  Docker 转发流量不经过宿主机 INPUT，请单独检查。\n'
     fi
     if [[ -n $default_allowed_families ]]; then
         printf '  注意：%s 默认策略为 ACCEPT，未列出的端口也可能被允许。\n' "$default_allowed_families"
@@ -2481,7 +2509,7 @@ build_lockdown_chain() {
 }
 
 firewall_lockdown_interactive() {
-    local mode=$1 backend allowlist command_name port
+    local mode=$1 backend allowlist command_name port action note
     backend=$(detect_firewall_backend)
     [[ $backend == iptables ]] || {
         warn '“关闭所有宿主机入站”目前仅支持 iptables/iptables-nft。'
@@ -2490,6 +2518,9 @@ firewall_lockdown_interactive() {
     allowlist=$(while IFS= read -r port; do [[ -n $port ]] && printf 'tcp %s\n' "$port"; done < <(protected_ssh_ports))
     if [[ $mode == listeners ]]; then
         allowlist=$(printf '%s\n%s\n' "$allowlist" "$(public_listeners)" | awk 'NF==2' | sort -k1,1 -k2,2n -u)
+        action=ssh-listeners
+    else
+        action=ssh-only
     fi
     [[ -n $allowlist ]] || {
         warn '无法生成安全的端口保留列表。'
@@ -2499,14 +2530,17 @@ firewall_lockdown_interactive() {
     printf '%s\n' "$allowlist" | awk '{printf "  %s/%s\n", $2, $1}'
     warn '其他宿主机 INPUT 流量将被入站保护规则拒绝；会保留 ICMP/ICMPv6，Docker 转发端口不属于 INPUT。'
     prompt_yes_no '确认应用此入站保护规则？' no || return 0
+    note="保留：$(printf '%s\n' "$allowlist" | awk '{printf "%s%s/%s", (NR==1 ? "" : ", "), $2, $1}')"
     for command_name in iptables ip6tables; do
         command -v "$command_name" >/dev/null 2>&1 || continue
         if ! build_lockdown_chain "$command_name" "$allowlist"; then
             warn '入站保护规则应用失败；已完成的协议族保持现状，请查看实时规则。'
+            firewall_record_operation failed "$action" other 'tcp udp' "$backend" "${note}；可能部分应用" || true
             return 1
         fi
     done
     persist_iptables_rules yes
+    firewall_record_operation success "$action" other 'tcp udp' "$backend" "$note" || true
     log '宿主机入站保护规则已应用。'
 }
 
