@@ -15,25 +15,27 @@
 > [!WARNING]
 > 重启 Agent 会关闭现有 TCP 连接，代理连接将短暂中断并重新建立。脚本需要使用 `root` 权限运行。
 
-## 安装固定版本
+## 安装最新版
 
-`v1.0.0` 保留了仓库最初的根目录脚本路径。任选 GitHub 或 Gitee，无法访问时可自行切换；两种来源使用相同的版本和校验值。
+以下命令从 `main` 分支下载当前最新版。任选 GitHub 或 Gitee，无法访问时可切换来源。再次运行同一命令即可更新已安装的脚本。
 
 **GitHub：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/allen0039/vps_tools/v1.0.0/restart-mmw-agent -o /tmp/restart-mmw-agent && \
-echo "5f8d640f340fc55a5c68c0a4cfe21de3aa085ef7b2a80b102edd3f73520af5df  /tmp/restart-mmw-agent" | sha256sum --check --strict && \
+curl -fsSL https://raw.githubusercontent.com/allen0039/vps_tools/main/restart-mmw-agent/restart-mmw-agent -o /tmp/restart-mmw-agent && \
+bash -n /tmp/restart-mmw-agent && \
 sudo install -m 750 -o root -g root /tmp/restart-mmw-agent /usr/local/sbin/restart-mmw-agent
 ```
 
 **Gitee：**
 
 ```bash
-curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/v1.0.0/restart-mmw-agent' -o /tmp/restart-mmw-agent && \
-echo "5f8d640f340fc55a5c68c0a4cfe21de3aa085ef7b2a80b102edd3f73520af5df  /tmp/restart-mmw-agent" | sha256sum --check --strict && \
+curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/restart-mmw-agent/restart-mmw-agent' -o /tmp/restart-mmw-agent && \
+bash -n /tmp/restart-mmw-agent && \
 sudo install -m 750 -o root -g root /tmp/restart-mmw-agent /usr/local/sbin/restart-mmw-agent
 ```
+
+`main` 分支会变化，因此不能继续使用旧版的固定 SHA-256 校验值。安装前请确认信任所选下载来源。
 
 ## 使用
 
