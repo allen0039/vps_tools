@@ -50,6 +50,84 @@ class FirewallHistoryTest(unittest.TestCase):
         self.assertIn("TCP + UDP（默认）", result.stdout)
         self.assertEqual(result.stdout.count("默认 3"), 2)
 
+    def test_close_listening_port_reads_confirmation_from_user_once(self):
+        cases = [
+            ("tcp 1234", "1", "tcp", "tcp"),
+            ("udp 1234", "2", "udp", "udp"),
+            ("tcp 1234\nudp 1234\ntcp 9999", "", "tcp udp", "tcp+udp"),
+        ]
+        for listeners, choice, protocols, label in cases:
+            with self.subTest(protocols=protocols), tempfile.TemporaryDirectory() as directory:
+                inputs = f"1234\n{choice}\ny\n"
+                body = textwrap.dedent(
+                    f"""
+                    source {SCRIPT!s}
+                    STATE_DIR={directory!s}
+                    FIREWALL_NOTE_FILE=$STATE_DIR/notes.tsv
+                    FIREWALL_HISTORY_FILE=$STATE_DIR/history.tsv
+                    protected_ssh_ports() {{ printf '22\\n'; }}
+                    public_listeners() {{ printf '%s\\n' {shlex.quote(listeners)}; }}
+                    detect_firewall_backend() {{ printf 'iptables\\n'; }}
+                    firewall_apply_port() {{ printf 'APPLIED %s %s %s\\n' "$1" "$2" "$3"; }}
+                    firewall_update_port_notes open 1234 'tcp udp' service
+                    firewall_close_interactive <<< {shlex.quote(inputs)}
+                    firewall_load_latest_operation
+                    [[ $FIREWALL_LAST_RESULT == success && $FIREWALL_LAST_ACTION == close ]]
+                    [[ $FIREWALL_LAST_PROTOCOLS == '{protocols}' ]]
+                    for protocol in {protocols}; do
+                        ! firewall_port_note 1234 "$protocol"
+                    done
+                    """
+                )
+                result = self.run_bash(body)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f"APPLIED close 1234 {protocols}", result.stdout)
+            self.assertIn(f"端口 1234/{label} 当前正在公网监听", result.stdout)
+            self.assertEqual(result.stdout.count("仍要关闭吗？"), 1)
+            self.assertNotIn("请输入 y、n", result.stdout)
+
+    def test_declining_close_listener_confirmation_does_not_apply_rules(self):
+        for confirmation in ("n", "", None):
+            with self.subTest(confirmation=confirmation), tempfile.TemporaryDirectory() as directory:
+                inputs = "1234\n\n" + (f"{confirmation}\n" if confirmation is not None else "")
+                body = textwrap.dedent(
+                    f"""
+                    source {SCRIPT!s}
+                    STATE_DIR={directory!s}
+                    FIREWALL_NOTE_FILE=$STATE_DIR/notes.tsv
+                    FIREWALL_HISTORY_FILE=$STATE_DIR/history.tsv
+                    protected_ssh_ports() {{ printf '22\\n'; }}
+                    public_listeners() {{ printf 'tcp 1234\\nudp 1234\\n'; }}
+                    firewall_apply_port() {{ printf 'UNEXPECTED\\n'; }}
+                    firewall_update_port_notes open 1234 'tcp udp' service
+                    firewall_close_interactive < <(printf '%s' {shlex.quote(inputs)})
+                    [[ ! -e $FIREWALL_HISTORY_FILE ]]
+                    firewall_port_note 1234 tcp
+                    [[ $FIREWALL_LOOKED_UP_NOTE == service ]]
+                    firewall_port_note 1234 udp
+                    [[ $FIREWALL_LOOKED_UP_NOTE == service ]]
+                    """
+                )
+                result = self.run_bash(body)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("已取消关闭端口 1234", result.stdout)
+            self.assertNotIn("UNEXPECTED", result.stdout)
+
+    def test_close_current_ssh_port_is_still_refused(self):
+        body = textwrap.dedent(
+            f"""
+            source {SCRIPT!s}
+            protected_ssh_ports() {{ printf '1234\\n'; }}
+            public_listeners() {{ printf 'UNEXPECTED\\n'; }}
+            firewall_apply_port() {{ printf 'UNEXPECTED\\n'; }}
+            firewall_close_interactive <<< $'1234\\n\\ny\\n'
+            """
+        )
+        result = self.run_bash(body)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("是当前 SSH 端口，拒绝关闭", result.stderr)
+        self.assertNotIn("UNEXPECTED", result.stdout)
+
     def test_iptables_close_precedes_managed_allow_and_open_removes_deny(self):
         with tempfile.TemporaryDirectory() as directory:
             calls = Path(directory) / "calls"

@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
-ALLENTOOL_VERSION=0.1.9
+ALLENTOOL_VERSION=0.1.10
 INSTALL_PATH=${SAFE_SSH_PORT_INSTALL_PATH:-/usr/local/sbin/safe-ssh-port}
 ALLENTOOL_PATH=${ALLENTOOL_PATH:-/usr/local/bin/allentool}
 SSHD_CONFIG=${SAFE_SSH_PORT_CONFIG:-/etc/ssh/sshd_config}
@@ -2437,7 +2437,7 @@ firewall_open_interactive() {
 }
 
 firewall_close_interactive() {
-    local ssh_port listener protocol backend
+    local ssh_port listener protocol backend listening_protocols=
     prompt_firewall_port || return 0
     prompt_firewall_protocols close || return 0
     if [[ $SELECTED_PROTOCOLS == *tcp* ]]; then
@@ -2450,9 +2450,15 @@ firewall_close_interactive() {
     fi
     while read -r protocol listener; do
         if [[ $listener == "$SELECTED_FIREWALL_PORT" && $SELECTED_PROTOCOLS == *"$protocol"* ]]; then
-            prompt_yes_no "端口 ${listener}/${protocol} 当前正在公网监听，仍要关闭吗？" no || return 0
+            listening_protocols="${listening_protocols:+$listening_protocols+}$protocol"
         fi
     done < <(public_listeners)
+    if [[ -n $listening_protocols ]]; then
+        prompt_yes_no "端口 ${SELECTED_FIREWALL_PORT}/${listening_protocols} 当前正在公网监听，仍要关闭吗？" no || {
+            printf '已取消关闭端口 %s。\n' "$SELECTED_FIREWALL_PORT"
+            return 0
+        }
+    fi
     printf '准备关闭：%s/%s\n' "$SELECTED_FIREWALL_PORT" "${SELECTED_PROTOCOLS// /+}"
     backend=$(detect_firewall_backend)
     if firewall_apply_port close "$SELECTED_FIREWALL_PORT" "$SELECTED_PROTOCOLS"; then

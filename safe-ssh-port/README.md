@@ -207,7 +207,8 @@ firewalld 和 iptables/ip6tables 都会写入对应的持久化规则；原生 n
 正在使用的 SSH 监听端口。只有无法读取 sshd 有效配置时，才使用当前
 `SSH_CONNECTION` 的服务器端口作安全兜底；因此 sshd reload 后仍存活的旧会话
 不会把已停止监听的旧端口误标为 SSH 保护端口。若端口当前有非回环监听
-程序，还会再次询问。关闭端口时如果 `ALLENTOOL_INPUT` 中存在入站保护模式
+程序，还会询问一次确认；同时关闭 TCP 和 UDP 时合并为一次确认，输入 `y` 后
+才执行关闭，拒绝或直接回车会显示取消结果。关闭端口时如果 `ALLENTOOL_INPUT` 中存在入站保护模式
 以前产生的该端口保留规则，脚本会先删除历史放行，再写入明确关闭规则。
 
 状态页本身只读取信息。iptables 后端没有 `netfilter-persistent` 时，状态页会显示
