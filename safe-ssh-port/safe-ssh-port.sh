@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
-ALLENTOOL_VERSION=0.1.8
+ALLENTOOL_VERSION=0.1.9
 INSTALL_PATH=${SAFE_SSH_PORT_INSTALL_PATH:-/usr/local/sbin/safe-ssh-port}
 ALLENTOOL_PATH=${ALLENTOOL_PATH:-/usr/local/bin/allentool}
 SSHD_CONFIG=${SAFE_SSH_PORT_CONFIG:-/etc/ssh/sshd_config}
@@ -1081,18 +1081,64 @@ iptables_rule_records_for_command() {
            "$command_name" -C INPUT -j "$FIREWALL_CHAIN" >/dev/null 2>&1; then
             "$command_name" -S "$FIREWALL_CHAIN" 2>/dev/null
         fi
-    } | awk -v family="$family" '
-        $1 == "-A" {
-            protocol=""; port=""; verdict=""
-            for (i=1; i<=NF; i++) {
-                if ($i == "-p" && i < NF) protocol=$(i+1)
-                if ($i == "--dport" && i < NF) port=$(i+1)
-                if ($i == "-j" && i < NF) verdict=$(i+1)
+    } | awk -v family="$family" -v managed_chain="$FIREWALL_CHAIN" '
+        # Follow the managed jump at its INPUT position, including terminal catch-all rules.
+        function decision(chain, protocol, port,    i, key, verdict) {
+            for (i=1; i<=count[chain]; i++) {
+                key=chain SUBSEP i
+                if (restricted[key]) continue
+                if (protocols[key] != "" && protocols[key] != "all" && protocols[key] != protocol) continue
+                if (ports[key] != "" && ports[key] != port) continue
+                verdict=verdicts[key]
+                if (verdict == managed_chain && chain == "INPUT") {
+                    verdict=decision(managed_chain, protocol, port)
+                    if (verdict != "") return verdict
+                } else if (verdict == "RETURN") {
+                    return ""
+                } else if (verdict == "ACCEPT" || verdict == "DROP" || verdict == "REJECT") {
+                    return ports[key] == "" ? "implicit" : verdict
+                }
             }
+            return ""
+        }
+        $1 == "-A" {
+            chain=$2
+            if (chain != "INPUT" && chain != managed_chain) next
+            count[chain]++
+            key=chain SUBSEP count[chain]
+            protocol=""; port=""; verdict=""; scoped=0
+            for (i=3; i<=NF; i++) {
+                if ($i == "-p" && i < NF) protocol=$(++i)
+                else if ($i == "--dport" && i < NF) port=$(++i)
+                else if ($i == "-j" && i < NF) verdict=$(++i)
+                else if ($i == "-m" && i < NF) {
+                    module=$(++i)
+                    if (module != "tcp" && module != "udp" && module != "comment") scoped=1
+                } else if ($i == "--comment" && i < NF) {
+                    comment=$(++i)
+                    if (comment ~ /^"/ && comment !~ /"$/) {
+                        while (i < NF && $(i) !~ /"$/) i++
+                    }
+                } else if (($i == "-s" || $i == "-d") && i < NF) {
+                    address=$(++i)
+                    if (address != "0.0.0.0/0" && address != "::/0") scoped=1
+                } else if ($i == "--reject-with" && i < NF) i++
+                else scoped=1
+            }
+            protocols[key]=protocol; ports[key]=port; verdicts[key]=verdict; restricted[key]=scoped
+            if (scoped) next
             if ((protocol == "tcp" || protocol == "udp") &&
                 port ~ /^[0-9]+$/ && port >= 1 && port <= 65535 &&
                 (verdict == "ACCEPT" || verdict == "DROP" || verdict == "REJECT")) {
-                print family, verdict, protocol, port + 0
+                candidates[protocol SUBSEP port]=1
+            }
+        }
+        END {
+            for (candidate in candidates) {
+                split(candidate, fields, SUBSEP)
+                verdict=decision("INPUT", fields[1], fields[2])
+                if (verdict == "ACCEPT" || verdict == "DROP" || verdict == "REJECT")
+                    print family, verdict, fields[1], fields[2] + 0
             }
         }
     '
@@ -1102,28 +1148,44 @@ ufw_rule_records() {
     ufw status 2>/dev/null | awk '
         {
             split($1, spec, "/")
-            port=spec[1]; protocol=tolower(spec[2]); family="IPv4"
-            if ($2 == "(v6)") { family="IPv6"; verdict=toupper($3) }
+            port=spec[1]; protocol=tolower(spec[2]); family="IPv4"; source_column=3
+            if ($2 == "(v6)") { family="IPv6"; verdict=toupper($3); source_column=4 }
             else verdict=toupper($2)
-            if (port !~ /^[0-9]+$/ || (protocol != "tcp" && protocol != "udp")) next
             if (verdict == "ALLOW") verdict="ACCEPT"
             else if (verdict == "DENY" || verdict == "REJECT") verdict="DROP"
             else next
+            if ($source_column == "OUT") next
+            if ($source_column == "IN") source_column++
+            if ($source_column != "Anywhere") next
+            if (port == "Anywhere") {
+                if (protocol == "") broad[family]=1
+                else broad[family SUBSEP protocol]=1
+                next
+            }
+            if (port !~ /^[0-9]+$/ || (protocol != "tcp" && protocol != "udp")) next
+            if (broad[family] || broad[family SUBSEP protocol]) next
+            key=family SUBSEP protocol SUBSEP port
+            if (seen[key]++) next
             print family, verdict, protocol, port + 0
         }
     '
 }
 
 firewalld_rule_records() {
-    local item
-    for item in $(firewall-cmd --list-ports 2>/dev/null || true); do
-        if [[ $item =~ ^([0-9]+)/(tcp|udp)$ ]]; then
-            printf '双栈 ACCEPT %s %s\n' "${BASH_REMATCH[2]}" "${BASH_REMATCH[1]}"
-        fi
-    done
-    firewall-cmd --list-rich-rules 2>/dev/null | awk '
+    {
+        firewall-cmd --list-ports 2>/dev/null | tr " " "\n" | sed "s/^/port /"
+        firewall-cmd --list-rich-rules 2>/dev/null
+    } | awk '
+        $1 == "port" {
+            split($2, spec, "/")
+            if (spec[1] ~ /^[0-9]+$/ && (spec[2] == "tcp" || spec[2] == "udp")) {
+                key=spec[2] SUBSEP (spec[1] + 0)
+                allowed[key]=1; candidates[key]=1
+            }
+            next
+        }
         {
-            family="双栈"; protocol=""; port=""; verdict=""
+            family="双栈"; protocol=""; port=""; verdict=""; priority=0; scoped=0
             for (i=1; i<=NF; i++) {
                 field=$i
                 gsub(/"/, "", field)
@@ -1134,12 +1196,38 @@ firewalld_rule_records() {
                     sub(/^protocol=/, "", field); protocol=field
                 } else if (field ~ /^port=/) {
                     sub(/^port=/, "", field); port=field
+                } else if (field ~ /^priority=/) {
+                    sub(/^priority=/, "", field); priority=field + 0
+                } else if (field == "source" || field == "destination") {
+                    scoped=1
                 } else if (field == "drop" || field == "reject") {
                     verdict="DROP"
                 }
             }
-            if ((protocol == "tcp" || protocol == "udp") && port ~ /^[0-9]+$/ && verdict == "DROP") {
-                print family, verdict, protocol, port + 0
+            if (!scoped && (protocol == "tcp" || protocol == "udp") && port ~ /^[0-9]+$/ && verdict == "DROP") {
+                key=protocol SUBSEP (port + 0)
+                candidates[key]=1
+                if (family != "IPv6") {
+                    if (priority <= 0) denied["IPv4" SUBSEP key]=1
+                    else late_denied["IPv4" SUBSEP key]=1
+                }
+                if (family != "IPv4") {
+                    if (priority <= 0) denied["IPv6" SUBSEP key]=1
+                    else late_denied["IPv6" SUBSEP key]=1
+                }
+            }
+        }
+        END {
+            for (key in candidates) {
+                split(key, fields, SUBSEP)
+                for (i=4; i<=6; i+=2) {
+                    family="IPv" i
+                    if (denied[family SUBSEP key]) verdict="DROP"
+                    else if (allowed[key]) verdict="ACCEPT"
+                    else if (late_denied[family SUBSEP key]) verdict="DROP"
+                    else continue
+                    print family, verdict, fields[1], fields[2]
+                }
             }
         }
     '
@@ -1376,8 +1464,7 @@ show_firewall_port_records() {
 }
 
 show_firewall_port_overview() {
-    local backend records ports rejected_ports protection=不适用 protected_families= default_allowed_families=
-    local policy command_name family family_protected
+    local backend records ports rejected_ports
     backend=$(detect_firewall_backend)
     records=$(firewall_rule_records "$backend" || true)
     records=$(collapse_firewall_rule_families <<< "$records")
@@ -1388,6 +1475,28 @@ show_firewall_port_overview() {
     printf 'SSH 保护端口: '
     protected_ssh_ports | awk 'BEGIN { first=1 } { printf "%s%s/tcp", first ? "" : ", ", $1; first=0 } END { if (first) printf "未知"; print "" }'
 
+    printf '\n已放行的端口：\n'
+    ports=$(show_firewall_port_records "$records" ACCEPT)
+    if [[ -n $ports ]]; then printf '%s\n' "$ports"; else printf '  （无）\n'; fi
+
+    printf '\n明确关闭的端口：\n'
+    ports=$(show_firewall_port_records "$records" DROP)
+    rejected_ports=$(show_firewall_port_records "$records" REJECT)
+    if [[ -n $ports && -n $rejected_ports ]]; then ports+=$'\n'; fi
+    ports+=$rejected_ports
+    if [[ -n $ports ]]; then printf '%s\n' "$ports"; else printf '  （无）\n'; fi
+
+    if [[ $backend == nftables ]]; then
+        printf '\n原生 nftables 规则结构不统一，请从“详细状态”查看原始规则。\n'
+    elif [[ $backend == none ]]; then
+        printf '\n未检测到可管理的主机防火墙。\n'
+    fi
+}
+
+show_firewall_policy_status() {
+    local backend=$1 protection=不适用 protected_families= default_allowed_families=
+    local policy command_name family family_protected
+    printf '\n入站策略\n'
     if [[ $backend == iptables ]]; then
         for command_name in iptables ip6tables; do
             command -v "$command_name" >/dev/null 2>&1 || continue
@@ -1413,52 +1522,10 @@ show_firewall_port_overview() {
     printf '入站保护模式: %s\n' "$protection"
     if [[ -n $protected_families ]]; then
         printf '  %s 中未列入保留清单的宿主机入站将被统一拒绝。\n' "$protected_families"
-        printf '当前入站保护清单（实时规则）：\n'
-        for command_name in iptables ip6tables; do
-            command -v "$command_name" >/dev/null 2>&1 || continue
-            if [[ $command_name == iptables ]]; then family=IPv4; else family=IPv6; fi
-            if ! "$command_name" -C INPUT -j "$FIREWALL_CHAIN" >/dev/null 2>&1; then
-                continue
-            fi
-            "$command_name" -S "$FIREWALL_CHAIN" 2>/dev/null | awk -v family="$family" -v chain="$FIREWALL_CHAIN" '
-                $1 == "-A" && $2 == chain {
-                    protocol=""; port=""; verdict=""
-                    for (i=1; i<=NF; i++) {
-                        if ($i == "-p") protocol=$(i+1)
-                        if ($i == "--dport") port=$(i+1)
-                        if ($i == "-j") verdict=$(i+1)
-                    }
-                    if (verdict == "ACCEPT" && (protocol == "tcp" || protocol == "udp") && port ~ /^[0-9]+$/)
-                        printf "  %s  %s/%s\n", family, port, protocol
-                    last_verdict=verdict
-                }
-                END {
-                    if (last_verdict == "DROP") printf "  %s  其他宿主机新入站：DROP\n", family
-                    else printf "  %s  警告：保护链末尾不是 DROP，请查看详细状态\n", family
-                }
-            '
-        done
         printf '  Docker 转发流量不经过宿主机 INPUT，请单独检查。\n'
     fi
     if [[ -n $default_allowed_families ]]; then
         printf '  注意：%s 默认策略为 ACCEPT，未列出的端口也可能被允许。\n' "$default_allowed_families"
-    fi
-
-    printf '\n明确放行的端口：\n'
-    ports=$(show_firewall_port_records "$records" ACCEPT)
-    if [[ -n $ports ]]; then printf '%s\n' "$ports"; else printf '  （未检测到明确的单端口放行规则）\n'; fi
-
-    printf '\n明确关闭的端口：\n'
-    ports=$(show_firewall_port_records "$records" DROP)
-    rejected_ports=$(show_firewall_port_records "$records" REJECT)
-    if [[ -n $ports && -n $rejected_ports ]]; then ports+=$'\n'; fi
-    ports+=$rejected_ports
-    if [[ -n $ports ]]; then printf '%s\n' "$ports"; else printf '  （没有指定关闭的单端口规则）\n'; fi
-
-    if [[ $backend == nftables ]]; then
-        printf '\n原生 nftables 规则结构不统一，请从“详细状态”查看原始规则。\n'
-    elif [[ $backend == none ]]; then
-        printf '\n未检测到可管理的主机防火墙。\n'
     fi
 }
 
@@ -2193,6 +2260,7 @@ iptables_apply_tagged_port() {
             iptables_remove_tagged_rule "$command_name" INPUT "$protocol" "$port" DROP || return 1
             if [[ $chain != INPUT ]]; then
                 iptables_remove_tagged_rule "$command_name" "$chain" "$protocol" "$port" DROP || return 1
+                iptables_remove_tagged_rule "$command_name" INPUT "$protocol" "$port" ACCEPT || return 1
             fi
             iptables_remove_tagged_rule "$command_name" "$chain" "$protocol" "$port" ACCEPT || return 1
             if [[ $action == close ]]; then
@@ -2432,6 +2500,7 @@ show_firewall_status() {
     local offer_install=${1:-no} backend service_enabled=未知 service_active=未知 answer
     backend=$(detect_firewall_backend)
     show_firewall_port_overview
+    show_firewall_policy_status "$backend"
     printf '当前非回环监听端口:\n'
     public_listeners | sed 's/^/  /'
     case $backend in

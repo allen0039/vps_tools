@@ -1,4 +1,7 @@
+import json
+import shlex
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -91,7 +94,7 @@ class FirewallHistoryTest(unittest.TestCase):
             source {SCRIPT!s}
             iptables() {{
                 case "$*" in
-                    '-S INPUT') printf '%s\\n' '-A INPUT -p tcp --dport 31122 -j DROP' ;;
+                    '-S INPUT') printf '%s\\n' '-A INPUT -p tcp --dport 31122 -j DROP' '-A INPUT -j ALLENTOOL_INPUT' ;;
                     '-S ALLENTOOL_INPUT') printf '%s\\n' '-A ALLENTOOL_INPUT -p udp --dport 31122 -j ACCEPT' ;;
                     '-C INPUT -j ALLENTOOL_INPUT') return 0 ;;
                 esac
@@ -103,6 +106,126 @@ class FirewallHistoryTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("IPv4 DROP tcp 31122", result.stdout)
         self.assertIn("IPv4 ACCEPT udp 31122", result.stdout)
+
+    def test_iptables_port_status_follows_rule_order_and_managed_jump(self):
+        body = textwrap.dedent(
+            f"""
+            source {SCRIPT!s}
+            iptables() {{
+                case "$*" in
+                    '-S INPUT') printf '%s\\n' \
+                        '-A INPUT -p tcp --dport 1234 -j DROP' \
+                        '-A INPUT -p tcp --dport 2222 -j ACCEPT' \
+                        '-A INPUT -p tcp --dport 2222 -j REJECT' \
+                        '-A INPUT -j ALLENTOOL_INPUT' \
+                        '-A INPUT -p tcp --dport 54040 -j ACCEPT' ;;
+                    '-S ALLENTOOL_INPUT') printf '%s\\n' \
+                        '-A ALLENTOOL_INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT' \
+                        '-A ALLENTOOL_INPUT -i lo -j ACCEPT' \
+                        '-A ALLENTOOL_INPUT -s 192.0.2.1/32 -p tcp --dport 9000 -j ACCEPT' \
+                        '-A ALLENTOOL_INPUT -p tcp --dport 1234 -j ACCEPT' \
+                        '-A ALLENTOOL_INPUT -p tcp --dport 8080 -j ACCEPT' \
+                        '-A ALLENTOOL_INPUT -p tcp --dport 9000 -j REJECT --reject-with tcp-reset' \
+                        '-A ALLENTOOL_INPUT -j DROP' \
+                        '-A ALLENTOOL_INPUT -p tcp --dport 8443 -j ACCEPT' ;;
+                    '-C INPUT -j ALLENTOOL_INPUT') return 0 ;;
+                esac
+            }}
+            iptables_rule_records_for_command iptables IPv4 | sort -k4,4n
+            """
+        )
+        result = self.run_bash(body)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "IPv4 DROP tcp 1234",
+                "IPv4 ACCEPT tcp 2222",
+                "IPv4 ACCEPT tcp 8080",
+                "IPv4 REJECT tcp 9000",
+            ],
+        )
+
+    def test_iptables_broad_allow_hides_later_explicit_deny(self):
+        body = textwrap.dedent(
+            f"""
+            source {SCRIPT!s}
+            iptables() {{
+                case "$*" in
+                    '-S INPUT') printf '%s\\n' \
+                        '-A INPUT -p tcp -m comment --comment "allow all tcp" -j ACCEPT' \
+                        '-A INPUT -p tcp --dport 1234 -j DROP' \
+                        '-A INPUT -p udp --dport 1234 -j DROP' ;;
+                    *) return 1 ;;
+                esac
+            }}
+            iptables_rule_records_for_command iptables IPv4
+            """
+        )
+        result = self.run_bash(body)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "IPv4 DROP udp 1234")
+
+    def test_close_then_reopen_replaces_state_on_both_families(self):
+        fixture = Path(__file__).parent / "fixtures" / "iptables.py"
+        rule = ["-p", "tcp", "--dport", "1234", "-m", "comment", "--comment", "allentool-managed", "-j", "ACCEPT"]
+        state = {
+            "INPUT": [rule, ["-j", "ALLENTOOL_INPUT"]],
+            "ALLENTOOL_INPUT": [
+                ["-p", "tcp", "--dport", "1234", "-j", "ACCEPT"],
+                ["-p", "udp", "--dport", "1234", "-j", "ACCEPT"],
+                ["-j", "DROP"],
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            temp_dir = Path(directory)
+            for name in ("ipv4", "ipv6"):
+                (temp_dir / name).write_text(json.dumps(state))
+            body = textwrap.dedent(
+                f"""
+                source {SCRIPT!s}
+                STATE_DIR={temp_dir!s}
+                FIREWALL_NOTE_FILE=$STATE_DIR/notes.tsv
+                detect_firewall_backend() {{ printf 'iptables\\n'; }}
+                protected_ssh_ports() {{ printf '22\\n'; }}
+                persist_iptables_rules() {{ :; }}
+                iptables() {{ {shlex.quote(sys.executable)} {shlex.quote(str(fixture))} {temp_dir!s}/ipv4 "$@"; }}
+                ip6tables() {{ {shlex.quote(sys.executable)} {shlex.quote(str(fixture))} {temp_dir!s}/ipv6 "$@"; }}
+                firewall_apply_port close 1234 'tcp udp'
+                show_firewall_port_overview > {temp_dir!s}/closed
+                firewall_apply_port open 1234 'tcp udp'
+                firewall_apply_port open 1234 'tcp udp'
+                show_firewall_port_overview > {temp_dir!s}/opened
+                firewall_apply_port close 1234 tcp
+                show_firewall_port_overview > {temp_dir!s}/mixed
+                """
+            )
+            result = self.run_bash(body)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            closed = (temp_dir / "closed").read_text()
+            opened = (temp_dir / "opened").read_text()
+            mixed = (temp_dir / "mixed").read_text()
+            final_states = [json.loads((temp_dir / name).read_text()) for name in ("ipv4", "ipv6")]
+        for overview in (closed, opened, mixed):
+            self.assertEqual(overview.count("1234/tcp"), 1)
+            self.assertEqual(overview.count("1234/udp"), 1)
+        closed_allow, closed_deny = closed.split("明确关闭的端口：")
+        opened_allow, opened_deny = opened.split("明确关闭的端口：")
+        mixed_allow, mixed_deny = mixed.split("明确关闭的端口：")
+        self.assertNotIn("1234/", closed_allow)
+        self.assertIn("双栈  1234/tcp", closed_deny)
+        self.assertIn("双栈  1234/udp", closed_deny)
+        self.assertIn("双栈  1234/tcp", opened_allow)
+        self.assertIn("双栈  1234/udp", opened_allow)
+        self.assertNotIn("1234/", opened_deny)
+        self.assertIn("1234/udp", mixed_allow)
+        self.assertNotIn("1234/tcp", mixed_allow)
+        self.assertIn("1234/tcp", mixed_deny)
+        self.assertNotIn("1234/udp", mixed_deny)
+        for final_state in final_states:
+            self.assertNotIn(rule, final_state["INPUT"])
+            self.assertEqual(len(final_state["INPUT"]), 2)
+            self.assertEqual(len(final_state["ALLENTOOL_INPUT"]), 2)
 
     def test_iptables_allow_all_removes_managed_deny_without_bypassing_source_chain(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -168,6 +291,81 @@ class FirewallHistoryTest(unittest.TestCase):
         )
         result = self.run_bash(body)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_ufw_conflicting_port_rules_show_the_first_verdict(self):
+        body = textwrap.dedent(
+            f"""
+            source {SCRIPT!s}
+            ufw() {{
+                printf '%s\\n' \
+                    '1234/tcp DENY Anywhere' \
+                    '1234/tcp ALLOW Anywhere' \
+                    '1234/tcp (v6) ALLOW Anywhere (v6)' \
+                    '1234/tcp (v6) DENY Anywhere (v6)'
+            }}
+            records=$(firewall_rule_records ufw)
+            collapse_firewall_rule_families <<< "$records"
+            """
+        )
+        result = self.run_bash(body)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["IPv6 ACCEPT tcp 1234", "IPv4 DROP tcp 1234"],
+        )
+
+    def test_firewalld_port_deny_priority_and_family_override_allow(self):
+        body = textwrap.dedent(
+            f"""
+            source {SCRIPT!s}
+            firewall-cmd() {{
+                case "$*" in
+                    --list-ports) printf '1234/tcp 8080/udp\\n' ;;
+                    --list-rich-rules) printf '%s\\n' \
+                        'rule family="ipv4" priority="-101" port port="1234" protocol="tcp" drop' \
+                        'rule priority="1" port port="8080" protocol="udp" drop' \
+                        'rule port port="9000" protocol="tcp" reject' \
+                        'rule source address="192.0.2.1" port port="8080" protocol="udp" drop' ;;
+                esac
+            }}
+            records=$(firewall_rule_records firewalld)
+            collapse_firewall_rule_families <<< "$records"
+            """
+        )
+        result = self.run_bash(body)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "IPv6 ACCEPT tcp 1234",
+                "双栈 ACCEPT udp 8080",
+                "IPv4 DROP tcp 1234",
+                "双栈 DROP tcp 9000",
+            ],
+        )
+
+    def test_ufw_broad_allow_hides_stale_deny_but_keeps_earlier_explicit_deny(self):
+        body = textwrap.dedent(
+            f"""
+            source {SCRIPT!s}
+            ufw() {{
+                printf '%s\\n' \
+                    '9000/tcp DENY IN Anywhere' \
+                    'Anywhere ALLOW IN Anywhere' \
+                    '1234/tcp DENY Anywhere' \
+                    '1234/udp DENY Anywhere' \
+                    '1234/tcp (v6) DENY 2001:db8::1' \
+                    '1234/tcp (v6) ALLOW Anywhere (v6)'
+            }}
+            firewall_rule_records ufw
+            """
+        )
+        result = self.run_bash(body)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["IPv4 DROP tcp 9000", "IPv6 ACCEPT tcp 1234"],
+        )
 
     def test_firewall_overview_collapses_matching_families_and_keeps_single_stack(self):
         body = textwrap.dedent(
@@ -505,12 +703,13 @@ class FirewallHistoryTest(unittest.TestCase):
             result = self.run_bash(body)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_overview_shows_live_lockdown_allowlist_and_drop(self):
+    def test_overview_lists_ports_once_and_keeps_policy_in_detailed_status(self):
         body = textwrap.dedent(
             f"""
             source {SCRIPT!s}
             detect_firewall_backend() {{ printf 'iptables\\n'; }}
             protected_ssh_ports() {{ printf '21919\\n'; }}
+            public_listeners() {{ :; }}
             firewall_rule_records() {{ printf 'IPv4 ACCEPT tcp 21919\\n'; }}
             iptables() {{
                 case "$*" in
@@ -525,9 +724,17 @@ class FirewallHistoryTest(unittest.TestCase):
         )
         result = self.run_bash(body)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("当前入站保护清单（实时规则）", result.stdout)
+        self.assertNotIn("当前入站保护清单", result.stdout)
+        self.assertNotIn("默认入站策略", result.stdout)
+        self.assertNotIn("其他宿主机新入站", result.stdout)
+        self.assertIn("已放行的端口：", result.stdout)
         self.assertIn("IPv4  21919/tcp", result.stdout)
-        self.assertIn("IPv4  其他宿主机新入站：DROP", result.stdout)
+        self.assertEqual(result.stdout.count("IPv4  21919/tcp"), 1)
+        detailed = self.run_bash(body.replace("show_firewall_port_overview", "show_firewall_status"))
+        self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
+        self.assertIn("IPv4 默认入站策略: ACCEPT", detailed.stdout)
+        self.assertIn("入站保护模式: 已启用（IPv4）", detailed.stdout)
+        self.assertIn("IPv4 INPUT 原始规则", detailed.stdout)
 
 
 if __name__ == "__main__":
