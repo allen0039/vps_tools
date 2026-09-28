@@ -3,6 +3,7 @@
 set -Eeuo pipefail
 umask 077
 
+VERSION=0.1.2
 SWAP_FILE=/swapfile
 FSTAB=/etc/fstab
 INSTALL_PATH=/usr/local/bin/swaptool
@@ -16,12 +17,14 @@ log() { printf '[swaptool] %s\n' "$*"; }
 die() { printf '[swaptool] 错误: %s\n' "$*" >&2; exit 1; }
 
 usage() {
+    printf 'swaptool v%s\n\n' "$VERSION"
     cat <<'EOF'
 用法：
   sudo bash swap_tool.sh install        安装 swaptool 并打开交互菜单
   swaptool                             打开交互菜单，自选或输入 swap 大小
   sudo bash swap_tool.sh setup [大小]   创建或修复 /swapfile；默认沿用旧文件大小，无旧文件时为 2G
   swaptool status                       查看实际启用状态
+  swaptool --version                    查看工具版本
 
 安装时也可指定大小以跳过菜单，例如 install 1536M。交互菜单支持直接输入 MiB 数字。
 EOF
@@ -232,7 +235,7 @@ menu() {
             END { used=total-free; pct=(total > 0 ? int(used*100/total) : 0);
                   printf "%dM/%dM (%d%%)", int(used/1024), int(total/1024), pct }
         ' /proc/meminfo)
-        printf '\n设置虚拟内存（swap）\n当前虚拟内存：%s\n' "$summary"
+        printf '\nswaptool v%s | 设置虚拟内存（swap）\n当前虚拟内存：%s\n' "$VERSION" "$summary"
         printf '%s\n' '------------------------------'
         printf '%s\n' '1. 分配 1024M    2. 分配 2048M    3. 分配 4096M    4. 自定义大小'
         printf '%s\n' '------------------------------' '0. 退出' '------------------------------'
@@ -257,6 +260,7 @@ menu() {
 
 status() {
     [[ $(uname -s) == Linux ]] || die '此脚本只能在 Linux 上运行。'
+    printf 'swaptool v%s\n' "$VERSION"
     printf '根分区文件系统: %s\n' "$(findmnt -n -o FSTYPE -T /)"
     if active_swapfile; then
         printf '/swapfile: 已启用\n'
@@ -298,6 +302,7 @@ case ${1:-} in
     menu|'') (( $# <= 1 )) || die '菜单不接受参数。'; menu ;;
     setup) (( $# <= 2 )) || die 'setup 最多接受一个大小参数。'; setup "${2:-}" ;;
     status) (( $# == 1 )) || die 'status 不接受参数。'; status ;;
+    -V|--version|version) (( $# == 1 )) || die 'version 不接受参数。'; printf 'swaptool %s\n' "$VERSION" ;;
     -h|--help|help) usage ;;
     *) usage >&2; exit 2 ;;
 esac

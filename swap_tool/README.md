@@ -1,5 +1,7 @@
 # swap_tool
 
+当前版本：**0.1.2**。安装后运行 `swaptool --version` 可查看实际安装版本。
+
 修复或创建 Linux VPS 的 `/swapfile`，适用于根分区为 Btrfs 的机器，也可用于常见的
 ext4/XFS 根分区。它会以 `/proc/swaps` 确认交换空间真正启用，再写入开机配置。
 
@@ -24,7 +26,7 @@ curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/swap_tool
 菜单示例：
 
 ```text
-设置虚拟内存（swap）
+swaptool v0.1.2 | 设置虚拟内存（swap）
 当前虚拟内存：0M/1023M (0%)
 ------------------------------
 1. 分配 1024M    2. 分配 2048M    3. 分配 4096M    4. 自定义大小

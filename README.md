@@ -154,7 +154,8 @@ sudo dnstool status
 curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/swap_tool/swap_tool.sh' -o /tmp/swap_tool.sh && sudo bash /tmp/swap_tool.sh install
 ```
 
-安装后运行 `swaptool` 可以再次打开菜单；用 `swaptool status` 或
+安装后运行 `swaptool` 可以再次打开菜单；用 `swaptool --version` 查看版本号
+（当前为 0.1.2），用 `swaptool status` 或
 `swapon --show` 检查实际启用状态。详细使用方式和安全行为见
 [swap_tool 详细说明](swap_tool/README.md)。
 
