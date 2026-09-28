@@ -2,17 +2,32 @@
 
 这是一个“规则取证 + AI 复核”的常态化巡查服务，用于审计 VPS 用户的异常登录和疑似批量自动化行为。默认不会自动封号，也不会把原始日志或原始 IP 发给 AI。
 
-## 从 Gitee 一键部署
+## 一键部署
 
-当前提供基于 systemd 的拉取部署方式。脚本会从 Gitee 下载公开源码，将部署副本保存到 `/opt/vps-audit-src`，然后进入交互安装。也可以设置 `VPSPC_DOWNLOAD_BASE` 或 `VPSPC_ARCHIVE_URL` 使用自建镜像：
+当前提供基于 systemd 的拉取部署方式。任选 GitHub 或 Gitee，无法访问时可自行切换。
+两种命令分别从对应平台下载安装器和公开源码，将部署副本保存到 `/opt/vps-audit-src`，然后进入交互安装。
+
+**GitHub：**
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo VPSPC_DOWNLOAD_BASE='https://github.com/allen0039/vps_tools/archive' bash /tmp/vpspc-install.sh
+```
+
+**Gitee：**
 
 ```bash
 curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh
 ```
 
-建议在生产环境先下载并检查脚本内容，再使用 `sudo` 执行。需要固定版本时，可以下载脚本后指定提交 SHA 或标签：
+安装器默认从 Gitee 获取源码包；GitHub 命令通过 `VPSPC_DOWNLOAD_BASE` 指定 GitHub 源码包地址。
+也可以设置 `VPSPC_DOWNLOAD_BASE` 或 `VPSPC_ARCHIVE_URL` 使用自建镜像。
+
+建议在生产环境先下载并检查脚本内容，再使用 `sudo` 执行。需要固定版本时，下载脚本后按所选来源指定提交 SHA 或标签：
 
 ```bash
+# GitHub
+sudo VPSPC_REF='提交SHA或标签' VPSPC_DOWNLOAD_BASE='https://github.com/allen0039/vps_tools/archive' bash /tmp/vpspc-install.sh
+# Gitee
 sudo VPSPC_REF='提交SHA或标签' bash /tmp/vpspc-install.sh
 ```
 
@@ -34,6 +49,14 @@ sudo vpspc
 菜单可以查看状态、立即巡查、维护多个订阅用户、修改全部检测阈值和 Telegram 推送参数，也可进入完整重新配置、回滚及卸载流程。快捷文件带有 vpspc 管理标记；卸载时只删除标记仍匹配的文件，不覆盖或清理同名第三方命令。
 
 彻底删除一键安装器创建的程序、配置、审计数据、源码和可选 Falco 组件：
+
+**GitHub：**
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo VPSPC_DOWNLOAD_BASE='https://github.com/allen0039/vps_tools/archive' bash /tmp/vpspc-install.sh destroy
+```
+
+**Gitee：**
 
 ```bash
 curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh destroy

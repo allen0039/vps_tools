@@ -17,10 +17,20 @@
 
 ## 安装固定版本
 
-`v1.0.0` 保留了仓库最初的根目录脚本路径：
+`v1.0.0` 保留了仓库最初的根目录脚本路径。任选 GitHub 或 Gitee，无法访问时可自行切换；两种来源使用相同的版本和校验值。
+
+**GitHub：**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/allen0039/vps_tools/v1.0.0/restart-mmw-agent -o /tmp/restart-mmw-agent && \
+echo "5f8d640f340fc55a5c68c0a4cfe21de3aa085ef7b2a80b102edd3f73520af5df  /tmp/restart-mmw-agent" | sha256sum --check --strict && \
+sudo install -m 750 -o root -g root /tmp/restart-mmw-agent /usr/local/sbin/restart-mmw-agent
+```
+
+**Gitee：**
+
+```bash
+curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/v1.0.0/restart-mmw-agent' -o /tmp/restart-mmw-agent && \
 echo "5f8d640f340fc55a5c68c0a4cfe21de3aa085ef7b2a80b102edd3f73520af5df  /tmp/restart-mmw-agent" | sha256sum --check --strict && \
 sudo install -m 750 -o root -g root /tmp/restart-mmw-agent /usr/local/sbin/restart-mmw-agent
 ```

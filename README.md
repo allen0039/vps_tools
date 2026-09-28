@@ -1,6 +1,7 @@
 # VPS Tools
 
 个人 VPS 运维脚本集合。每个工具使用独立目录，包含可执行脚本和详细说明。
+安装命令同时提供 GitHub 和 Gitee 两种来源，任选一种；无法访问时可自行切换。
 
 ## 工具列表
 
@@ -15,22 +16,51 @@
 
 下载并执行 systemd 交互安装器：
 
+**GitHub：**
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo VPSPC_DOWNLOAD_BASE='https://github.com/allen0039/vps_tools/archive' bash /tmp/vpspc-install.sh
+```
+
+**Gitee：**
+
 ```bash
 curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh
 ```
 
-当前提供 Gitee 拉取部署方式，Docker 部署将在后续版本增加。安装器会自动检测 SSH/妙妙屋 X 日志及各自时区，也会检测 Falco；未安装 Falco 时解释用途并询问是否自动安装，选择跳过不影响 SSH 和订阅多 IP 审计。完整功能、数据目录、保留时间、Telegram 和妙妙屋 X 日志接入说明请查看 [vpspc 文档](vpspc/README.md)。
+两种命令分别从 GitHub 或 Gitee 获取安装器和源码包。安装器会自动检测 SSH/妙妙屋 X 日志及各自时区，也会检测 Falco；未安装 Falco 时解释用途并询问是否自动安装，选择跳过不影响 SSH 和订阅多 IP 审计。完整功能、数据目录、保留时间、Telegram、Docker 部署和妙妙屋 X 日志接入说明请查看 [vpspc 文档](vpspc/README.md)。
 
-恢复上一次配置或彻底删除 vpspc：
+恢复上一次配置：
 
 ```bash
 sudo /opt/vps-audit-src/install.sh rollback
+```
+
+彻底删除 vpspc，任选一种来源下载安装器：
+
+**GitHub：**
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo VPSPC_DOWNLOAD_BASE='https://github.com/allen0039/vps_tools/archive' bash /tmp/vpspc-install.sh destroy
+```
+
+**Gitee：**
+
+```bash
 curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh destroy
 ```
 
 ## safe-ssh-port 快速使用
 
 下载安装脚本：
+
+**GitHub：**
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/safe-ssh-port/safe-ssh-port.sh' -o /tmp/safe-ssh-port.sh && sudo bash /tmp/safe-ssh-port.sh install
+```
+
+**Gitee：**
 
 ```bash
 curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/safe-ssh-port/safe-ssh-port.sh' -o /tmp/safe-ssh-port.sh && sudo bash /tmp/safe-ssh-port.sh install
@@ -90,6 +120,14 @@ sudo restart-mmw-agent
 ## dns_tool 快速使用
 
 下载安装脚本：
+
+**GitHub：**
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/dns_tool/dns_tool.sh' -o /tmp/dns_tool.sh && sudo bash /tmp/dns_tool.sh install
+```
+
+**Gitee：**
 
 ```bash
 curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/dns_tool/dns_tool.sh' -o /tmp/dns_tool.sh && sudo bash /tmp/dns_tool.sh install

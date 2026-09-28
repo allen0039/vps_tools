@@ -20,10 +20,18 @@ DNS，也可以填写 1 至 4 个自定义 IPv4/IPv6 DNS 地址。
 
 ## 一键安装
 
-在 VPS 上执行：
+在 VPS 上任选一种来源执行；无法访问时可自行切换。
+
+**GitHub：**
 
 ```bash
 curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/dns_tool/dns_tool.sh' -o /tmp/dns_tool.sh && sudo bash /tmp/dns_tool.sh install
+```
+
+**Gitee：**
+
+```bash
+curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/dns_tool/dns_tool.sh' -o /tmp/dns_tool.sh && sudo bash /tmp/dns_tool.sh install
 ```
 
 安装后的命令位于：
@@ -232,8 +240,16 @@ dig example.com
 
 重新执行一键安装命令即可更新：
 
+**GitHub：**
+
 ```bash
 curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/dns_tool/dns_tool.sh' -o /tmp/dns_tool.sh && sudo bash /tmp/dns_tool.sh install
+```
+
+**Gitee：**
+
+```bash
+curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/dns_tool/dns_tool.sh' -o /tmp/dns_tool.sh && sudo bash /tmp/dns_tool.sh install
 ```
 
 已安装版本与新脚本不同时，安装程序会要求确认后再覆盖命令文件；直接按回车不会确认，
