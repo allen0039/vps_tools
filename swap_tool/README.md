@@ -1,6 +1,6 @@
 # swap_tool
 
-当前版本：**0.1.2**。安装后运行 `swaptool --version` 可查看实际安装版本。
+当前版本：**0.1.3**。安装后运行 `swaptool --version` 可查看实际安装版本。
 
 修复或创建 Linux VPS 的 `/swapfile`，适用于根分区为 Btrfs 的机器，也可用于常见的
 ext4/XFS 根分区。它会以 `/proc/swaps` 确认交换空间真正启用，再写入开机配置。
@@ -26,7 +26,7 @@ curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/swap_tool
 菜单示例：
 
 ```text
-swaptool v0.1.2 | 设置虚拟内存（swap）
+swaptool v0.1.3 | 设置虚拟内存（swap）
 当前虚拟内存：0M/1023M (0%)
 ------------------------------
 1. 分配 1024M    2. 分配 2048M    3. 分配 4096M    4. 自定义大小
@@ -48,6 +48,16 @@ swaptool status
 `sudo bash /tmp/swap_tool.sh install 1536M`。不带大小的 `setup` 仍沿用现有
 `/swapfile` 的大小；没有旧文件时默认 2G。
 
+每次成功创建或调整后，工具会自动删除先前脚本留下的未使用 swap 文件。升级后如果
+只想立即清理旧残余、不改变当前大小，运行：
+
+```bash
+sudo swaptool cleanup
+```
+
+清理只匹配 `/swapfile.swaptool.bak.<14位时间戳>.<进程号>`，会跳过正在使用的文件；
+当前 `/swapfile` 未启用时不会清理，以免丢失可恢复的旧文件。
+
 `status` 会显示根分区文件系统、`/swapfile` 是否实际启用、fstab 配置和全部当前
 交换空间。也可用系统命令独立检查：
 
@@ -61,8 +71,8 @@ cat /proc/swaps
 - 调整已启用 `/swapfile` 的大小时，先创建新文件；只有当前文件使用量为 0，才会
   关闭旧文件并切换。切换失败会尝试恢复并重新启用旧文件。使用量大于 0 时停止，
   避免在内存紧张时调用 `swapoff`。
-- 修复失败的旧 `/swapfile` 会被重命名为 `/swapfile.swaptool.bak.*`；新文件成功启用
-  后，确认稳定再自行删除旧备份以释放磁盘空间。创建新文件时需要额外的可用空间。
+- 旧 `/swapfile` 会暂时重命名为 `/swapfile.swaptool.bak.*`，以便切换失败时恢复；
+  新文件成功启用且 fstab 写入成功后会自动删除。创建新文件时仍需要额外的可用空间。
 - 修改 `/etc/fstab` 前会备份到 `/etc/fstab.swaptool.bak.*`；仅替换其中的
   `/swapfile` 条目，不影响其他 swap 设备。
 - 现有 `/swapfile` 若不是普通文件或没有 swap 签名，脚本会停止，避免覆盖其他数据。

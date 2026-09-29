@@ -155,7 +155,8 @@ curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/swap_tool
 ```
 
 安装后运行 `swaptool` 可以再次打开菜单；用 `swaptool --version` 查看版本号
-（当前为 0.1.2），用 `swaptool status` 或
+（当前为 0.1.3）。成功调整后会自动删除旧的 swap 文件；已存在的残余可运行
+`sudo swaptool cleanup` 清理。用 `swaptool status` 或
 `swapon --show` 检查实际启用状态。详细使用方式和安全行为见
 [swap_tool 详细说明](swap_tool/README.md)。
 

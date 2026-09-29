@@ -3,10 +3,11 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION=0.1.2
+VERSION=0.1.3
 SWAP_FILE=/swapfile
 FSTAB=/etc/fstab
 INSTALL_PATH=/usr/local/bin/swaptool
+BACKUP_PREFIX=/swapfile.swaptool.bak.
 TEMP_SWAP=
 OLD_BACKUP=
 NEW_AT_TARGET=0
@@ -23,6 +24,7 @@ usage() {
   sudo bash swap_tool.sh install        安装 swaptool 并打开交互菜单
   swaptool                             打开交互菜单，自选或输入 swap 大小
   sudo bash swap_tool.sh setup [大小]   创建或修复 /swapfile；默认沿用旧文件大小，无旧文件时为 2G
+  sudo swaptool cleanup                清理以前版本留下的旧 swap 文件
   swaptool status                       查看实际启用状态
   swaptool --version                    查看工具版本
 
@@ -30,8 +32,34 @@ usage() {
 EOF
 }
 
+active_swap_path() {
+    awk -v path="$1" 'NR > 1 && $1 == path { found = 1 } END { exit !found }' /proc/swaps
+}
+
 active_swapfile() {
-    awk -v path="$SWAP_FILE" 'NR > 1 && $1 == path { found = 1 } END { exit !found }' /proc/swaps
+    active_swap_path "$SWAP_FILE"
+}
+
+cleanup_swap_backups() {
+    local path suffix count=0
+    active_swapfile || die '当前 /swapfile 未启用，暂不清理旧文件。'
+    for path in "${BACKUP_PREFIX}"*; do
+        [[ -f $path && ! -L $path ]] || continue
+        suffix=${path#"$BACKUP_PREFIX"}
+        [[ $suffix =~ ^[0-9]{14}\.[0-9]+$ ]] || continue
+        if [[ $(blkid -p -o value -s TYPE "$path" 2>/dev/null || :) != swap ]]; then
+            log "跳过没有 swap 签名的文件: $path"
+            continue
+        fi
+        if active_swap_path "$path"; then
+            log "跳过正在使用的旧文件: $path"
+            continue
+        fi
+        rm -- "$path" || die "无法删除旧文件: $path"
+        log "已删除旧文件: $path"
+        (( count += 1 ))
+    done
+    if (( count == 0 )); then log '没有需要清理的旧 swap 文件。'; fi
 }
 
 parse_size() {
@@ -151,6 +179,7 @@ setup() {
             if ! fstab_is_canonical; then ensure_fstab; fi
             log '/swapfile 已在运行，保留当前交换空间。'
             status
+            cleanup_swap_backups
             return
         fi
         size=$(parse_size "$requested")
@@ -158,6 +187,7 @@ setup() {
             if ! fstab_is_canonical; then ensure_fstab; fi
             log '/swapfile 已是指定大小，保留当前交换空间。'
             status
+            cleanup_swap_backups
             return
         fi
         old_used_kib=$(awk -v path="$SWAP_FILE" 'NR > 1 && $1 == path { print $4 }' /proc/swaps)
@@ -194,11 +224,11 @@ setup() {
         OLD_DISABLED=1
     fi
     if [[ -e $SWAP_FILE ]]; then
-        backup_path="/swapfile.swaptool.bak.$(date +%Y%m%d%H%M%S).$$"
+        backup_path="${BACKUP_PREFIX}$(date +%Y%m%d%H%M%S).$$"
         [[ ! -e $backup_path && ! -L $backup_path ]] || die "备份路径已存在: $backup_path"
         mv -- "$SWAP_FILE" "$backup_path" || die '无法备份旧 /swapfile。'
         OLD_BACKUP=$backup_path
-        log "旧文件已保留: $OLD_BACKUP"
+        log '旧文件已临时保存，切换成功后会自动删除。'
     fi
     mv -- "$TEMP_SWAP" "$SWAP_FILE" || die '无法安装新的 /swapfile。'
     TEMP_SWAP=
@@ -211,13 +241,18 @@ setup() {
     ensure_fstab
     log '交换空间已实际启用，并将在重启后自动启用。'
     status
-    if [[ -n $OLD_BACKUP ]]; then
-        log "确认运行稳定后，可自行删除旧文件以释放空间: $OLD_BACKUP"
-    fi
     OLD_BACKUP=
     NEW_AT_TARGET=0
     ACTIVATED=0
     OLD_DISABLED=0
+    cleanup_swap_backups
+}
+
+cleanup_command() {
+    [[ $(uname -s) == Linux ]] || die '此脚本只能在 Linux 上运行。'
+    (( EUID == 0 )) || die 'cleanup 必须以 root 身份运行。'
+    command -v blkid >/dev/null 2>&1 || die '缺少命令: blkid'
+    cleanup_swap_backups
 }
 
 menu() {
@@ -301,6 +336,7 @@ case ${1:-} in
     install) (( $# <= 2 )) || die 'install 最多接受一个大小参数。'; install_tool "${2:-}" ;;
     menu|'') (( $# <= 1 )) || die '菜单不接受参数。'; menu ;;
     setup) (( $# <= 2 )) || die 'setup 最多接受一个大小参数。'; setup "${2:-}" ;;
+    cleanup) (( $# == 1 )) || die 'cleanup 不接受参数。'; cleanup_command ;;
     status) (( $# == 1 )) || die 'status 不接受参数。'; status ;;
     -V|--version|version) (( $# == 1 )) || die 'version 不接受参数。'; printf 'swaptool %s\n' "$VERSION" ;;
     -h|--help|help) usage ;;
