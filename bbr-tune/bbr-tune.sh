@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.2"
+VERSION="2.10.3"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -3185,6 +3185,14 @@ update_channel_base() {
   esac
 }
 
+update_channel_api() {
+  case "$1" in
+    github) printf '%s\n' 'https://api.github.com/repos/allen0039/vps_tools/commits/main' ;;
+    gitee) printf '%s\n' 'https://gitee.com/api/v5/repos/allen0039/vps_tools/branches/main' ;;
+    *) return 1 ;;
+  esac
+}
+
 download_update_installer() {
   local url="$1" destination="$2"
   if have curl; then
@@ -3199,13 +3207,19 @@ download_update_installer() {
 
 update_command() (
   require_linux; require_root
-  local base temp_dir installer nonce installed_version installed_path
+  local base temp_dir installer nonce installed_version installed_path metadata api sha
   base="$(update_channel_base "$UPDATE_CHANNEL")" || { error "更新渠道只能是 github 或 gitee"; return 1; }
+  api="$(update_channel_api "$UPDATE_CHANNEL")"
   nonce="$$-$RANDOM-$RANDOM"
   temp_dir="$(mktemp -d /tmp/bbr-tune-update.XXXXXX)" || { error "无法创建更新临时目录"; return 1; }
   trap 'rm -rf "$temp_dir"' EXIT
   installer="${temp_dir}/install.sh"
+  metadata="${temp_dir}/commit.json"
   section "从 ${UPDATE_CHANNEL} 更新 BBR TUNE"
+  download_update_installer "${api}?bbr_tune_refresh=${nonce}" "$metadata" || { error "无法查询所选渠道的最新提交"; return 1; }
+  sha="$(grep -oEm1 '"sha"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"' "$metadata" | head -n 1 | grep -oE '[0-9a-f]{40}' || true)"
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { error "更新渠道未返回有效的提交编号"; return 1; }
+  base="${base%/main/bbr-tune}/${sha}/bbr-tune"
   printf '  下载来源：%s\n' "$base"
   download_update_installer "${base}/install.sh?bbr_tune_refresh=${nonce}" "$installer" || { error "安装器下载失败，当前版本未修改"; return 1; }
   [[ -s "$installer" ]] && head -n 1 "$installer" | grep -q '^#!/usr/bin/env bash' && bash -n "$installer" || {

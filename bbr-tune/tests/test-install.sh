@@ -23,6 +23,21 @@ grep -q 'bbr-kernel.sh?bbr_tune_refresh=test-refresh' "$download_log" || fail 'h
 grep -q 'Cache-Control: no-cache' "$download_log" || fail 'download lacks no-cache header'
 unset -f curl
 rm -f "$download_log"
+curl() {
+  local previous='' argument destination=''
+  for argument in "$@"; do
+    if [[ "$previous" == -o ]]; then destination="$argument"; fi
+    previous="$argument"
+  done
+  printf '{"sha":"7ef501bf6eb5e546dd0a2bdcf0dcbce537e1b134"}\n' >"$destination"
+}
+resolve_remote_base
+[[ "$RAW_BASE" == 'https://raw.githubusercontent.com/allen0039/vps_tools/7ef501bf6eb5e546dd0a2bdcf0dcbce537e1b134/bbr-tune' ]] || fail 'GitHub base not pinned to commit'
+RAW_BASE='https://gitee.com/allen0039/vps_tools/raw/main/bbr-tune'
+resolve_remote_base
+[[ "$RAW_BASE" == 'https://gitee.com/allen0039/vps_tools/raw/7ef501bf6eb5e546dd0a2bdcf0dcbce537e1b134/bbr-tune' ]] || fail 'Gitee base not pinned to commit'
+unset -f curl
+RAW_BASE='https://raw.githubusercontent.com/allen0039/vps_tools/main/bbr-tune'
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT

@@ -110,6 +110,31 @@ download_payload() {
   fi
 }
 
+resolve_remote_base() {
+  local api metadata sha
+  case "$RAW_BASE" in
+    https://raw.githubusercontent.com/allen0039/vps_tools/main/bbr-tune)
+      api='https://api.github.com/repos/allen0039/vps_tools/commits/main' ;;
+    https://gitee.com/allen0039/vps_tools/raw/main/bbr-tune)
+      api='https://gitee.com/api/v5/repos/allen0039/vps_tools/branches/main' ;;
+    *) return 0 ;;
+  esac
+  metadata="$(mktemp /tmp/bbr-tune-commit.XXXXXX)"
+  if have curl; then
+    curl -fsSL --retry 3 --connect-timeout 15 --max-time 60 -H 'Cache-Control: no-cache' "${api}?bbr_tune_refresh=${DOWNLOAD_NONCE}" -o "$metadata" || { rm -f "$metadata"; die "无法查询更新渠道的最新提交"; }
+  elif have wget; then
+    wget -T 30 -t 3 -O "$metadata" "${api}?bbr_tune_refresh=${DOWNLOAD_NONCE}" || { rm -f "$metadata"; die "无法查询更新渠道的最新提交"; }
+  else
+    rm -f "$metadata"
+    die "缺少 curl 或 wget，无法查询最新提交"
+  fi
+  sha="$(grep -oEm1 '"sha"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"' "$metadata" | head -n 1 | grep -oE '[0-9a-f]{40}' || true)"
+  rm -f "$metadata"
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "更新渠道未返回有效的提交编号"
+  RAW_BASE="${RAW_BASE%/main/bbr-tune}/${sha}/bbr-tune"
+  log "固定下载提交：${sha:0:12}"
+}
+
 validate_payload() {
   local source_file="$1"
   [[ -s "$source_file" ]] || die "主程序文件为空"
@@ -198,6 +223,7 @@ main() {
     cp "$source_file" "$TEMP_FILE"
     cp "${source_file%/*}/bbr-kernel.sh" "$TEMP_KERNEL_FILE"
   else
+    resolve_remote_base
     log "正在从 ${RAW_BASE} 下载最新主程序"
     download_payload "$TEMP_FILE"
     download_payload "$TEMP_KERNEL_FILE" bbr-kernel.sh
