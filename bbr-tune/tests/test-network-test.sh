@@ -24,6 +24,7 @@ curl() {
   cat >"$output" <<'UPSTREAM'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$NETWORK_TEST_CALLS"
+printf '\033[2m特价VPS补货TG频道： ibsgss | 感谢 Zstatic CDN 节点\033[0m\n'
 printf 'mock TcpQuality result\n'
 exit "$NETWORK_TEST_RC"
 UPSTREAM
@@ -37,6 +38,10 @@ done
 [[ "$(sed -n '2p' "$NETWORK_TEST_CALLS")" == '-v4 -v6 --no-rank-upload' ]] || fail 'route mode arguments'
 [[ "$(sed -n '3p' "$NETWORK_TEST_CALLS")" == '--only-speedtest --no-rank-upload' ]] || fail 'speed mode arguments'
 [[ "$(find "$STATE_DIR/network-tests" -name '*.log' | wc -l | tr -d ' ')" == 3 ]] || fail 'missing test logs'
+if grep -R -q '特价VPS补货TG频道' "$STATE_DIR/network-tests" "$tmp/both.out"; then
+  fail 'upstream advertisement leaked into output or logs'
+fi
+grep -q 'mock TcpQuality result' "$tmp/both.out" || fail 'measurement output was hidden'
 NETWORK_TEST_RC=37
 export NETWORK_TEST_RC
 if NETWORK_TEST_MODE=speed network_test_command >"$tmp/failure.out" 2>&1; then

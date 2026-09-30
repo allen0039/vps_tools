@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.9"
+VERSION="2.10.10"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -3175,6 +3175,7 @@ network_test_command() (
   esac
   have curl || die "缺少 curl，无法下载 TcpQuality 检测入口"
   have mktemp || die "缺少 mktemp，无法安全保存 TcpQuality 检测入口"
+  have awk || die "缺少 awk，无法处理 TcpQuality 检测输出"
   have tee || die "缺少 tee，无法保存检测日志"
   umask 077
   entry="$(mktemp "${TMPDIR:-/tmp}/bbr-tcpquality.XXXXXX")" || die "无法创建临时文件"
@@ -3193,7 +3194,9 @@ network_test_command() (
     warn "当前配置仍受安全回滚计时器约束；长时间检测可能跨过回滚时间，请及时验证并确认参数"
   fi
   printf '  检测会访问上游节点并消耗流量；已关闭在线报告上传。\n\n'
-  if bash "$entry" "${test_args[@]}" 2>&1 | tee "$log"; then
+  if bash "$entry" "${test_args[@]}" 2>&1 \
+      | awk 'index($0, "特价VPS补货TG频道：") == 0 { print; fflush() }' \
+      | tee "$log"; then
     info "三网检测完成；日志：$log"
   else
     rc=$?
