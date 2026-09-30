@@ -13,6 +13,17 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
   [[ "$RAW_BASE" == "$BBR_TUNE_RAW_BASE" ]]
 ) || fail "alternate download source"
 
+DOWNLOAD_NONCE='test-refresh'
+download_log="$(mktemp)"
+curl() { printf '%s\n' "$*" >>"$download_log"; }
+download_payload /dev/null
+download_payload /dev/null bbr-kernel.sh
+grep -q 'bbr-tune.sh?bbr_tune_refresh=test-refresh' "$download_log" || fail 'main download lacks refresh parameter'
+grep -q 'bbr-kernel.sh?bbr_tune_refresh=test-refresh' "$download_log" || fail 'helper download lacks refresh parameter'
+grep -q 'Cache-Control: no-cache' "$download_log" || fail 'download lacks no-cache header'
+unset -f curl
+rm -f "$download_log"
+
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 installed="${tmp}/sbin/bbr-tune"
@@ -26,6 +37,15 @@ install_payload "${ROOT}/bbr-tune.sh" "$installed" "$linked"
 [[ "$(readlink "$shortcut")" == "$installed" ]] || fail "shortcut target"
 "$linked" --version | grep -q '^bbr-tune ' || fail "installed command version"
 "$shortcut" --version | grep -q '^bbrtcp ' || fail "shortcut command version"
+version_is_older 2.10.0 2.10.2 || fail 'older version comparison'
+if version_is_older 2.10.2 2.10.2 || version_is_older 2.10.3 2.10.2; then fail 'non-older version comparison'; fi
+cp "${ROOT}/bbr-tune.sh" "$tmp/old-main.sh"
+sed 's/^VERSION=.*/VERSION="2.10.0"/' "$tmp/old-main.sh" >"$tmp/old-main-version.sh"
+cp "${ROOT}/bbr-kernel.sh" "$tmp/old-helper.sh"
+sed 's/^KERNEL_HELPER_VERSION=.*/KERNEL_HELPER_VERSION="2.10.0"/' "$tmp/old-helper.sh" >"$tmp/old-helper-version.sh"
+if (install_payload "$tmp/old-main-version.sh" "$installed" "$linked" "$tmp/old-helper-version.sh") >/dev/null 2>&1; then
+  fail 'older release replaced installed version'
+fi
 [[ -x "${installed}-kernel" ]] || fail "kernel helper not installed"
 "$linked" kernel help | grep -q 'BBRv3 内核管理' || fail "installed kernel entrypoint"
 # A mixed release must be rejected before overwriting either installed file.

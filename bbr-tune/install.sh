@@ -8,6 +8,7 @@ LINK_PATH="${BBR_TUNE_LINK_PATH:-/usr/local/bin/bbr-tune}"
 LAUNCH_AFTER_INSTALL="1"
 TEMP_FILE=""
 TEMP_KERNEL_FILE=""
+DOWNLOAD_NONCE="${BBR_TUNE_DOWNLOAD_NONCE:-$$-$RANDOM-$RANDOM}"
 
 log() { printf '[安装] %s\n' "$*"; }
 warn() { printf '[警告] %s\n' "$*" >&2; }
@@ -99,9 +100,9 @@ local_payload_path() {
 
 download_payload() {
   local destination="$1" filename="${2:-bbr-tune.sh}"
-  local url="${RAW_BASE}/${filename}"
+  local url="${RAW_BASE}/${filename}?bbr_tune_refresh=${DOWNLOAD_NONCE}"
   if have curl; then
-    curl -fL --retry 3 --connect-timeout 15 "$url" -o "$destination"
+    curl -fL --retry 3 --connect-timeout 15 -H 'Cache-Control: no-cache' "$url" -o "$destination"
   elif have wget; then
     wget -O "$destination" "$url"
   else
@@ -116,14 +117,32 @@ validate_payload() {
   bash -n "$source_file" || die "主程序语法检查失败"
 }
 
+version_is_older() {
+  local candidate="$1" current="$2" i
+  local -a candidate_parts current_parts
+  [[ "$candidate" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  IFS=. read -r -a candidate_parts <<<"$candidate"
+  IFS=. read -r -a current_parts <<<"$current"
+  for i in 0 1 2; do
+    if (( 10#${candidate_parts[i]} < 10#${current_parts[i]} )); then return 0; fi
+    if (( 10#${candidate_parts[i]} > 10#${current_parts[i]} )); then return 1; fi
+  done
+  return 1
+}
+
 install_payload() {
   local source_file="$1" install_path="${2:-$INSTALL_PATH}" link_path="${3:-$LINK_PATH}"
-  local helper="${4:-${source_file%/*}/bbr-kernel.sh}" version helper_version shortcut_path
+  local helper="${4:-${source_file%/*}/bbr-kernel.sh}" version helper_version shortcut_path installed_version
   validate_payload "$source_file"
   validate_payload "$helper"
   version="$(sed -n 's/^VERSION="\([^"]*\)"$/\1/p' "$source_file")"
   helper_version="$(sed -n 's/^KERNEL_HELPER_VERSION="\([^"]*\)"$/\1/p' "$helper")"
   [[ -n "$version" && "$version" == "$helper_version" ]] || die "主程序与内核管理脚本版本不匹配，未安装"
+  if [[ -x "$install_path" ]]; then
+    installed_version="$("$install_path" --version 2>/dev/null || true)"
+    installed_version="${installed_version##* }"
+    version_is_older "$version" "$installed_version" && die "下载版本 ${version} 低于已安装版本 ${installed_version}，已拒绝降级"
+  fi
   shortcut_path="$(dirname "$link_path")/bbrtcp"
   if [[ "$shortcut_path" != "$install_path" && "$shortcut_path" != "$link_path" ]] &&
      { [[ -e "$shortcut_path" ]] || [[ -L "$shortcut_path" ]]; } &&

@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.1"
+VERSION="2.10.2"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -3188,7 +3188,7 @@ update_channel_base() {
 download_update_installer() {
   local url="$1" destination="$2"
   if have curl; then
-    curl -fL --retry 3 --connect-timeout 15 --max-time 120 "$url" -o "$destination"
+    curl -fL --retry 3 --connect-timeout 15 --max-time 120 -H 'Cache-Control: no-cache' "$url" -o "$destination"
   elif have wget; then
     wget -T 30 -t 3 -O "$destination" "$url"
   else
@@ -3199,19 +3199,27 @@ download_update_installer() {
 
 update_command() (
   require_linux; require_root
-  local base temp_dir installer
+  local base temp_dir installer nonce installed_version installed_path
   base="$(update_channel_base "$UPDATE_CHANNEL")" || { error "更新渠道只能是 github 或 gitee"; return 1; }
+  nonce="$$-$RANDOM-$RANDOM"
   temp_dir="$(mktemp -d /tmp/bbr-tune-update.XXXXXX)" || { error "无法创建更新临时目录"; return 1; }
   trap 'rm -rf "$temp_dir"' EXIT
   installer="${temp_dir}/install.sh"
   section "从 ${UPDATE_CHANNEL} 更新 BBR TUNE"
   printf '  下载来源：%s\n' "$base"
-  download_update_installer "${base}/install.sh" "$installer" || { error "安装器下载失败，当前版本未修改"; return 1; }
+  download_update_installer "${base}/install.sh?bbr_tune_refresh=${nonce}" "$installer" || { error "安装器下载失败，当前版本未修改"; return 1; }
   [[ -s "$installer" ]] && head -n 1 "$installer" | grep -q '^#!/usr/bin/env bash' && bash -n "$installer" || {
     error "下载的安装器无效，当前版本未修改"; return 1;
   }
-  if BBR_TUNE_RAW_BASE="$base" bash "$installer" --install-only; then
-    info "更新完成；重新打开菜单即可使用新版本"
+  if BBR_TUNE_RAW_BASE="$base" BBR_TUNE_DOWNLOAD_NONCE="$nonce" bash "$installer" --install-only; then
+    installed_path="${BBR_TUNE_INSTALL_PATH:-/usr/local/sbin/bbr-tune}"
+    installed_version="$("$installed_path" --version 2>/dev/null)" || { error "安装器已执行，但无法读取安装后的版本：$installed_path"; return 1; }
+    installed_version="${installed_version##* }"
+    if [[ "$installed_version" == "$VERSION" ]]; then
+      warn "安装后仍是版本 ${VERSION}；所选渠道尚未提供新版本，或下载内容仍被缓存"
+    else
+      info "已从 ${VERSION} 更新到 ${installed_version}；重新打开菜单即可使用新版本"
+    fi
   else
     error "更新未完成，请检查上方错误"
     return 1

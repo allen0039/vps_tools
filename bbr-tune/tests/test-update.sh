@@ -12,20 +12,27 @@ if update_channel_base unknown >/dev/null; then fail 'unknown channel accepted';
 
 require_linux() { :; }; require_root() { :; }
 export UPDATE_TEST_LOG="$tmp/installer.log"
+export BBR_TUNE_INSTALL_PATH="$tmp/installed-bbr-tune"
+export UPDATE_TEST_INSTALLED_VERSION="2.10.2"
 download_update_installer() {
   printf '%s\n' "$1" >"$tmp/download-url"
   cat >"$2" <<'INSTALLER'
 #!/usr/bin/env bash
 printf '%s|%s\n' "$BBR_TUNE_RAW_BASE" "$*" >"$UPDATE_TEST_LOG"
+printf '#!/usr/bin/env bash\nprintf "bbr-tune %%s\\n" "%s"\n' "$UPDATE_TEST_INSTALLED_VERSION" >"$BBR_TUNE_INSTALL_PATH"
+chmod +x "$BBR_TUNE_INSTALL_PATH"
 INSTALLER
 }
 UPDATE_CHANNEL=github
-update_command >"$tmp/github.out" || fail 'GitHub update failed'
+update_command >"$tmp/github.out" 2>&1 || fail 'GitHub update failed'
 [[ "$(cat "$tmp/installer.log")" == 'https://raw.githubusercontent.com/allen0039/vps_tools/main/bbr-tune|--install-only' ]] || fail 'GitHub source not passed to installer'
-[[ "$(cat "$tmp/download-url")" == 'https://raw.githubusercontent.com/allen0039/vps_tools/main/bbr-tune/install.sh' ]] || fail 'GitHub installer URL'
+[[ "$(cat "$tmp/download-url")" == https://raw.githubusercontent.com/allen0039/vps_tools/main/bbr-tune/install.sh\?bbr_tune_refresh=* ]] || fail 'GitHub installer URL lacks refresh parameter'
+grep -q '仍是版本 2.10.2' "$tmp/github.out" || fail 'unchanged version not reported'
 UPDATE_CHANNEL=gitee
+UPDATE_TEST_INSTALLED_VERSION="2.10.3"
 update_command >"$tmp/gitee.out" || fail 'Gitee update failed'
 [[ "$(cat "$tmp/installer.log")" == 'https://gitee.com/allen0039/vps_tools/raw/main/bbr-tune|--install-only' ]] || fail 'Gitee source not passed to installer'
+grep -q '已从 2.10.2 更新到 2.10.3' "$tmp/gitee.out" || fail 'new version not reported'
 
 UPDATE_CHANNEL=unknown
 if update_command >"$tmp/invalid.out" 2>&1; then fail 'invalid channel updated'; fi
