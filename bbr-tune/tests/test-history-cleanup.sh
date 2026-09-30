@@ -10,6 +10,11 @@ BACKUP_ROOT="$STATE_DIR/backups"; PENDING_DIR="$STATE_DIR/pending"
 HISTORY_FILE="$STATE_DIR/history.tsv"
 ACTIVE_SESSION_FILE="$STATE_DIR/active-session"
 mkdir -p "$SESSION_ROOT" "$BACKUP_ROOT" "$PENDING_DIR" "$tmp/outside"
+cleanup_parse_selection '1, 3 5' 5 || fail 'mixed batch selection rejected'
+[[ "${CLEANUP_SELECTION[*]}" == '0 2 4' ]] || fail 'batch selection parsed incorrectly'
+for invalid in '1,1' '1,6' '0,1' '1,a'; do
+  if cleanup_parse_selection "$invalid" 5; then fail "invalid batch selection accepted: $invalid"; fi
+done
 
 completed=20260101-completed
 pending=20260102-pending
@@ -66,6 +71,22 @@ grep -Fq "$linked" "$HISTORY_FILE" || fail 'symlinked session index deleted'
 grep -Fq '会话状态已变化' "$tmp/linked.out" || fail 'symlink guard not explained'
 
 [[ "$(head -n 1 "$HISTORY_FILE")" == $'time\tsession\tbefore_single_mbps\tafter_single_mbps' ]] || fail 'history header changed'
+batch_one=20260106-batch-one
+batch_two=20260107-batch-two
+for id in "$batch_one" "$batch_two"; do
+  mkdir -p "$SESSION_ROOT/$id" "$BACKUP_ROOT/$id"
+  printf 'evidence\n' >"$SESSION_ROOT/$id/results.tsv"
+  printf '2026-01-06\t%s\t100\t120\n' "$id" >>"$HISTORY_FILE"
+done
+printf '1,2\n0\n' | cleanup_history_interactive >"$tmp/batch-protected.out" 2>&1
+[[ -d "$SESSION_ROOT/$batch_one" ]] || fail 'protected history batch partially deleted'
+printf '2,3\nn\n0\n' | cleanup_history_interactive >"$tmp/batch-cancel.out" 2>&1
+[[ -d "$SESSION_ROOT/$batch_one" && -d "$SESSION_ROOT/$batch_two" ]] || fail 'cancelled history batch deleted'
+printf '2,3\ny\n0\n' | cleanup_history_interactive >"$tmp/batch.out" 2>&1
+[[ ! -e "$SESSION_ROOT/$batch_one" && ! -e "$SESSION_ROOT/$batch_two" ]] || fail 'history batch directories kept'
+if grep -Eq "$batch_one|$batch_two" "$HISTORY_FILE"; then fail 'history batch index kept'; fi
+[[ -d "$BACKUP_ROOT/$batch_one" && -d "$BACKUP_ROOT/$batch_two" ]] || fail 'backup removed with history batch'
+grep -Fq "$pending" "$HISTORY_FILE" || fail 'protected history index removed'
 cleanup_backups_interactive() { printf 'backup choice\n'; }
 cleanup_history_interactive() { printf 'history choice\n'; }
 printf '1\n2\n0\n' | cleanup_data_interactive >"$tmp/menu.out"

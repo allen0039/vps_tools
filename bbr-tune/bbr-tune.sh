@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.7"
+VERSION="2.10.8"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -1507,9 +1507,27 @@ EOF_META
   printf '%s\n' "$backup"
 }
 
+cleanup_parse_selection() {
+  local input="$1" count="$2" token index seen_indexes=,
+  local -a tokens=()
+  CLEANUP_SELECTION=()
+  [[ "$input" =~ ^[0-9,[:space:]]+$ ]] || return 1
+  input="${input//,/ }"
+  read -r -a tokens <<<"$input"
+  (( ${#tokens[@]} > 0 )) || return 1
+  for token in "${tokens[@]}"; do
+    [[ "$token" =~ ^[0-9]{1,4}$ ]] || return 1
+    index=$((10#$token - 1))
+    (( index >= 0 && index < count )) || return 1
+    [[ "$seen_indexes" != *",$index,"* ]] || return 1
+    seen_indexes+="$index,"
+    CLEANUP_SELECTION+=("$index")
+  done
+}
+
 cleanup_backups_interactive() {
-  local original backup selected selected_real choice index answer latest newest
-  local -a backups=()
+  local original backup selected choice index answer latest newest active
+  local -a backups=() selected_backups=()
   [[ -d "$BACKUP_ROOT" && ! -L "$BACKUP_ROOT" ]] || { info "当前没有备份可清理"; return 0; }
   original="$(original_backup_path)" || { error "无法确认原始备份，已停止清理"; return 1; }
   while true; do
@@ -1517,12 +1535,15 @@ cleanup_backups_interactive() {
     for backup in "$BACKUP_ROOT"/*; do
       [[ -d "$backup" && ! -L "$backup" ]] && backups+=("$backup")
     done
+    active="$(active_session_id)"
     section "清理历史备份"
-    printf '  原始备份永久保留；待确认的安全回滚备份不可删除。\n'
+    printf '  原始备份、当前使用会话的备份及待确认的安全回滚备份不可删除。\n'
     for index in "${!backups[@]}"; do
       backup="${backups[$index]}"
       if [[ "$backup" == "$original" ]]; then
         printf '  %2d  %s  [原始备份，保留]\n' "$((index+1))" "${backup##*/}"
+      elif [[ "${backup##*/}" == "$active" ]]; then
+        printf '  %2d  %s  [当前使用，保留]\n' "$((index+1))" "${backup##*/}"
       elif [[ -f "$(pending_path "$backup")/armed" ]]; then
         printf '  %2d  %s  [等待安全回滚，保留]\n' "$((index+1))" "${backup##*/}"
       else
@@ -1530,32 +1551,43 @@ cleanup_backups_interactive() {
       fi
     done
     printf '   0  返回\n'
-    read -r -p '请输入要删除的备份编号：' choice || return 0
+    read -r -p '请输入要删除的备份编号（可用逗号或空格分隔多个）：' choice || return 0
     [[ "$choice" != 0 && -n "$choice" ]] || return 0
-    [[ "$choice" =~ ^[0-9]{1,4}$ ]] || { warn "请输入列表中的编号"; continue; }
-    index=$((10#$choice - 1))
-    (( index >= 0 && index < ${#backups[@]} )) || { warn "请输入列表中的编号"; continue; }
-    selected="${backups[$index]}"
-    [[ "$selected" != "$original" ]] || { warn "原始备份不能删除"; continue; }
-    [[ ! -f "$(pending_path "$selected")/armed" ]] || { warn "该备份仍受安全回滚保护，请先确认或恢复参数"; continue; }
-    read -r -p "确认永久删除 ${selected##*/}？[y/N] " answer || return 0
+    cleanup_parse_selection "$choice" "${#backups[@]}" || { warn "请输入列表中的不重复编号"; continue; }
+    selected_backups=()
+    for index in "${CLEANUP_SELECTION[@]}"; do
+      selected="${backups[$index]}"
+      [[ "$selected" != "$original" ]] || { warn "原始备份不能删除"; selected_backups=(); break; }
+      [[ "${selected##*/}" != "$active" ]] || { warn "当前使用会话的备份不能删除"; selected_backups=(); break; }
+      [[ ! -f "$(pending_path "$selected")/armed" ]] || { warn "该备份仍受安全回滚保护，请先确认或恢复参数"; selected_backups=(); break; }
+      selected_backups+=("$selected")
+    done
+    (( ${#selected_backups[@]} == ${#CLEANUP_SELECTION[@]} )) || continue
+    printf '  将永久删除 %d 个备份：\n' "${#selected_backups[@]}"
+    for selected in "${selected_backups[@]}"; do printf '    %s\n' "${selected##*/}"; done
+    read -r -p '确认全部永久删除？[y/N] ' answer || return 0
     [[ "$answer" =~ ^[Yy]$ ]] || continue
-    # Recheck just before removal, including the path type and protected marker.
+    # Validate the whole batch before deleting any item.
     original="$(original_backup_path)" || { error "无法确认原始备份，已停止清理"; return 1; }
-    [[ -d "$selected" && ! -L "$selected" && "$selected" != "$original" && ! -f "$(pending_path "$selected")/armed" ]] || {
-      warn "备份状态已变化，未删除"; continue;
-    }
+    active="$(active_session_id)"
+    for selected in "${selected_backups[@]}"; do
+      [[ -d "$selected" && ! -L "$selected" && "$selected" != "$original" && "${selected##*/}" != "$active" && ! -f "$(pending_path "$selected")/armed" ]] || {
+        warn "备份状态已变化，本批次未删除"; selected_backups=(); break;
+      }
+    done
+    (( ${#selected_backups[@]} > 0 )) || continue
     latest="$(readlink -f "$LATEST_BACKUP" 2>/dev/null || true)"
-    selected_real="$(readlink -f "$selected" 2>/dev/null || true)"
-    rm -rf -- "$selected" || { error "删除失败：$selected"; return 1; }
-    if [[ "$latest" == "$selected_real" ]]; then
+    for selected in "${selected_backups[@]}"; do
+      rm -rf -- "$selected" || { error "删除失败：$selected"; return 1; }
+      info "已删除备份：$selected"
+    done
+    if [[ -n "$latest" && ! -d "$latest" ]]; then
       newest=""
       for backup in "$BACKUP_ROOT"/*; do
         [[ -d "$backup" && ! -L "$backup" ]] && backup_is_restorable "$backup" && newest="$backup"
       done
       if [[ -n "$newest" ]]; then ln -sfn "$newest" "$LATEST_BACKUP"; else rm -f "$LATEST_BACKUP"; fi
     fi
-    info "已删除备份：$selected"
   done
 }
 
@@ -1566,8 +1598,8 @@ cleanup_backups_command() {
 }
 
 cleanup_history_interactive() {
-  local path id known seen index choice selected selected_dir answer record_time record_kind temp_index active
-  local -a sessions=()
+  local path id known seen index choice selected selected_dir answer record_time record_kind temp_index active selected_csv
+  local -a sessions=() selected_ids=()
   [[ ! -L "$SESSION_ROOT" && ( ! -e "$SESSION_ROOT" || -d "$SESSION_ROOT" ) ]] || {
     error "历史会话目录无效：$SESSION_ROOT"; return 1;
   }
@@ -1619,42 +1651,53 @@ cleanup_history_interactive() {
       printf '  %2d  %s  [%s]\n' "$((index+1))" "$id" "$record_kind"
     done
     printf '   0  返回\n'
-    read -r -p '请输入要删除的会话编号：' choice || return 0
+    read -r -p '请输入要删除的会话编号（可用逗号或空格分隔多个）：' choice || return 0
     [[ "$choice" != 0 && -n "$choice" ]] || return 0
-    [[ "$choice" =~ ^[0-9]{1,4}$ ]] || { warn "请输入列表中的编号"; continue; }
-    index=$((10#$choice - 1))
-    (( index >= 0 && index < ${#sessions[@]} )) || { warn "请输入列表中的编号"; continue; }
-    selected="${sessions[$index]}"
-    selected_dir="${SESSION_ROOT}/${selected}"
+    cleanup_parse_selection "$choice" "${#sessions[@]}" || { warn "请输入列表中的不重复编号"; continue; }
+    selected_ids=()
     active="$(active_session_id)"
-    [[ "$selected" != "$active" ]] || {
-      warn "该会话是当前使用会话，不能删除；请先确认其他参数或回滚"; continue;
-    }
-    [[ ! -f "$(pending_path "$selected")/armed" ]] || {
-      warn "该会话仍受安全回滚保护，请先确认或恢复参数"; continue;
-    }
-    read -r -p "确认永久删除会话 ${selected} 的记录？参数备份仍保留。[y/N] " answer || return 0
+    for index in "${CLEANUP_SELECTION[@]}"; do
+      selected="${sessions[$index]}"
+      [[ "$selected" != "$active" ]] || {
+        warn "该会话是当前使用会话，不能删除；请先确认其他参数或回滚"; selected_ids=(); break;
+      }
+      [[ ! -f "$(pending_path "$selected")/armed" ]] || {
+        warn "该会话仍受安全回滚保护，请先确认或恢复参数"; selected_ids=(); break;
+      }
+      selected_ids+=("$selected")
+    done
+    (( ${#selected_ids[@]} == ${#CLEANUP_SELECTION[@]} )) || continue
+    printf '  将永久删除 %d 个会话的目录和测试索引（参数备份保留）：\n' "${#selected_ids[@]}"
+    for selected in "${selected_ids[@]}"; do printf '    %s\n' "$selected"; done
+    read -r -p '确认全部永久删除？[y/N] ' answer || return 0
     [[ "$answer" =~ ^[Yy]$ ]] || continue
     active="$(active_session_id)"
-    [[ "$selected" != "$active" ]] || { warn "该会话已成为当前使用会话，未删除"; continue; }
-    [[ ! -L "$SESSION_ROOT" && ! -L "$HISTORY_FILE" && ! -L "$selected_dir" &&
-       ( ! -e "$selected_dir" || -d "$selected_dir" ) &&
-       ! -f "$(pending_path "$selected")/armed" ]] || {
-      warn "会话状态已变化，未删除"; continue;
-    }
+    for selected in "${selected_ids[@]}"; do
+      selected_dir="${SESSION_ROOT}/${selected}"
+      [[ "$selected" != "$active" && ! -L "$SESSION_ROOT" && ! -L "$HISTORY_FILE" && ! -L "$selected_dir" &&
+         ( ! -e "$selected_dir" || -d "$selected_dir" ) &&
+         ! -f "$(pending_path "$selected")/armed" ]] || {
+        warn "会话状态已变化，本批次未删除"; selected_ids=(); break;
+      }
+    done
+    (( ${#selected_ids[@]} > 0 )) || continue
     if [[ -e "$HISTORY_FILE" ]]; then
       [[ -f "$HISTORY_FILE" && -r "$HISTORY_FILE" ]] || { error "历史索引无法读取，未删除"; return 1; }
       temp_index="$(mktemp "${HISTORY_FILE}.tmp.XXXXXX")" || return 1
       cp -p "$HISTORY_FILE" "$temp_index" || { rm -f "$temp_index"; return 1; }
-      awk -F '\t' -v wanted="$selected" 'NR==1 || $2!=wanted' "$HISTORY_FILE" >"$temp_index" || {
+      selected_csv="$(IFS=,; printf '%s' "${selected_ids[*]}")"
+      awk -F '\t' -v wanted="$selected_csv" 'BEGIN {split(wanted, ids, ","); for (i in ids) remove[ids[i]]=1} NR==1 || !($2 in remove)' "$HISTORY_FILE" >"$temp_index" || {
         rm -f "$temp_index"; error "更新历史索引失败，未删除"; return 1;
       }
       mv -f "$temp_index" "$HISTORY_FILE" || { error "保存历史索引失败，未删除"; return 1; }
     fi
-    if [[ -d "$selected_dir" ]]; then
-      rm -rf -- "$selected_dir" || { error "历史索引已更新，但会话目录删除失败：$selected_dir"; return 1; }
-    fi
-    info "已删除历史会话：${selected}；参数备份保留"
+    for selected in "${selected_ids[@]}"; do
+      selected_dir="${SESSION_ROOT}/${selected}"
+      if [[ -d "$selected_dir" ]]; then
+        rm -rf -- "$selected_dir" || { error "历史索引已更新，但会话目录删除失败：$selected_dir"; return 1; }
+      fi
+      info "已删除历史会话：${selected}；参数备份保留"
+    done
   done
 }
 

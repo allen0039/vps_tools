@@ -49,4 +49,25 @@ if printf '2\ny\n' | cleanup_backups_interactive >"$tmp/invalid.out" 2>&1; then 
 rm -f "$STATE_DIR/original-backup"
 mkdir -p "$BACKUP_ROOT/20251231-incomplete"
 [[ "$(original_backup_path)" == "$BACKUP_ROOT/20260101-original" ]] || fail 'incomplete snapshot selected as original'
+
+for id in 20260601-batch 20260602-batch; do
+  mkdir -p "$BACKUP_ROOT/$id"
+  touch "$BACKUP_ROOT/$id/meta.env" "$BACKUP_ROOT/$id/files.tsv" "$BACKUP_ROOT/$id/sysctl.tsv" "$BACKUP_ROOT/$id/qdisc.txt"
+done
+ln -sfn "$BACKUP_ROOT/20260602-batch" "$LATEST_BACKUP"
+printf '2,4\n0\n' | cleanup_backups_interactive >"$tmp/batch-protected.out" 2>&1
+[[ -d "$BACKUP_ROOT/20260601-batch" && -d "$BACKUP_ROOT/20260101-original" ]] || fail 'protected backup batch partially deleted'
+printf '4,5\nn\n0\n' | cleanup_backups_interactive >"$tmp/batch-cancel.out" 2>&1
+[[ -d "$BACKUP_ROOT/20260601-batch" && -d "$BACKUP_ROOT/20260602-batch" ]] || fail 'cancelled backup batch deleted'
+printf '4,5\ny\n0\n' | cleanup_backups_interactive >"$tmp/batch.out" 2>&1
+[[ ! -e "$BACKUP_ROOT/20260601-batch" && ! -e "$BACKUP_ROOT/20260602-batch" ]] || fail 'backup batch not deleted'
+[[ "$(readlink -f "$LATEST_BACKUP")" == "$(readlink -f "$BACKUP_ROOT/20260301-pending")" ]] || fail 'latest backup pointer not repaired after batch'
+[[ -d "$BACKUP_ROOT/20260101-original" && -d "$BACKUP_ROOT/20260301-pending" ]] || fail 'protected backup removed by batch'
+SESSION_ROOT="$STATE_DIR/sessions"; ACTIVE_SESSION_FILE="$STATE_DIR/active-session"
+mkdir -p "$SESSION_ROOT/20260701-active" "$BACKUP_ROOT/20260701-active"
+touch "$BACKUP_ROOT/20260701-active/meta.env" "$BACKUP_ROOT/20260701-active/files.tsv" "$BACKUP_ROOT/20260701-active/sysctl.tsv" "$BACKUP_ROOT/20260701-active/qdisc.txt"
+printf '20260701-active\n' >"$ACTIVE_SESSION_FILE"
+printf '4,1\n0\n' | cleanup_backups_interactive >"$tmp/batch-active.out" 2>&1
+[[ -d "$BACKUP_ROOT/20260701-active" ]] || fail 'active backup deleted'
+grep -Fq '当前使用会话的备份不能删除' "$tmp/batch-active.out" || fail 'active backup protection not explained'
 printf 'All backup cleanup and protection tests passed.\n'
