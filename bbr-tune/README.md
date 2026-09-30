@@ -1,6 +1,6 @@
 # bbr-tune 使用指南
 
-**版本 2.10.5** · 在远程 Linux 服务器上运行的 TCP / BBR 调优工具。
+**版本 2.10.6** · 在远程 Linux 服务器上运行的 TCP / BBR 调优工具。
 
 本目录基于 [dingding229/bbr-tune](https://github.com/dingding229/bbr-tune) 修改。上游仓库目前未提供明确的开源许可证；本目录不适用 VPS Tools 根目录的 MIT 许可证。公开发布或分发修改版前，请先确认已获得相应授权。
 
@@ -72,7 +72,7 @@ BBR TUNE / 远程服务器网络调优
     7  使用说明
     8  BBRv3 内核管理
     9  更新工具（GitHub / Gitee）
-   10  清理历史备份
+   10  清理历史数据
     0  退出
 ```
 
@@ -80,7 +80,9 @@ BBR TUNE / 远程服务器网络调优
 
 选择 `2` 或运行 `sudo bbr-tune status` 时，当前状态下方会列出与首次完整备份的原始 TCP/BBR、缓存和队列参数对比，并标明相同、已变化或未记录。这里的“原始”指工具首次备份时的实测值，不是 Linux 内核默认值；如果还没有备份，会提示暂无原始参数。出口网卡与备份不同时，不直接比较实际队列。
 
-选择 `10` 可逐个查看并交互删除历史参数备份。工具会永久保留最早的完整备份；升级前已有的备份会以最早的完整会话作为原始备份。仍在等待安全回滚的备份不可删除。删除最近一次备份后，`rollback` 默认使用剩余的最新备份。也可执行 `sudo bbr-tune cleanup-backups`。
+选择 `10` 后可选择清理参数备份，或清理历史测试与会话记录。两类数据分开删除，每次只删除一项，并在删除前确认。清理会话会删除 `sessions/<会话编号>/` 中的原始测速 JSON、报告和日志，同时移除 `history.tsv` 中对应的测试记录；参数备份和当前生效参数保持不变。未写入测试索引的中断测试及操作日志也会列出。仍在等待安全回滚的会话不可删除。也可直接运行 `sudo bbr-tune cleanup-history`。
+
+清理备份时，工具会永久保留最早的完整备份；升级前已有的备份会以最早的完整会话作为原始备份。仍在等待安全回滚的备份不可删除。删除最近一次备份后，`rollback` 默认使用剩余的最新备份。直接入口仍为 `sudo bbr-tune cleanup-backups`。
 
 选择 `9` 可从 GitHub 或 Gitee 更新工具。程序会显示选定渠道，确认后下载该渠道的安装器并执行“仅安装更新”，完成后重新打开菜单。更新沿用安装器的操作锁、待确认回滚检查和主程序/内核助手版本匹配检查；下载或校验失败时会显示错误。也可使用 `sudo bbr-tune update --channel github` 或 `sudo bbr-tune update --channel gitee`。两个渠道可能更新不同步，选定渠道不可用时可返回改选另一个。
 
@@ -192,6 +194,7 @@ sudo bbr-tune autotune \
 # 查看状态、历史及帮助
 sudo bbr-tune status
 sudo bbr-tune history
+sudo bbr-tune cleanup-data
 bbr-tune help
 ```
 

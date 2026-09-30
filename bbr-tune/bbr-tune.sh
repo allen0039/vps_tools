@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.5"
+VERSION="2.10.6"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -303,7 +303,9 @@ usage() {
   sudo ./bbr-tune.sh kernel [操作]         BBRv3 内核检测、安装、试用与恢复
   sudo ./bbr-tune.sh confirm                 确认保留当前参数并取消安全回滚
   sudo ./bbr-tune.sh rollback [--backup DIR] 恢复调优前参数
-  sudo ./bbr-tune.sh cleanup-backups         交互清理历史备份（保留原始备份）
+  sudo ./bbr-tune.sh cleanup-data            交互清理历史数据（备份或会话记录）
+  sudo ./bbr-tune.sh cleanup-backups         直接清理历史备份（保留原始备份）
+  sudo ./bbr-tune.sh cleanup-history         直接清理历史会话记录
 
 自动寻优参数：
   --bandwidth-mbps N       期望的端到端下载带宽，单位 Mbps，必填
@@ -331,7 +333,7 @@ usage() {
   6. 即使没有候选达到绝对目标，也会应用本次会话中实测综合表现最优的候选。
   7. 不设固定候选数量；BDP/内存约束下探测，连续两档无收益停止，回落后回退精调。
   8. 每轮等待连接 300 秒；每次测量前续期 3600 秒回滚，完成后重新计时等待确认。
-  9. 所有结果和原始 JSON 长期保存在 /var/lib/bbr-tcp-tuning/sessions。
+  9. 结果和原始 JSON 保存在 /var/lib/bbr-tcp-tuning/sessions，可从清理菜单逐条删除。
 USAGE
 }
 is_integer() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
@@ -352,7 +354,7 @@ parse_args() {
   fi
   case "$1" in
     kernel) COMMAND=kernel; shift; KERNEL_ARGS=("$@"); return ;;
-    menu|autotune|qdisc|status|history|history-compare|history-params|apply-history|update|confirm|rollback|cleanup-backups|help) COMMAND="$1"; shift ;;
+    menu|autotune|qdisc|status|history|history-compare|history-params|apply-history|update|confirm|rollback|cleanup-data|cleanup-backups|cleanup-history|help) COMMAND="$1"; shift ;;
     --help|-h) COMMAND="help"; shift ;;
     --version) printf '%s %s\n' "$PROGRAM" "$VERSION"; exit 0 ;;
     *) die "未知命令：$1" ;;
@@ -1560,6 +1562,118 @@ cleanup_backups_command() {
   require_linux; require_root
   [[ -t 0 ]] || die "清理备份需要交互终端"
   cleanup_backups_interactive
+}
+
+cleanup_history_interactive() {
+  local path id known seen index choice selected selected_dir answer record_time record_kind temp_index
+  local -a sessions=()
+  [[ ! -L "$SESSION_ROOT" && ( ! -e "$SESSION_ROOT" || -d "$SESSION_ROOT" ) ]] || {
+    error "历史会话目录无效：$SESSION_ROOT"; return 1;
+  }
+  [[ ! -L "$HISTORY_FILE" && ( ! -e "$HISTORY_FILE" || -f "$HISTORY_FILE" ) ]] || {
+    error "历史索引文件无效：$HISTORY_FILE"; return 1;
+  }
+  while true; do
+    sessions=()
+    for path in "$SESSION_ROOT"/*; do
+      [[ -d "$path" && ! -L "$path" ]] || continue
+      id="${path##*/}"
+      [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] && sessions+=("$id")
+    done
+    if [[ -r "$HISTORY_FILE" ]]; then
+      while IFS= read -r id; do
+        [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || continue
+        seen=0
+        for known in "${sessions[@]}"; do
+          [[ "$known" != "$id" ]] || { seen=1; break; }
+        done
+        (( seen )) || sessions+=("$id")
+      done < <(awk -F '\t' 'NR>1 {print $2}' "$HISTORY_FILE")
+    fi
+    section "清理历史测试与会话记录"
+    printf '  删除会话目录及对应测试索引；参数备份和当前参数保持不变。\n'
+    printf '  等待安全回滚的会话不可删除。\n'
+    if (( ${#sessions[@]} == 0 )); then
+      printf '  当前没有可清理的历史会话。\n'
+      return 0
+    fi
+    for index in "${!sessions[@]}"; do
+      id="${sessions[$index]}"
+      record_time=""
+      if [[ -r "$HISTORY_FILE" ]]; then
+        record_time="$(awk -F '\t' -v wanted="$id" 'NR>1 && $2==wanted {print $1; exit}' "$HISTORY_FILE")"
+      fi
+      if [[ -n "$record_time" ]]; then
+        record_kind="测试 ${record_time}"
+      else
+        record_kind='未入测试索引的会话日志'
+      fi
+      if [[ -f "$(pending_path "$id")/armed" ]]; then
+        record_kind="${record_kind}；等待安全回滚，保留"
+      fi
+      printf '  %2d  %s  [%s]\n' "$((index+1))" "$id" "$record_kind"
+    done
+    printf '   0  返回\n'
+    read -r -p '请输入要删除的会话编号：' choice || return 0
+    [[ "$choice" != 0 && -n "$choice" ]] || return 0
+    [[ "$choice" =~ ^[0-9]{1,4}$ ]] || { warn "请输入列表中的编号"; continue; }
+    index=$((10#$choice - 1))
+    (( index >= 0 && index < ${#sessions[@]} )) || { warn "请输入列表中的编号"; continue; }
+    selected="${sessions[$index]}"
+    selected_dir="${SESSION_ROOT}/${selected}"
+    [[ ! -f "$(pending_path "$selected")/armed" ]] || {
+      warn "该会话仍受安全回滚保护，请先确认或恢复参数"; continue;
+    }
+    read -r -p "确认永久删除会话 ${selected} 的记录？参数备份仍保留。[y/N] " answer || return 0
+    [[ "$answer" =~ ^[Yy]$ ]] || continue
+    [[ ! -L "$SESSION_ROOT" && ! -L "$HISTORY_FILE" && ! -L "$selected_dir" &&
+       ( ! -e "$selected_dir" || -d "$selected_dir" ) &&
+       ! -f "$(pending_path "$selected")/armed" ]] || {
+      warn "会话状态已变化，未删除"; continue;
+    }
+    if [[ -e "$HISTORY_FILE" ]]; then
+      [[ -f "$HISTORY_FILE" && -r "$HISTORY_FILE" ]] || { error "历史索引无法读取，未删除"; return 1; }
+      temp_index="$(mktemp "${HISTORY_FILE}.tmp.XXXXXX")" || return 1
+      cp -p "$HISTORY_FILE" "$temp_index" || { rm -f "$temp_index"; return 1; }
+      awk -F '\t' -v wanted="$selected" 'NR==1 || $2!=wanted' "$HISTORY_FILE" >"$temp_index" || {
+        rm -f "$temp_index"; error "更新历史索引失败，未删除"; return 1;
+      }
+      mv -f "$temp_index" "$HISTORY_FILE" || { error "保存历史索引失败，未删除"; return 1; }
+    fi
+    if [[ -d "$selected_dir" ]]; then
+      rm -rf -- "$selected_dir" || { error "历史索引已更新，但会话目录删除失败：$selected_dir"; return 1; }
+    fi
+    info "已删除历史会话：${selected}；参数备份保留"
+  done
+}
+
+cleanup_history_command() {
+  require_linux; require_root
+  [[ -t 0 ]] || die "清理历史会话需要交互终端"
+  cleanup_history_interactive
+}
+
+cleanup_data_interactive() {
+  local choice
+  while true; do
+    section "清理历史数据"
+    printf '    1  清理参数备份\n'
+    printf '    2  清理历史测试与会话记录\n'
+    printf '    0  返回\n'
+    read -r -p '请选择：' choice || return 0
+    case "$choice" in
+      1) cleanup_backups_interactive || return 1 ;;
+      2) cleanup_history_interactive || return 1 ;;
+      0|'') return 0 ;;
+      *) printf '请输入 0～2 的编号\n' ;;
+    esac
+  done
+}
+
+cleanup_data_command() {
+  require_linux; require_root
+  [[ -t 0 ]] || die "清理历史数据需要交互终端"
+  cleanup_data_interactive
 }
 
 restore_files() {
@@ -3431,7 +3545,7 @@ ui_menu_options() {
   printf '    7  使用说明\n'
   printf '    8  BBRv3 内核管理\n'
   printf '    9  更新工具（GitHub / Gitee）\n'
-  printf '   10  清理历史备份\n'
+  printf '   10  清理历史数据\n'
   printf '    0  退出\n\n'
 }
 
@@ -3652,7 +3766,7 @@ menu() {
           warn "已完成更新；请重新运行 bbrtcp 打开新版菜单"
         fi
         ;;
-      10) ui_execute 1 cleanup-backups || true ;;
+      10) ui_execute 1 cleanup-data || true ;;
       0) return ;;
       *) printf '%s无效选择%s\n' "$UI_RED" "$UI_RESET" ;;
     esac
@@ -3667,7 +3781,7 @@ main() {
     require_linux; require_root
     stop_expired_session
   fi
-  case "$COMMAND" in autotune|qdisc|apply-history|confirm|rollback|cleanup-backups) acquire_operation_lock ;; esac
+  case "$COMMAND" in autotune|qdisc|apply-history|confirm|rollback|cleanup-data|cleanup-backups|cleanup-history) acquire_operation_lock ;; esac
   case "$COMMAND" in
     menu) menu ;;
     autotune) autotune ;;
@@ -3681,7 +3795,9 @@ main() {
     update) update_command ;;
     confirm) confirm_tuning ;;
     rollback) rollback_command ;;
+    cleanup-data) cleanup_data_command ;;
     cleanup-backups) cleanup_backups_command ;;
+    cleanup-history) cleanup_history_command ;;
     help) usage ;;
   esac
 }
