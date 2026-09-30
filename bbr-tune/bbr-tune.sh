@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.6"
+VERSION="2.10.7"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -13,6 +13,7 @@ BACKUP_ROOT="${STATE_DIR}/backups"
 LATEST_BACKUP="${STATE_DIR}/latest"
 PENDING_DIR="${STATE_DIR}/pending"
 PENDING_LATEST="${STATE_DIR}/pending-latest"
+ACTIVE_SESSION_FILE="${STATE_DIR}/active-session"
 HISTORY_FILE="${STATE_DIR}/history.tsv"
 SYSCTL_FILE="/etc/sysctl.d/99-bbr-tcp-tuning.conf"
 MODULES_FILE="/etc/modules-load.d/bbr-tcp-tuning.conf"
@@ -303,7 +304,7 @@ usage() {
   sudo ./bbr-tune.sh kernel [操作]         BBRv3 内核检测、安装、试用与恢复
   sudo ./bbr-tune.sh confirm                 确认保留当前参数并取消安全回滚
   sudo ./bbr-tune.sh rollback [--backup DIR] 恢复调优前参数
-  sudo ./bbr-tune.sh cleanup-data            交互清理历史数据（备份或会话记录）
+  sudo ./bbr-tune.sh cleanup-data            交互清理数据（备份或会话记录）
   sudo ./bbr-tune.sh cleanup-backups         直接清理历史备份（保留原始备份）
   sudo ./bbr-tune.sh cleanup-history         直接清理历史会话记录
 
@@ -1565,7 +1566,7 @@ cleanup_backups_command() {
 }
 
 cleanup_history_interactive() {
-  local path id known seen index choice selected selected_dir answer record_time record_kind temp_index
+  local path id known seen index choice selected selected_dir answer record_time record_kind temp_index active
   local -a sessions=()
   [[ ! -L "$SESSION_ROOT" && ( ! -e "$SESSION_ROOT" || -d "$SESSION_ROOT" ) ]] || {
     error "历史会话目录无效：$SESSION_ROOT"; return 1;
@@ -1593,6 +1594,8 @@ cleanup_history_interactive() {
     section "清理历史测试与会话记录"
     printf '  删除会话目录及对应测试索引；参数备份和当前参数保持不变。\n'
     printf '  等待安全回滚的会话不可删除。\n'
+    active="$(active_session_id)"
+    [[ -n "$active" ]] && printf '  当前使用会话：%s（标记为当前使用并保留）\n' "$active"
     if (( ${#sessions[@]} == 0 )); then
       printf '  当前没有可清理的历史会话。\n'
       return 0
@@ -1608,7 +1611,9 @@ cleanup_history_interactive() {
       else
         record_kind='未入测试索引的会话日志'
       fi
-      if [[ -f "$(pending_path "$id")/armed" ]]; then
+      if [[ "$id" == "$active" ]]; then
+        record_kind="${record_kind}；当前使用，保留"
+      elif [[ -f "$(pending_path "$id")/armed" ]]; then
         record_kind="${record_kind}；等待安全回滚，保留"
       fi
       printf '  %2d  %s  [%s]\n' "$((index+1))" "$id" "$record_kind"
@@ -1621,11 +1626,17 @@ cleanup_history_interactive() {
     (( index >= 0 && index < ${#sessions[@]} )) || { warn "请输入列表中的编号"; continue; }
     selected="${sessions[$index]}"
     selected_dir="${SESSION_ROOT}/${selected}"
+    active="$(active_session_id)"
+    [[ "$selected" != "$active" ]] || {
+      warn "该会话是当前使用会话，不能删除；请先确认其他参数或回滚"; continue;
+    }
     [[ ! -f "$(pending_path "$selected")/armed" ]] || {
       warn "该会话仍受安全回滚保护，请先确认或恢复参数"; continue;
     }
     read -r -p "确认永久删除会话 ${selected} 的记录？参数备份仍保留。[y/N] " answer || return 0
     [[ "$answer" =~ ^[Yy]$ ]] || continue
+    active="$(active_session_id)"
+    [[ "$selected" != "$active" ]] || { warn "该会话已成为当前使用会话，未删除"; continue; }
     [[ ! -L "$SESSION_ROOT" && ! -L "$HISTORY_FILE" && ! -L "$selected_dir" &&
        ( ! -e "$selected_dir" || -d "$selected_dir" ) &&
        ! -f "$(pending_path "$selected")/armed" ]] || {
@@ -1656,7 +1667,7 @@ cleanup_history_command() {
 cleanup_data_interactive() {
   local choice
   while true; do
-    section "清理历史数据"
+    section "清理数据"
     printf '    1  清理参数备份\n'
     printf '    2  清理历史测试与会话记录\n'
     printf '    0  返回\n'
@@ -1672,7 +1683,7 @@ cleanup_data_interactive() {
 
 cleanup_data_command() {
   require_linux; require_root
-  [[ -t 0 ]] || die "清理历史数据需要交互终端"
+  [[ -t 0 ]] || die "清理数据需要交互终端"
   cleanup_data_interactive
 }
 
@@ -1804,6 +1815,56 @@ restore_backup() {
 
 pending_path() { printf '%s/%s\n' "$PENDING_DIR" "$(basename "$1")"; }
 
+session_id_is_valid() {
+  [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]
+}
+
+active_session_id() {
+  local id backup backup_root snapshot key expected actual
+  if [[ -f "$ACTIVE_SESSION_FILE" && ! -L "$ACTIVE_SESSION_FILE" ]]; then
+    IFS= read -r id <"$ACTIVE_SESSION_FILE" || id=""
+    if session_id_is_valid "$id" && [[ -d "${SESSION_ROOT}/${id}" && ! -L "${SESSION_ROOT}/${id}" ]]; then
+      printf '%s\n' "$id"
+      return 0
+    fi
+  fi
+  # Older installations have no active-session marker. Use the latest backup
+  # only when its saved post-change state still matches the running TCP values;
+  # this avoids protecting a test that was later rolled back.
+  backup="$(readlink -f "$LATEST_BACKUP" 2>/dev/null || true)"
+  backup_root="$(readlink -f "$BACKUP_ROOT" 2>/dev/null || true)"
+  [[ -n "$backup" && -n "$backup_root" && "$backup" == "$backup_root"/* ]] || return 0
+  id="${backup##*/}"
+  session_id_is_valid "$id" || return 0
+  [[ -d "${SESSION_ROOT}/${id}" && ! -L "${SESSION_ROOT}/${id}" ]] || return 0
+  [[ -r "$HISTORY_FILE" && -r "${SESSION_ROOT}/${id}/system-after.txt" ]] || return 0
+  awk -F '\t' -v wanted="$id" 'NR>1 && $2==wanted {found=1; exit} END {exit !found}' "$HISTORY_FILE" || return 0
+  snapshot="${SESSION_ROOT}/${id}/system-after.txt"
+  for key in net.ipv4.tcp_congestion_control net.core.rmem_max net.core.wmem_max \
+    net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_mem; do
+    expected="$(awk -F= -v wanted="$key" '$1==wanted {print substr($0,length(wanted)+2); exit}' "$snapshot")"
+    actual="$(sysctl_get "$key")"
+    [[ -n "$expected" && "$expected" != '<unsupported>' && "$expected" == "$actual" ]] || return 0
+  done
+  printf '%s\n' "$id"
+}
+
+set_active_session_from_backup() {
+  local backup="$1" id tmp
+  id="${backup##*/}"
+  session_id_is_valid "$id" || return 1
+  [[ -d "${SESSION_ROOT}/${id}" && ! -L "${SESSION_ROOT}/${id}" ]] || return 1
+  mkdir -p "$STATE_DIR"
+  tmp="${ACTIVE_SESSION_FILE}.tmp.$$"
+  printf '%s\n' "$id" >"$tmp" || return 1
+  chmod 0600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$ACTIVE_SESSION_FILE"
+}
+
+clear_active_session() {
+  rm -f -- "$ACTIVE_SESSION_FILE"
+}
+
 schedule_rollback() {
   local backup="$1" pending unit pid token runner started
   (( AUTO_ROLLBACK_SECONDS > 0 )) || return 0
@@ -1917,6 +1978,7 @@ confirm_tuning() {
   fi
   backup="$(cat "${pending}/backup")"
   cancel_rollback_for_backup "$backup"
+  set_active_session_from_backup "$backup" || warn "已确认参数，但无法记录当前使用会话：$backup"
   info "已确认保留当前参数，安全回滚已取消"
 }
 
@@ -1940,6 +2002,7 @@ rollback_command() {
   fi
   if restore_backup "$backup"; then
     cancel_rollback_for_backup "$backup"
+    clear_active_session
     info "服务器 TCP/BBR 参数已恢复：$backup"
   else
     die "回滚未完整完成；备份已保留，请检查 ${backup} 后重试"
@@ -3032,6 +3095,9 @@ autotune() {
   capture_state "$iface" "${SESSION_DIR}/system-after.txt"
   write_comparison "$iface" "$FINAL_BUFFER_BYTES"
   append_history
+  if (( AUTO_ROLLBACK_SECONDS == 0 )); then
+    set_active_session_from_backup "$BACKUP_DIR" || warn "无法记录当前使用会话：$SESSION_ID"
+  fi
   TUNING_ACTIVE="0"
   trap - EXIT
   if [[ "$FINAL_PASS" != "yes" ]]; then
@@ -3383,6 +3449,9 @@ apply_history_command() {
     printf '开机配置：%s\n安全回滚：%s 秒\n' "$([[ "$PERSIST_FINAL" == 1 ]] && echo 已写入 || echo 未写入)" "$AUTO_ROLLBACK_SECONDS"
   } >"${SESSION_DIR}/history-application.txt"
   rm -f "$(pending_path "$BACKUP_DIR")/owner"
+  if (( AUTO_ROLLBACK_SECONDS == 0 )); then
+    set_active_session_from_backup "$BACKUP_DIR" || warn "无法记录当前使用会话：$SESSION_ID"
+  fi
   TUNING_ACTIVE=0
   trap - EXIT INT TERM HUP
   info "历史 TCP 参数已应用；请验证业务后执行 sudo $PROGRAM confirm"
@@ -3545,7 +3614,7 @@ ui_menu_options() {
   printf '    7  使用说明\n'
   printf '    8  BBRv3 内核管理\n'
   printf '    9  更新工具（GitHub / Gitee）\n'
-  printf '   10  清理历史数据\n'
+  printf '   10  清理数据\n'
   printf '    0  退出\n\n'
 }
 

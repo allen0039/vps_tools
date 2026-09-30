@@ -8,6 +8,7 @@ trap 'rm -rf "$tmp"' EXIT
 STATE_DIR="$tmp/state"; SESSION_ROOT="$STATE_DIR/sessions"
 BACKUP_ROOT="$STATE_DIR/backups"; PENDING_DIR="$STATE_DIR/pending"
 HISTORY_FILE="$STATE_DIR/history.tsv"
+ACTIVE_SESSION_FILE="$STATE_DIR/active-session"
 mkdir -p "$SESSION_ROOT" "$BACKUP_ROOT" "$PENDING_DIR" "$tmp/outside"
 
 completed=20260101-completed
@@ -37,6 +38,12 @@ grep -Fq '安全回滚保护' "$tmp/pending.out" || fail 'pending protection not
 
 printf '1\nn\n0\n' | cleanup_history_interactive >"$tmp/cancel.out" 2>&1
 [[ -d "$SESSION_ROOT/$completed" ]] || fail 'cancelled deletion removed session'
+echo "$completed" >"$STATE_DIR/active-session"
+printf '1\n0\n' | cleanup_history_interactive >"$tmp/active.out" 2>&1
+[[ -d "$SESSION_ROOT/$completed" ]] || fail 'active session deleted'
+grep -Fq '当前使用会话' "$tmp/active.out" || fail 'active session not listed'
+grep -Fq '当前使用会话，不能删除' "$tmp/active.out" || fail 'active session protection not explained'
+rm -f "$STATE_DIR/active-session"
 
 if ! printf '1\ny\n0\n' | cleanup_history_interactive >"$tmp/completed.out" 2>&1; then
   cat "$tmp/completed.out"
