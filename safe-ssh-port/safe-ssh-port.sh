@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
-ALLENTOOL_VERSION=0.1.10
+ALLENTOOL_VERSION=0.1.11
 INSTALL_PATH=${SAFE_SSH_PORT_INSTALL_PATH:-/usr/local/sbin/safe-ssh-port}
 ALLENTOOL_PATH=${ALLENTOOL_PATH:-/usr/local/bin/allentool}
 SSHD_CONFIG=${SAFE_SSH_PORT_CONFIG:-/etc/ssh/sshd_config}
@@ -1071,6 +1071,55 @@ public_listeners() {
             }
         '
     done | sort -k1,1 -k2,2n -u
+}
+
+occupied_port_records() {
+    local protocol=$1
+    awk -v protocol="$protocol" '
+        {
+            endpoint=$4
+            port=endpoint
+            sub(/^.*:/, "", port)
+            if (port !~ /^[0-9]+$/ || port+0 < 1 || port+0 > 65535) next
+            address=endpoint
+            sub(/:[^:]*$/, "", address)
+            process="未知"
+            if (match($0, /users:\(\("[^"]+",pid=[0-9]+/)) {
+                process=substr($0, RSTART, RLENGTH)
+                sub(/^users:\(\("/, "", process)
+                sub(/",pid=/, " (PID ", process)
+                process=process ")"
+            }
+            printf "%d\t%s\t%s\t%s\n", port, protocol, address, process
+        }
+    '
+}
+
+show_occupied_ports() {
+    local tcp_snapshot udp_snapshot records
+    if ! tcp_snapshot=$("$SS_BIN" -H -ltnp 2>/dev/null) ||
+       ! udp_snapshot=$("$SS_BIN" -H -lunp 2>/dev/null); then
+        warn '无法读取监听端口，请检查 ss 命令是否可用。'
+        return 1
+    fi
+
+    records=$(
+        {
+            printf '%s\n' "$tcp_snapshot" | occupied_port_records tcp
+            printf '%s\n' "$udp_snapshot" | occupied_port_records udp
+        } | sort -t $'\t' -k1,1n -k2,2 -k3,3 -u
+    )
+    printf '\n已占用的监听端口（含本机回环地址）\n'
+    printf '%s\n' '----------------------------------------'
+    if [[ -z $records ]]; then
+        printf '  （未发现 TCP/UDP 监听端口）\n'
+        return 0
+    fi
+    printf '  %-9s %-30s %s\n' '端口/协议' '监听地址' '进程'
+    printf '%s\n' "$records" | awk -F '\t' '{
+        printf "  %-9s %-30s %s\n", $1 "/" $2, $3, $4
+    }'
+    printf '同一端口号可分别由 TCP 和 UDP 使用；“未知”表示 ss 未提供进程信息。\n'
 }
 
 iptables_rule_records_for_command() {
@@ -2636,9 +2685,10 @@ firewall_menu() {
         printf '  7. 安装/修复防火墙持久化\n'
         printf '  8. IP 黑白名单         9. 国家黑白名单\n'
         printf ' 10. 查看最近端口操作   11. 放行所有端口\n'
+        printf ' 12. 查看已占用端口\n'
         printf '%s\n' '----------------------------------------'
         printf '  0. 返回上一级菜单\n'
-        printf '请选择 [0-11]: '
+        printf '请选择 [0-12]: '
         read -r choice
         case $choice in
             1) firewall_open_interactive ;;
@@ -2652,6 +2702,7 @@ firewall_menu() {
             9) country_access_menu ;;
             10) show_firewall_operation_history ;;
             11) firewall_allow_all_interactive ;;
+            12) show_occupied_ports ;;
             0|q|Q) return 0 ;;
             *) printf '选项无效，请重新输入。\n' ;;
         esac
