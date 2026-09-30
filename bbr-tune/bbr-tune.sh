@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.12"
+VERSION="2.10.13"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -1717,19 +1717,75 @@ cleanup_history_command() {
   cleanup_history_interactive
 }
 
+cleanup_speedtest_files_interactive() {
+  local csv_dir="${1:-/tmp}" log_dir="${STATE_DIR}/network-tests"
+  local path choice answer index selected valid
+  local -a files=() selected_files=()
+  [[ ! -L "$log_dir" && ( ! -e "$log_dir" || -d "$log_dir" ) ]] || {
+    error "三网检测日志目录无效：$log_dir"; return 1;
+  }
+  [[ -d "$csv_dir" ]] || {
+    error "测速 CSV 目录无效：$csv_dir"; return 1;
+  }
+  while true; do
+    files=()
+    for path in "$log_dir"/*.log; do
+      [[ -f "$path" && ! -L "$path" ]] && files+=("$path")
+    done
+    for path in "$csv_dir"/zstatic_nping_*.csv; do
+      [[ -f "$path" && ! -L "$path" ]] && files+=("$path")
+    done
+    section "清理测速文件"
+    printf '  仅清理旧版三网检测日志和 TcpQuality 遗留 CSV；调优会话记录请使用菜单 2。\n'
+    if (( ${#files[@]} == 0 )); then
+      printf '  当前没有可清理的测速文件。\n'
+      return 0
+    fi
+    for index in "${!files[@]}"; do
+      printf '  %2d  %s\n' "$((index+1))" "${files[$index]}"
+    done
+    printf '   0  返回\n'
+    read -r -p '请输入要删除的文件编号（可用逗号或空格分隔多个）：' choice || return 0
+    [[ "$choice" != 0 && -n "$choice" ]] || return 0
+    cleanup_parse_selection "$choice" "${#files[@]}" || { warn "请输入列表中的不重复编号"; continue; }
+    selected_files=()
+    for index in "${CLEANUP_SELECTION[@]}"; do selected_files+=("${files[$index]}"); done
+    printf '  将永久删除 %d 个测速文件：\n' "${#selected_files[@]}"
+    for selected in "${selected_files[@]}"; do printf '    %s\n' "$selected"; done
+    read -r -p '确认全部永久删除？[y/N] ' answer || return 0
+    [[ "$answer" =~ ^[Yy]$ ]] || continue
+    valid=1
+    for selected in "${selected_files[@]}"; do
+      [[ ! -L "$log_dir" && -f "$selected" && ! -L "$selected" ]] || { valid=0; break; }
+      case "$selected" in
+        "$log_dir"/*.log|"$csv_dir"/zstatic_nping_*.csv) ;;
+        *) valid=0; break ;;
+      esac
+    done
+    (( valid )) || { warn "文件状态已变化，本批次未删除"; continue; }
+    for selected in "${selected_files[@]}"; do
+      rm -f -- "$selected" || { error "删除失败：$selected"; return 1; }
+      info "已删除测速文件：$selected"
+    done
+    rmdir -- "$log_dir" 2>/dev/null || true
+  done
+}
+
 cleanup_data_interactive() {
   local choice
   while true; do
     section "清理数据"
     printf '    1  清理参数备份\n'
     printf '    2  清理历史测试与会话记录\n'
+    printf '    3  清理测速文件\n'
     printf '    0  返回\n'
     read -r -p '请选择：' choice || return 0
     case "$choice" in
       1) cleanup_backups_interactive || return 1 ;;
       2) cleanup_history_interactive || return 1 ;;
+      3) cleanup_speedtest_files_interactive || return 1 ;;
       0|'') return 0 ;;
-      *) printf '请输入 0～2 的编号\n' ;;
+      *) printf '请输入 0～3 的编号\n' ;;
     esac
   done
 }

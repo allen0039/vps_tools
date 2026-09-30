@@ -87,11 +87,25 @@ printf '2,3\ny\n0\n' | cleanup_history_interactive >"$tmp/batch.out" 2>&1
 if grep -Eq "$batch_one|$batch_two" "$HISTORY_FILE"; then fail 'history batch index kept'; fi
 [[ -d "$BACKUP_ROOT/$batch_one" && -d "$BACKUP_ROOT/$batch_two" ]] || fail 'backup removed with history batch'
 grep -Fq "$pending" "$HISTORY_FILE" || fail 'protected history index removed'
+mkdir -p "$STATE_DIR/network-tests" "$tmp/csv"
+printf 'old output\n' >"$STATE_DIR/network-tests/old.log"
+printf 'keep\n' >"$STATE_DIR/network-tests/notes.txt"
+printf 'old CSV\n' >"$tmp/csv/zstatic_nping_20260930.csv"
+printf 'keep\n' >"$tmp/csv/unrelated.csv"
+printf '1,2\nn\n0\n' | cleanup_speedtest_files_interactive "$tmp/csv" >"$tmp/speed-cancel.out" 2>&1
+[[ -f "$STATE_DIR/network-tests/old.log" && -f "$tmp/csv/zstatic_nping_20260930.csv" ]] || fail 'cancelled speed cleanup deleted files'
+printf '1,1\n0\n' | cleanup_speedtest_files_interactive "$tmp/csv" >"$tmp/speed-invalid.out" 2>&1
+grep -Fq '不重复编号' "$tmp/speed-invalid.out" || fail 'duplicate speed selection accepted'
+printf '1,2\ny\n0\n' | cleanup_speedtest_files_interactive "$tmp/csv" >"$tmp/speed-deleted.out" 2>&1
+[[ ! -e "$STATE_DIR/network-tests/old.log" && ! -e "$tmp/csv/zstatic_nping_20260930.csv" ]] || fail 'selected speed files retained'
+[[ -f "$STATE_DIR/network-tests/notes.txt" && -f "$tmp/csv/unrelated.csv" ]] || fail 'unrelated speed files deleted'
 cleanup_backups_interactive() { printf 'backup choice\n'; }
 cleanup_history_interactive() { printf 'history choice\n'; }
-printf '1\n2\n0\n' | cleanup_data_interactive >"$tmp/menu.out"
+cleanup_speedtest_files_interactive() { printf 'speed choice\n'; }
+printf '1\n2\n3\n0\n' | cleanup_data_interactive >"$tmp/menu.out"
 grep -Fq 'backup choice' "$tmp/menu.out" || fail 'backup submenu not reached'
 grep -Fq 'history choice' "$tmp/menu.out" || fail 'history submenu not reached'
+grep -Fq 'speed choice' "$tmp/menu.out" || fail 'speed submenu not reached'
 parse_args cleanup-history
 [[ "$COMMAND" == cleanup-history ]] || fail 'history cleanup command not parsed'
 parse_args cleanup-data
