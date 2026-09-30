@@ -1,7 +1,0 @@
-# Manual integration example only. The interactive installer uses a scoped
-# systemd override and does not modify Falco's main configuration file.
-json_output: true
-file_output:
-  enabled: true
-  keep_alive: false
-  filename: /var/log/vps-audit/falco-events.json

@@ -12,45 +12,6 @@
 | `dns_tool` | 一键切换公共或自定义 DNS，自动适配常见管理服务并支持原始配置恢复 | [查看说明](dns_tool/README.md) |
 | `swap_tool` | 创建或修复 Btrfs 等文件系统上的 `/swapfile`，确认实际启用后写入开机配置 | [查看说明](swap_tool/README.md) |
 | `bbr-tune` | 自动测试 TCP/BBR 参数、切换出口队列并提供安全回滚，快捷命令 `bbrtcp` | [查看说明](bbr-tune/README.md) |
-| `vpspc` | 审计 SSH、订阅访问及可选 Falco 行为，按规则向 Telegram 预警，不自动封禁 | [查看说明](vpspc/README.md) |
-
-## vpspc 快速使用
-
-下载并执行 systemd 交互安装器：
-
-**GitHub：**
-
-```bash
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo VPSPC_DOWNLOAD_BASE='https://github.com/allen0039/vps_tools/archive' bash /tmp/vpspc-install.sh
-```
-
-**Gitee：**
-
-```bash
-curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh
-```
-
-两种命令分别从 GitHub 或 Gitee 获取安装器和源码包。安装器会自动检测 SSH/妙妙屋 X 日志及各自时区，也会检测 Falco；未安装 Falco 时解释用途并询问是否自动安装，选择跳过不影响 SSH 和订阅多 IP 审计。完整功能、数据目录、保留时间、Telegram、Docker 部署和妙妙屋 X 日志接入说明请查看 [vpspc 文档](vpspc/README.md)。
-
-恢复上一次配置：
-
-```bash
-sudo /opt/vps-audit-src/install.sh rollback
-```
-
-彻底删除 vpspc，任选一种来源下载安装器：
-
-**GitHub：**
-
-```bash
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo VPSPC_DOWNLOAD_BASE='https://github.com/allen0039/vps_tools/archive' bash /tmp/vpspc-install.sh destroy
-```
-
-**Gitee：**
-
-```bash
-curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/vpspc/remote-install.sh' -o /tmp/vpspc-install.sh && sudo bash /tmp/vpspc-install.sh destroy
-```
 
 ## safe-ssh-port 快速使用
 
