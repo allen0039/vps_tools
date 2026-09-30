@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.9.1"
+VERSION="2.10.0"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -65,6 +65,7 @@ YES="0"
 BACKUP_PATH=""
 HISTORY_SESSION=""
 HISTORY_PARAMS_AFTER="0"
+UPDATE_CHANNEL="github"
 QUIET="0"
 UI_BLUE=""; UI_GREEN=""; UI_YELLOW=""; UI_RED=""; UI_RESET=""
 
@@ -298,6 +299,7 @@ usage() {
   ./bbr-tune.sh history-compare --session ID  对比当前、测试前及历史选中参数
   ./bbr-tune.sh history-params --session ID   查看历史会话测试前的原始参数
   sudo ./bbr-tune.sh apply-history --session ID [--persist]  应用历史测试的 TCP 参数
+  sudo ./bbr-tune.sh update --channel github|gitee       选择来源更新工具
   sudo ./bbr-tune.sh kernel [操作]         BBRv3 内核检测、安装、试用与恢复
   sudo ./bbr-tune.sh confirm                 确认保留当前参数并取消安全回滚
   sudo ./bbr-tune.sh rollback [--backup DIR] 恢复调优前参数
@@ -349,7 +351,7 @@ parse_args() {
   fi
   case "$1" in
     kernel) COMMAND=kernel; shift; KERNEL_ARGS=("$@"); return ;;
-    menu|autotune|qdisc|status|history|history-compare|history-params|apply-history|confirm|rollback|help) COMMAND="$1"; shift ;;
+    menu|autotune|qdisc|status|history|history-compare|history-params|apply-history|update|confirm|rollback|help) COMMAND="$1"; shift ;;
     --help|-h) COMMAND="help"; shift ;;
     --version) printf '%s %s\n' "$PROGRAM" "$VERSION"; exit 0 ;;
     *) die "未知命令：$1" ;;
@@ -371,6 +373,7 @@ parse_args() {
       --backup) need_value "$@"; BACKUP_PATH="$2"; shift 2 ;;
       --session) need_value "$@"; HISTORY_SESSION="$2"; shift 2 ;;
       --after) HISTORY_PARAMS_AFTER="1"; shift ;;
+      --channel) need_value "$@"; UPDATE_CHANNEL="$2"; shift 2 ;;
       --persist) PERSIST_FINAL="1"; shift ;;
       --force) FORCE="1"; shift ;;
       --yes|-y) YES="1"; shift ;;
@@ -3174,6 +3177,47 @@ history_command() {
   fi
 }
 
+update_channel_base() {
+  case "$1" in
+    github) printf '%s\n' 'https://raw.githubusercontent.com/allen0039/vps_tools/main/bbr-tune' ;;
+    gitee) printf '%s\n' 'https://gitee.com/allen0039/vps_tools/raw/main/bbr-tune' ;;
+    *) return 1 ;;
+  esac
+}
+
+download_update_installer() {
+  local url="$1" destination="$2"
+  if have curl; then
+    curl -fL --retry 3 --connect-timeout 15 --max-time 120 "$url" -o "$destination"
+  elif have wget; then
+    wget -T 30 -t 3 -O "$destination" "$url"
+  else
+    error "缺少 curl 或 wget，无法下载更新文件"
+    return 1
+  fi
+}
+
+update_command() (
+  require_linux; require_root
+  local base temp_dir installer
+  base="$(update_channel_base "$UPDATE_CHANNEL")" || { error "更新渠道只能是 github 或 gitee"; return 1; }
+  temp_dir="$(mktemp -d /tmp/bbr-tune-update.XXXXXX)" || { error "无法创建更新临时目录"; return 1; }
+  trap 'rm -rf "$temp_dir"' EXIT
+  installer="${temp_dir}/install.sh"
+  section "从 ${UPDATE_CHANNEL} 更新 BBR TUNE"
+  printf '  下载来源：%s\n' "$base"
+  download_update_installer "${base}/install.sh" "$installer" || { error "安装器下载失败，当前版本未修改"; return 1; }
+  [[ -s "$installer" ]] && head -n 1 "$installer" | grep -q '^#!/usr/bin/env bash' && bash -n "$installer" || {
+    error "下载的安装器无效，当前版本未修改"; return 1;
+  }
+  if BBR_TUNE_RAW_BASE="$base" bash "$installer" --install-only; then
+    info "更新完成；重新打开菜单即可使用新版本"
+  else
+    error "更新未完成，请检查上方错误"
+    return 1
+  fi
+)
+
 ui_init() {
   if [[ -t 1 && "${TERM:-dumb}" != dumb && -z "${NO_COLOR+x}" ]]; then
     UI_BLUE=$'\033[1;36m'; UI_GREEN=$'\033[1;32m'; UI_YELLOW=$'\033[1;33m'; UI_RED=$'\033[1;31m'; UI_RESET=$'\033[0m'
@@ -3204,6 +3248,7 @@ ui_menu_options() {
   printf '\n  工具\n'
   printf '    6  使用说明\n'
   printf '    7  BBRv3 内核管理\n'
+  printf '    9  更新工具（GitHub / Gitee）\n'
   printf '    0  退出\n\n'
 }
 
@@ -3253,6 +3298,27 @@ ui_execute() {
     printf '\n%s[未完成] 请按上方错误说明处理；退出码 %s%s\n' "$UI_RED" "$rc" "$UI_RESET"
   fi
   return "$rc"
+}
+
+ui_update() {
+  local choice channel base
+  section "更新工具 / 选择下载渠道"
+  printf '  当前版本：%s\n' "$VERSION"
+  printf '    1  GitHub\n    2  Gitee\n    0  返回\n'
+  while true; do
+    read -r -p '请选择渠道：' choice || return 1
+    case "$choice" in
+      1) channel=github; break ;;
+      2) channel=gitee; break ;;
+      0|'') return 1 ;;
+      *) printf '请输入 0～2 的编号\n' ;;
+    esac
+  done
+  base="$(update_channel_base "$channel")"
+  printf '\n  将从 %s 下载并安装最新版本。\n' "$base"
+  printf '  更新完成后会重新打开主菜单。\n'
+  ui_yes_no '确认更新工具' n || return 1
+  ui_execute 1 update --channel "$channel"
 }
 
 ui_select_strategy() {
@@ -3382,7 +3448,7 @@ menu() {
   [[ -t 0 && -t 1 ]] || { usage; return; }
   require_linux
   ui_init
-  local choice
+  local choice restart_target
   while true; do
     ui_title
     ui_menu_options
@@ -3396,6 +3462,13 @@ menu() {
       6) usage ;;
       7) ui_execute 1 kernel menu || true ;;
       8) ui_qdisc || true ;;
+      9)
+        if ui_update; then
+          restart_target="${BBR_TUNE_INSTALL_PATH:-/usr/local/sbin/bbr-tune}"
+          if [[ -r "$restart_target" ]]; then exec bash "$restart_target" menu; fi
+          warn "已完成更新；请重新运行 bbrtcp 打开新版菜单"
+        fi
+        ;;
       0) return ;;
       *) printf '%s无效选择%s\n' "$UI_RED" "$UI_RESET" ;;
     esac
@@ -3421,6 +3494,7 @@ main() {
     history-compare) history_compare_command ;;
     history-params) history_params_command ;;
     apply-history) apply_history_command ;;
+    update) update_command ;;
     confirm) confirm_tuning ;;
     rollback) rollback_command ;;
     help) usage ;;

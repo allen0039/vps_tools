@@ -179,7 +179,7 @@ main() {
     cp "$source_file" "$TEMP_FILE"
     cp "${source_file%/*}/bbr-kernel.sh" "$TEMP_KERNEL_FILE"
   else
-    log "正在从 GitHub 下载最新主程序"
+    log "正在从 ${RAW_BASE} 下载最新主程序"
     download_payload "$TEMP_FILE"
     download_payload "$TEMP_KERNEL_FILE" bbr-kernel.sh
   fi
