@@ -13,7 +13,8 @@ if update_channel_base unknown >/dev/null; then fail 'unknown channel accepted';
 require_linux() { :; }; require_root() { :; }
 export UPDATE_TEST_LOG="$tmp/installer.log"
 export BBR_TUNE_INSTALL_PATH="$tmp/installed-bbr-tune"
-export UPDATE_TEST_INSTALLED_VERSION="2.10.4"
+export UPDATE_TEST_INSTALLED_VERSION="$VERSION"
+next_version="${VERSION%.*}.$(( ${VERSION##*.} + 1 ))"
 UPDATE_TEST_SHA='7ef501bf6eb5e546dd0a2bdcf0dcbce537e1b134'
 download_update_installer() {
   printf '%s\n' "$1" >>"$tmp/download-urls"
@@ -33,14 +34,14 @@ update_command >"$tmp/github.out" 2>&1 || fail 'GitHub update failed'
 [[ "$(cat "$tmp/installer.log")" == "https://raw.githubusercontent.com/allen0039/vps_tools/${UPDATE_TEST_SHA}/bbr-tune|--install-only" ]] || fail 'GitHub source not passed to installer'
 grep -q "https://api.github.com/repos/allen0039/vps_tools/commits/main?bbr_tune_refresh=" "$tmp/download-urls" || fail 'GitHub commit API not used'
 grep -q "https://raw.githubusercontent.com/allen0039/vps_tools/${UPDATE_TEST_SHA}/bbr-tune/install.sh?bbr_tune_refresh=" "$tmp/download-urls" || fail 'GitHub installer not pinned to commit'
-grep -q '仍是版本 2.10.4' "$tmp/github.out" || fail 'unchanged version not reported'
+grep -Fq "仍是版本 $VERSION" "$tmp/github.out" || fail 'unchanged version not reported'
 UPDATE_CHANNEL=gitee
-UPDATE_TEST_INSTALLED_VERSION="2.10.5"
+UPDATE_TEST_INSTALLED_VERSION="$next_version"
 update_command >"$tmp/gitee.out" || fail 'Gitee update failed'
 [[ "$(cat "$tmp/installer.log")" == "https://gitee.com/allen0039/vps_tools/raw/${UPDATE_TEST_SHA}/bbr-tune|--install-only" ]] || fail 'Gitee source not passed to installer'
 grep -q "https://gitee.com/api/v5/repos/allen0039/vps_tools/branches/main?bbr_tune_refresh=" "$tmp/download-urls" || fail 'Gitee commit API not used'
 grep -q "https://gitee.com/allen0039/vps_tools/raw/${UPDATE_TEST_SHA}/bbr-tune/install.sh?bbr_tune_refresh=" "$tmp/download-urls" || fail 'Gitee installer not pinned to commit'
-grep -q '已从 2.10.4 更新到 2.10.5' "$tmp/gitee.out" || fail 'new version not reported'
+grep -Fq "已从 $VERSION 更新到 $next_version" "$tmp/gitee.out" || fail 'new version not reported'
 
 UPDATE_CHANNEL=unknown
 if update_command >"$tmp/invalid.out" 2>&1; then fail 'invalid channel updated'; fi

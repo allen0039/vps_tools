@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.4"
+VERSION="2.10.5"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -1427,7 +1427,7 @@ backup_is_restorable() {
   [[ -r "$1/meta.env" && -r "$1/files.tsv" && -r "$1/sysctl.tsv" && -r "$1/qdisc.txt" ]]
 }
 
-original_backup_path() {
+original_backup_path_readonly() {
   local id path marker="${BACKUP_ROOT%/*}/original-backup"
   if [[ -e "$marker" || -L "$marker" ]]; then
     [[ -f "$marker" && ! -L "$marker" ]] || { error "原始备份标记无效：$marker"; return 1; }
@@ -1440,13 +1440,21 @@ original_backup_path() {
     for path in "$BACKUP_ROOT"/*; do
       [[ -d "$path" && ! -L "$path" ]] && backup_is_restorable "$path" || continue
       id="${path##*/}"
-      printf '%s\n' "$id" >"${marker}.tmp.$$" || return 1
-      mv -f "${marker}.tmp.$$" "$marker" || return 1
       break
     done
     [[ -n "${id:-}" ]] || return 1
   fi
   printf '%s/%s\n' "$BACKUP_ROOT" "$id"
+}
+
+original_backup_path() {
+  local path marker="${BACKUP_ROOT%/*}/original-backup"
+  path="$(original_backup_path_readonly)" || return 1
+  if [[ ! -e "$marker" ]]; then
+    printf '%s\n' "${path##*/}" >"${marker}.tmp.$$" || return 1
+    mv -f "${marker}.tmp.$$" "$marker" || return 1
+  fi
+  printf '%s\n' "$path"
 }
 
 create_backup() {
@@ -2962,6 +2970,71 @@ qdisc_command() {
   info "操作报告：${SESSION_DIR}/queue-comparison.txt"
 }
 
+status_backup_value() {
+  local file="$1" key="$2"
+  [[ -r "$file" ]] || { printf '未记录\n'; return; }
+  awk -F '\t' -v wanted="$key" '
+    $1==wanted {sub(/^[^\t]*\t/, ""); print; found=1; exit}
+    END {if (!found) print "未记录"}
+  ' "$file"
+}
+
+status_compare_row() {
+  local label="$1" original="$2" current="$3" format="${4:-raw}" change
+  if [[ "$format" == bytes ]]; then
+    [[ "$original" =~ ^[0-9]+$ ]] && original="$(format_bytes_mib "$original")"
+    [[ "$current" =~ ^[0-9]+$ ]] && current="$(format_bytes_mib "$current")"
+  fi
+  if [[ "$original" == 未记录 ]]; then
+    change='未记录'
+  elif [[ "$original" == '<内核不支持>' || -z "$current" ]]; then
+    change='无法对比'
+  elif [[ "$original" == "$current" ]]; then
+    change='相同'
+  else
+    change='已变化'
+  fi
+  printf '  %s [%s]\n    原始：%s\n    当前：%s\n' "$label" "$change" "$original" "$current"
+}
+
+status_original_comparison() {
+  local iface="$1" original snapshot original_iface original_qdisc current_qdisc key label format
+  section "与首次备份的原始参数对比"
+  original="$(original_backup_path_readonly)" || {
+    if [[ -e "${BACKUP_ROOT%/*}/original-backup" || -L "${BACKUP_ROOT%/*}/original-backup" ]]; then
+      printf '  无法读取原始备份；请检查原始备份标记和备份目录。\n'
+    else
+      printf '  尚无可用的原始备份；首次调优前会自动保存。\n'
+    fi
+    return 0
+  }
+  printf '  原始＝首次完整备份 %s；当前＝现在生效。\n' "${original##*/}"
+  snapshot="${original}/observed.tsv"
+  [[ -r "$snapshot" ]] || snapshot="${original}/sysctl.tsv"
+  for key in net.ipv4.tcp_congestion_control net.core.default_qdisc \
+    net.core.rmem_max net.core.wmem_max net.ipv4.tcp_rmem \
+    net.ipv4.tcp_wmem net.ipv4.tcp_mem; do
+    case "$key" in
+      net.ipv4.tcp_congestion_control) label='拥塞控制算法'; format=raw ;;
+      net.core.default_qdisc) label='系统默认队列'; format=raw ;;
+      net.core.rmem_max) label='接收缓存硬上限'; format=bytes ;;
+      net.core.wmem_max) label='发送缓存硬上限'; format=bytes ;;
+      net.ipv4.tcp_rmem) label='tcp_rmem（最小/默认/最大）'; format=raw ;;
+      net.ipv4.tcp_wmem) label='tcp_wmem（最小/默认/最大）'; format=raw ;;
+      net.ipv4.tcp_mem) label='tcp_mem（low/pressure/high）'; format=raw ;;
+    esac
+    status_compare_row "$label" "$(status_backup_value "$snapshot" "$key")" "$(sysctl_get "$key")" "$format"
+  done
+  original_iface="$(awk -F= '$1=="IFACE" {print $2; exit}' "${original}/meta.env")"
+  original_qdisc="$(awk '$1=="qdisc" && $0~/[[:space:]]root([[:space:]]|$)/ {print $2; exit}' "${original}/qdisc.txt")"
+  current_qdisc="$(root_qdisc_kind "$iface")"
+  if [[ "$original_iface" == "$iface" ]]; then
+    status_compare_row '出口实际队列' "${original_qdisc:-未记录}" "${current_qdisc:-未记录}"
+  else
+    printf '  出口实际队列：原始备份网卡 %s，当前网卡 %s，无法直接对比。\n' "${original_iface:-未记录}" "$iface"
+  fi
+}
+
 status_command() {
   require_linux
   for cmd in ip tc sysctl awk; do have "$cmd" || die "缺少命令：$cmd"; done
@@ -2988,6 +3061,7 @@ status_command() {
   printf '  tcp_rmem（最小/默认/最大）：%s\n' "$(sysctl_get net.ipv4.tcp_rmem)"
   printf '  tcp_wmem（最小/默认/最大）：%s\n' "$(sysctl_get net.ipv4.tcp_wmem)"
   printf '  tcp_mem（low/pressure/high）：%s\n' "$(sysctl_get net.ipv4.tcp_mem)"
+  status_original_comparison "$iface"
   printf '\n队列详细统计\n------------\n'
   tc -s -d qdisc show dev "$iface" || true
 }
