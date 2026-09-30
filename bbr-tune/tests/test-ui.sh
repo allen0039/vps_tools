@@ -16,8 +16,8 @@ import re,sys,unicodedata
 s=open(sys.argv[1]).read()
 assert '\x1b' not in s
 assert '调优与记录' in s and '参数管理' in s
-options=[int(x) for x in re.findall(r'(?m)^ {4}(\d) {2}',s)]
-assert options==[1,2,3,4,5,6,7,8,9,0],options
+options=[int(x) for x in re.findall(r'(?m)^\s+(\d+) {2}',s)]
+assert options==[1,2,3,4,5,6,7,8,9,10,0],options
 for line in s.splitlines():
     width=sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in line)
     assert width<=72,(width,line)

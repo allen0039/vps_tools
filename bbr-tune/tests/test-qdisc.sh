@@ -232,12 +232,14 @@ no_writes
   cp "$ROOT/tests/fixtures/qdisc-mq-fq.txt" "$TMP/layout"
   backup="$(create_backup eth0)" || fail 'valid snapshot rejected'
   [[ -L "$LATEST_BACKUP" && -s "$backup/qdisc.txt" ]] || fail 'snapshot not saved'
+  [[ "$(cat "$STATE_DIR/original-backup")" == snapshot ]] || fail 'first snapshot not protected'
   restore_qdisc "$backup" eth0 mq || fail 'saved mq snapshot not readable'
   no_writes
   SESSION_ID=broken
   touch "$TMP/show-fails"
   if create_backup eth0 >"$TMP/bad-backup.out" 2>/dev/null; then fail 'unreadable snapshot accepted'; fi
   [[ "$(readlink "$LATEST_BACKUP")" == "$backup" ]] || fail 'broken snapshot replaced latest'
+  [[ "$(cat "$STATE_DIR/original-backup")" == snapshot ]] || fail 'failed snapshot changed original'
   rm "$TMP/show-fails"
   printf 'invalid\n' >"$TMP/layout"
   if create_backup eth0 >"$TMP/bad-backup.out" 2>/dev/null; then fail 'invalid snapshot accepted'; fi

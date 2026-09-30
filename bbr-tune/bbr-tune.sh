@@ -303,6 +303,7 @@ usage() {
   sudo ./bbr-tune.sh kernel [操作]         BBRv3 内核检测、安装、试用与恢复
   sudo ./bbr-tune.sh confirm                 确认保留当前参数并取消安全回滚
   sudo ./bbr-tune.sh rollback [--backup DIR] 恢复调优前参数
+  sudo ./bbr-tune.sh cleanup-backups         交互清理历史备份（保留原始备份）
 
 自动寻优参数：
   --bandwidth-mbps N       期望的端到端下载带宽，单位 Mbps，必填
@@ -351,7 +352,7 @@ parse_args() {
   fi
   case "$1" in
     kernel) COMMAND=kernel; shift; KERNEL_ARGS=("$@"); return ;;
-    menu|autotune|qdisc|status|history|history-compare|history-params|apply-history|update|confirm|rollback|help) COMMAND="$1"; shift ;;
+    menu|autotune|qdisc|status|history|history-compare|history-params|apply-history|update|confirm|rollback|cleanup-backups|help) COMMAND="$1"; shift ;;
     --help|-h) COMMAND="help"; shift ;;
     --version) printf '%s %s\n' "$PROGRAM" "$VERSION"; exit 0 ;;
     *) die "未知命令：$1" ;;
@@ -1422,6 +1423,32 @@ backup_file() {
   fi
 }
 
+backup_is_restorable() {
+  [[ -r "$1/meta.env" && -r "$1/files.tsv" && -r "$1/sysctl.tsv" && -r "$1/qdisc.txt" ]]
+}
+
+original_backup_path() {
+  local id path marker="${BACKUP_ROOT%/*}/original-backup"
+  if [[ -e "$marker" || -L "$marker" ]]; then
+    [[ -f "$marker" && ! -L "$marker" ]] || { error "原始备份标记无效：$marker"; return 1; }
+    IFS= read -r id <"$marker" || return 1
+    [[ -n "$id" && "$id" != . && "$id" != .. && "$id" != */* && -d "$BACKUP_ROOT/$id" && ! -L "$BACKUP_ROOT/$id" ]] && backup_is_restorable "$BACKUP_ROOT/$id" || {
+      error "原始备份标记指向无效目录：$marker"; return 1;
+    }
+  else
+    # Older installations have no marker. Their earliest session remains protected.
+    for path in "$BACKUP_ROOT"/*; do
+      [[ -d "$path" && ! -L "$path" ]] && backup_is_restorable "$path" || continue
+      id="${path##*/}"
+      printf '%s\n' "$id" >"${marker}.tmp.$$" || return 1
+      mv -f "${marker}.tmp.$$" "$marker" || return 1
+      break
+    done
+    [[ -n "${id:-}" ]] || return 1
+  fi
+  printf '%s/%s\n' "$BACKUP_ROOT" "$id"
+}
+
 create_backup() {
   local iface="$1" backup key value layout service_enabled="unknown" service_active="unknown"
   backup="${BACKUP_ROOT}/${SESSION_ID}"
@@ -1464,8 +1491,67 @@ EOF_META
     value="$(sysctl_get "$key")"
     printf '%s\t%s\n' "$key" "${value:-<内核不支持>}" >>"${backup}/observed.tsv"
   done
+  original_backup_path >/dev/null || return 1
   ln -sfn "$backup" "$LATEST_BACKUP"
   printf '%s\n' "$backup"
+}
+
+cleanup_backups_interactive() {
+  local original backup selected selected_real choice index answer latest newest
+  local -a backups=()
+  [[ -d "$BACKUP_ROOT" && ! -L "$BACKUP_ROOT" ]] || { info "当前没有备份可清理"; return 0; }
+  original="$(original_backup_path)" || { error "无法确认原始备份，已停止清理"; return 1; }
+  while true; do
+    backups=()
+    for backup in "$BACKUP_ROOT"/*; do
+      [[ -d "$backup" && ! -L "$backup" ]] && backups+=("$backup")
+    done
+    section "清理历史备份"
+    printf '  原始备份永久保留；待确认的安全回滚备份不可删除。\n'
+    for index in "${!backups[@]}"; do
+      backup="${backups[$index]}"
+      if [[ "$backup" == "$original" ]]; then
+        printf '  %2d  %s  [原始备份，保留]\n' "$((index+1))" "${backup##*/}"
+      elif [[ -f "$(pending_path "$backup")/armed" ]]; then
+        printf '  %2d  %s  [等待安全回滚，保留]\n' "$((index+1))" "${backup##*/}"
+      else
+        printf '  %2d  %s\n' "$((index+1))" "${backup##*/}"
+      fi
+    done
+    printf '   0  返回\n'
+    read -r -p '请输入要删除的备份编号：' choice || return 0
+    [[ "$choice" != 0 && -n "$choice" ]] || return 0
+    [[ "$choice" =~ ^[0-9]{1,4}$ ]] || { warn "请输入列表中的编号"; continue; }
+    index=$((10#$choice - 1))
+    (( index >= 0 && index < ${#backups[@]} )) || { warn "请输入列表中的编号"; continue; }
+    selected="${backups[$index]}"
+    [[ "$selected" != "$original" ]] || { warn "原始备份不能删除"; continue; }
+    [[ ! -f "$(pending_path "$selected")/armed" ]] || { warn "该备份仍受安全回滚保护，请先确认或恢复参数"; continue; }
+    read -r -p "确认永久删除 ${selected##*/}？[y/N] " answer || return 0
+    [[ "$answer" =~ ^[Yy]$ ]] || continue
+    # Recheck just before removal, including the path type and protected marker.
+    original="$(original_backup_path)" || { error "无法确认原始备份，已停止清理"; return 1; }
+    [[ -d "$selected" && ! -L "$selected" && "$selected" != "$original" && ! -f "$(pending_path "$selected")/armed" ]] || {
+      warn "备份状态已变化，未删除"; continue;
+    }
+    latest="$(readlink -f "$LATEST_BACKUP" 2>/dev/null || true)"
+    selected_real="$(readlink -f "$selected" 2>/dev/null || true)"
+    rm -rf -- "$selected" || { error "删除失败：$selected"; return 1; }
+    if [[ "$latest" == "$selected_real" ]]; then
+      newest=""
+      for backup in "$BACKUP_ROOT"/*; do
+        [[ -d "$backup" && ! -L "$backup" ]] && backup_is_restorable "$backup" && newest="$backup"
+      done
+      if [[ -n "$newest" ]]; then ln -sfn "$newest" "$LATEST_BACKUP"; else rm -f "$LATEST_BACKUP"; fi
+    fi
+    info "已删除备份：$selected"
+  done
+}
+
+cleanup_backups_command() {
+  require_linux; require_root
+  [[ -t 0 ]] || die "清理备份需要交互终端"
+  cleanup_backups_interactive
 }
 
 restore_files() {
@@ -3271,6 +3357,7 @@ ui_menu_options() {
   printf '    7  使用说明\n'
   printf '    8  BBRv3 内核管理\n'
   printf '    9  更新工具（GitHub / Gitee）\n'
+  printf '   10  清理历史备份\n'
   printf '    0  退出\n\n'
 }
 
@@ -3491,6 +3578,7 @@ menu() {
           warn "已完成更新；请重新运行 bbrtcp 打开新版菜单"
         fi
         ;;
+      10) ui_execute 1 cleanup-backups || true ;;
       0) return ;;
       *) printf '%s无效选择%s\n' "$UI_RED" "$UI_RESET" ;;
     esac
@@ -3505,7 +3593,7 @@ main() {
     require_linux; require_root
     stop_expired_session
   fi
-  case "$COMMAND" in autotune|qdisc|apply-history|confirm|rollback) acquire_operation_lock ;; esac
+  case "$COMMAND" in autotune|qdisc|apply-history|confirm|rollback|cleanup-backups) acquire_operation_lock ;; esac
   case "$COMMAND" in
     menu) menu ;;
     autotune) autotune ;;
@@ -3519,6 +3607,7 @@ main() {
     update) update_command ;;
     confirm) confirm_tuning ;;
     rollback) rollback_command ;;
+    cleanup-backups) cleanup_backups_command ;;
     help) usage ;;
   esac
 }
