@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.0"
+VERSION="2.10.1"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -3244,10 +3244,10 @@ ui_menu_options() {
   printf '\n  参数管理\n'
   printf '    4  确认保留当前参数\n'
   printf '    5  恢复调优前参数\n'
-  printf '    8  更改出口队列算法\n'
+  printf '    6  更改出口队列算法\n'
   printf '\n  工具\n'
-  printf '    6  使用说明\n'
-  printf '    7  BBRv3 内核管理\n'
+  printf '    7  使用说明\n'
+  printf '    8  BBRv3 内核管理\n'
   printf '    9  更新工具（GitHub / Gitee）\n'
   printf '    0  退出\n\n'
 }
@@ -3459,9 +3459,9 @@ menu() {
       3) ui_execute 1 history || true ;;
       4) ui_execute 1 confirm || true ;;
       5) ui_execute 1 rollback || true ;;
-      6) usage ;;
-      7) ui_execute 1 kernel menu || true ;;
-      8) ui_qdisc || true ;;
+      6) ui_qdisc || true ;;
+      7) usage ;;
+      8) ui_execute 1 kernel menu || true ;;
       9)
         if ui_update; then
           restart_target="${BBR_TUNE_INSTALL_PATH:-/usr/local/sbin/bbr-tune}"
