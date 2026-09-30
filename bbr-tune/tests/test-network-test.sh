@@ -12,6 +12,9 @@ TMPDIR="$tmp"
 NETWORK_TEST_CALLS="$tmp/upstream-args"
 NETWORK_TEST_RC=0
 export NETWORK_TEST_CALLS NETWORK_TEST_RC TMPDIR
+mkdir -p "$STATE_DIR/network-tests"
+printf 'legacy log\n' >"$STATE_DIR/network-tests/previous.log"
+printf 'preserve this file\n' >"$STATE_DIR/network-tests/notes.txt"
 require_linux() { :; }
 require_root() { :; }
 curl() {
@@ -37,17 +40,27 @@ done
 [[ "$(sed -n '1p' "$NETWORK_TEST_CALLS")" == '-v4 -v6 --speedtest --no-rank-upload' ]] || fail 'combined mode arguments'
 [[ "$(sed -n '2p' "$NETWORK_TEST_CALLS")" == '-v4 -v6 --no-rank-upload' ]] || fail 'route mode arguments'
 [[ "$(sed -n '3p' "$NETWORK_TEST_CALLS")" == '--only-speedtest --no-rank-upload' ]] || fail 'speed mode arguments'
-[[ "$(find "$STATE_DIR/network-tests" -name '*.log' | wc -l | tr -d ' ')" == 3 ]] || fail 'missing test logs'
-if grep -R -q '特价VPS补货TG频道' "$STATE_DIR/network-tests" "$tmp/both.out"; then
-  fail 'upstream advertisement leaked into output or logs'
+[[ ! -e "$STATE_DIR/network-tests/previous.log" ]] || fail 'legacy log was retained'
+[[ -f "$STATE_DIR/network-tests/notes.txt" ]] || fail 'unrelated file was deleted'
+if find "$STATE_DIR/network-tests" -name '*.log' | grep -q .; then
+  fail 'persistent network test log was created'
+fi
+if grep -q '特价VPS补货TG频道' "$tmp/both.out"; then
+  fail 'upstream advertisement leaked into output'
 fi
 grep -q 'mock TcpQuality result' "$tmp/both.out" || fail 'measurement output was hidden'
+if grep -q 'network-tests/' "$tmp/both.out"; then fail 'obsolete log path was shown'; fi
 NETWORK_TEST_RC=37
 export NETWORK_TEST_RC
+printf 'legacy failure log\n' >"$STATE_DIR/network-tests/previous-failure.log"
 if NETWORK_TEST_MODE=speed network_test_command >"$tmp/failure.out" 2>&1; then
   fail 'upstream failure was ignored'
 fi
 grep -q '退出码 37' "$tmp/failure.out" || fail 'failure status hidden'
+[[ ! -e "$STATE_DIR/network-tests/previous-failure.log" ]] || fail 'legacy log survived failed test exit'
+if find "$tmp" -maxdepth 1 -name 'bbr-tcpquality.*' | grep -q .; then
+  fail 'temporary entry survived test exit'
+fi
 if NETWORK_TEST_MODE=unknown network_test_command >"$tmp/invalid.out" 2>&1; then
   fail 'invalid test mode accepted'
 fi

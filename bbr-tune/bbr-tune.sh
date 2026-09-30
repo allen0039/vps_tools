@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.10"
+VERSION="2.10.11"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -3163,9 +3163,19 @@ autotune() {
   info "专业评估报告：$COMPARISON_FILE"
 }
 
+cleanup_network_test_logs() {
+  local dir="${STATE_DIR}/network-tests" item
+  [[ -d "$dir" && ! -L "$dir" ]] || return 0
+  for item in "$dir"/*.log; do
+    [[ -f "$item" || -L "$item" ]] || continue
+    rm -f -- "$item" || return 1
+  done
+  rmdir -- "$dir" 2>/dev/null || true
+}
+
 network_test_command() (
   require_linux; require_root
-  local entry log rc
+  local entry rc
   local -a test_args=(--no-rank-upload)
   case "$NETWORK_TEST_MODE" in
     both) test_args=(-v4 -v6 --speedtest "${test_args[@]}") ;;
@@ -3176,31 +3186,27 @@ network_test_command() (
   have curl || die "缺少 curl，无法下载 TcpQuality 检测入口"
   have mktemp || die "缺少 mktemp，无法安全保存 TcpQuality 检测入口"
   have awk || die "缺少 awk，无法处理 TcpQuality 检测输出"
-  have tee || die "缺少 tee，无法保存检测日志"
+  cleanup_network_test_logs || warn "旧版三网检测日志未能完整清理"
   umask 077
   entry="$(mktemp "${TMPDIR:-/tmp}/bbr-tcpquality.XXXXXX")" || die "无法创建临时文件"
-  trap 'rm -f -- "$entry"' EXIT
+  trap 'rm -f -- "$entry"; cleanup_network_test_logs || warn "旧版三网检测日志未能完整清理"' EXIT
   if ! curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 \
       https://tcpquality.ibsgss.uk/run -o "$entry"; then
     die "无法下载 TcpQuality 检测入口，请检查网络后重试"
   fi
   [[ -s "$entry" ]] && bash -n "$entry" || die "TcpQuality 检测入口内容无效"
-  mkdir -p "${STATE_DIR}/network-tests"
-  log="${STATE_DIR}/network-tests/$(date +%Y%m%d-%H%M%S)-${NETWORK_TEST_MODE}-$$-${RANDOM}.log"
   section "TcpQuality 三网检测"
   printf '  模式：%s\n  来源：https://tcpquality.ibsgss.uk/run\n' "$NETWORK_TEST_MODE"
-  printf '  检测日志：%s\n' "$log"
   if [[ -f "${PENDING_LATEST}/armed" ]]; then
     warn "当前配置仍受安全回滚计时器约束；长时间检测可能跨过回滚时间，请及时验证并确认参数"
   fi
   printf '  检测会访问上游节点并消耗流量；已关闭在线报告上传。\n\n'
   if bash "$entry" "${test_args[@]}" 2>&1 \
-      | awk 'index($0, "特价VPS补货TG频道：") == 0 { print; fflush() }' \
-      | tee "$log"; then
-    info "三网检测完成；日志：$log"
+      | awk 'index($0, "特价VPS补货TG频道：") == 0 { print; fflush() }'; then
+    info "三网检测完成"
   else
     rc=$?
-    warn "三网检测未完成（退出码 ${rc}）；已保留日志：$log"
+    warn "三网检测未完成（退出码 ${rc}）"
     return "$rc"
   fi
 )
