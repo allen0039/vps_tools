@@ -18,6 +18,10 @@ assert '\x1b' not in s
 assert '调优与记录' in s and '参数管理' in s
 options=[int(x) for x in re.findall(r'(?m)^\s+(\d+) {2}',s)]
 assert options==[1,2,3,4,5,6,7,8,9,10,11,0],options
+menu_rows=[re.match(r'^ {4}(\d{1,2})( +)(\S.*)$',line) for line in s.splitlines()]
+menu_rows=[row for row in menu_rows if row]
+assert [int(row.group(1)) for row in menu_rows]==options
+assert all(row.start(1)==4 and row.start(3)==8 for row in menu_rows)
 for line in s.splitlines():
     width=sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in line)
     assert width<=72,(width,line)

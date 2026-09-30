@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.11"
+VERSION="2.10.12"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -3703,22 +3703,28 @@ ui_title() {
   printf '\n'
 }
 
+ui_menu_item() {
+  local number="$1" label="$2" color="${3:-}"
+  printf '    %s%-2s%s  %s\n' "$color" "$number" "${color:+$UI_RESET}" "$label"
+}
+
 ui_menu_options() {
-  printf '  调优与记录\n'
-  printf '    %s1%s  自动测试并选择 TCP 参数\n' "$UI_GREEN" "$UI_RESET"
-  printf '    2  查看当前 TCP / BBR 状态\n'
-  printf '    3  查看历史测试 / 关键参数对比 / 应用\n'
-  printf '\n  参数管理\n'
-  printf '    4  确认保留当前参数\n'
-  printf '    5  恢复调优前参数\n'
-  printf '    6  更改出口队列算法\n'
-  printf '\n  工具\n'
-  printf '    7  使用说明\n'
-  printf '    8  BBRv3 内核管理\n'
-  printf '    9  更新工具（GitHub / Gitee）\n'
-  printf '   10  清理数据\n'
-  printf '   11  三网回程 / 单线程速度检测\n'
-  printf '    0  退出\n\n'
+  printf '  %s调优与记录%s\n' "$UI_BLUE" "$UI_RESET"
+  ui_menu_item 1 '自动测试并选择 TCP 参数' "$UI_GREEN"
+  ui_menu_item 2 '查看当前 TCP / BBR 状态'
+  ui_menu_item 3 '查看历史测试 / 关键参数对比 / 应用'
+  printf '\n  %s参数管理%s\n' "$UI_BLUE" "$UI_RESET"
+  ui_menu_item 4 '确认保留当前参数'
+  ui_menu_item 5 '恢复调优前参数'
+  ui_menu_item 6 '更改出口队列算法'
+  printf '\n  %s工具%s\n' "$UI_BLUE" "$UI_RESET"
+  ui_menu_item 7 '使用说明'
+  ui_menu_item 8 'BBRv3 内核管理'
+  ui_menu_item 9 '更新工具（GitHub / Gitee）'
+  ui_menu_item 10 '清理数据'
+  ui_menu_item 11 '三网回程 / 单线程速度检测'
+  ui_menu_item 0 '退出'
+  printf '\n'
 }
 
 ui_read_text() {
