@@ -53,7 +53,7 @@ install_payload "${ROOT}/bbr-tune.sh" "$installed" "$linked"
 "$linked" --version | grep -q '^bbr-tune ' || fail "installed command version"
 "$shortcut" --version | grep -q '^bbrtcp ' || fail "shortcut command version"
 version_is_older 2.10.0 2.10.2 || fail 'older version comparison'
-if version_is_older 2.10.2 2.10.2 || version_is_older 2.10.3 2.10.2; then fail 'non-older version comparison'; fi
+if version_is_older 2.10.2 2.10.2 || version_is_older 2.10.4 2.10.2; then fail 'non-older version comparison'; fi
 cp "${ROOT}/bbr-tune.sh" "$tmp/old-main.sh"
 sed 's/^VERSION=.*/VERSION="2.10.0"/' "$tmp/old-main.sh" >"$tmp/old-main-version.sh"
 cp "${ROOT}/bbr-kernel.sh" "$tmp/old-helper.sh"
