@@ -1,0 +1,214 @@
+{
+  "start": {
+    "version": "iperf 3.x",
+    "accepted_connection": {
+      "host": "198.51.100.8",
+      "port": 50000
+    },
+    "connected": [
+      {
+        "remote_host": "198.51.100.8"
+      }
+    ],
+    "test_start": {
+      "protocol": "TCP",
+      "reverse": 1,
+      "num_streams": 1,
+      "duration": 15
+    }
+  },
+  "intervals": [
+    {
+      "sum": {
+        "start": 0,
+        "end": 1,
+        "seconds": 1,
+        "bytes": 100000000,
+        "bits_per_second": 800000000,
+        "sender": true
+      }
+    },
+    {
+      "sum": {
+        "start": 1,
+        "end": 2,
+        "seconds": 1,
+        "bytes": 100000000,
+        "bits_per_second": 800000000,
+        "sender": true
+      }
+    },
+    {
+      "sum": {
+        "start": 2,
+        "end": 3,
+        "seconds": 1,
+        "bytes": 100000000,
+        "bits_per_second": 800000000,
+        "sender": true
+      }
+    },
+    {
+      "sum": {
+        "start": 3,
+        "end": 4,
+        "seconds": 1,
+        "bytes": 100000000,
+        "bits_per_second": 800000000,
+        "sender": true
+      }
+    },
+    {
+      "sum": {
+        "start": 4,
+        "end": 5,
+        "seconds": 1,
+        "bytes": 100000000,
+        "bits_per_second": 800000000,
+        "sender": true
+      }
+    },
+    {
+      "sum": {
+        "start": 5,
+        "end": 6,
+        "seconds": 1,
+        "bytes": 100000000,
+        "bits_per_second": 800000000,
+        "sender": true
+      }
+    },
+    {
+      "sum": {
+        "start": 6,
+        "end": 7,
+        "seconds": 1,
+        "bytes": 100000000,
+        "bits_per_second": 800000000,
+        "sender": true
+      }
+    },
+    {
+      "sum": {
+        "start": 7,
+        "end": 8,
+        "seconds": 1,
+        "bytes": 100000000,
+        "bits_per_second": 800000000,
+        "sender": true
+      }
+    },
+    {
+      "sum": {
+        "start": 8,
+        "end": 9,
+        "seconds": 1,
+        "bytes": 100000000,
+        "bits_per_second": 800000000,
+        "sender": true
+      }
+    },
+    {
+      "sum": {
+        "start": 9,
+        "end": 10,
+        "seconds": 1,
+        "bytes": 100000000,
+        "bits_per_second": 800000000,
+        "sender": true
+      }
+    },
+    {
+      "sum": {
+        "start": 10,
+        "end": 11,
+        "seconds": 1,
+        "bytes": 100000000,
+        "bits_per_second": 800000000,
+        "sender": true
+      }
+    },
+    {
+      "sum": {
+        "start": 11,
+        "end": 12,
+        "seconds": 1,
+        "bytes": 100000000,
+        "bits_per_second": 800000000,
+        "sender": true
+      }
+    },
+    {
+      "sum": {
+        "start": 12,
+        "end": 13,
+        "seconds": 1,
+        "bytes": 100000000,
+        "bits_per_second": 800000000,
+        "sender": true
+      }
+    },
+    {
+      "sum": {
+        "start": 13,
+        "end": 14,
+        "seconds": 1,
+        "bytes": 100000000,
+        "bits_per_second": 800000000,
+        "sender": true
+      }
+    },
+    {
+      "sum": {
+        "start": 14,
+        "end": 15,
+        "seconds": 1,
+        "bytes": 100000000,
+        "bits_per_second": 800000000,
+        "sender": true
+      }
+    }
+  ],
+  "end": {
+    "sum_sent": {
+      "start": 0,
+      "end": 15,
+      "seconds": 15,
+      "bytes": 1500000000,
+      "bits_per_second": 800000000,
+      "retransmits": 1000,
+      "sender": true
+    },
+    "sum_received": {
+      "start": 0,
+      "end": 15,
+      "seconds": 15,
+      "bytes": 0,
+      "bits_per_second": 0,
+      "sender": true
+    },
+    "streams": [
+      {
+        "sender": {
+          "start": 0,
+          "end": 15,
+          "seconds": 15,
+          "bytes": 1500000000,
+          "bits_per_second": 800000000,
+          "retransmits": 1000,
+          "sender": true,
+          "mean_rtt": 180000,
+          "min_rtt": 150000
+        },
+        "receiver": {
+          "start": 0,
+          "end": 15,
+          "seconds": 15,
+          "bytes": 0,
+          "bits_per_second": 0,
+          "sender": true
+        }
+      }
+    ]
+  }
+}

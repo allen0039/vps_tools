@@ -1,0 +1,13 @@
+qdisc mq 0: root
+ Sent 93293835454 bytes 106296665 pkt (dropped 0, overlimits 0 requeues 0)
+ backlog 0b 0p requeues 0
+qdisc fq 0: parent :2 limit 10000p flow_limit 100p buckets 1024 orphan_mask 1023 quantum 3028b initial_quantum 15140b low_rate_threshold 550Kbit refill_delay 40ms timer_slack 10us horizon 10s horizon_drop
+ Sent 45655602205 bytes 52296049 pkt (dropped 0, overlimits 0 requeues 0)
+ backlog 0b 0p requeues 0
+  flows 643 (inactive 643 throttled 0)
+  gc 13000 highprio 0 throttled 10304996 latency 43.2us
+qdisc fq 0: parent :1 limit 10000p flow_limit 100p buckets 1024 orphan_mask 1023 quantum 3028b initial_quantum 15140b low_rate_threshold 550Kbit refill_delay 40ms timer_slack 10us horizon 10s horizon_drop
+ Sent 47638233249 bytes 54000616 pkt (dropped 0, overlimits 0 requeues 0)
+ backlog 0b 0p requeues 0
+  flows 624 (inactive 624 throttled 0)
+  gc 13070 highprio 0 throttled 10494532 latency 18.8us

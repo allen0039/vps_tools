@@ -11,6 +11,7 @@
 | `safe-ssh-port` | 安全切换 OpenSSH 单端口，并管理端口、IP 与国家黑白名单 | [查看说明](safe-ssh-port/README.md) |
 | `dns_tool` | 一键切换公共或自定义 DNS，自动适配常见管理服务并支持原始配置恢复 | [查看说明](dns_tool/README.md) |
 | `swap_tool` | 创建或修复 Btrfs 等文件系统上的 `/swapfile`，确认实际启用后写入开机配置 | [查看说明](swap_tool/README.md) |
+| `bbr-tune` | 自动测试 TCP/BBR 参数、切换出口队列并提供安全回滚，快捷命令 `bbrtcp` | [查看说明](bbr-tune/README.md) |
 | `vpspc` | 审计 SSH、订阅访问及可选 Falco 行为，按规则向 Telegram 预警，不自动封禁 | [查看说明](vpspc/README.md) |
 
 ## vpspc 快速使用
@@ -160,6 +161,24 @@ curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/swap_tool
 `swapon --show` 检查实际启用状态。详细使用方式和安全行为见
 [swap_tool 详细说明](swap_tool/README.md)。
 
+## bbr-tune 快速使用
+
+在远程 Linux 服务器安装：
+
+**GitHub：**
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/bbr-tune/install.sh' | sudo bash -s -- --install-only
+```
+
+**Gitee：**
+
+```bash
+curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/bbr-tune/install.sh' | sudo env BBR_TUNE_RAW_BASE='https://gitee.com/allen0039/vps_tools/raw/main/bbr-tune' bash -s -- --install-only
+```
+
+安装后输入 `bbrtcp` 打开交互菜单。工具在服务器上测试 TCP/BBR 参数，测速客户端在本地电脑运行；调整前会备份，完成后需确认保留，否则到期尝试回滚。详情见 [bbr-tune 使用指南](bbr-tune/README.md)。上述远程命令需等待本目录发布到对应仓库后使用。
+
 ## 安全原则
 
 - 建议先下载并检查脚本，再以 `root` 权限运行。
@@ -170,4 +189,4 @@ curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/swap_tool
 
 ## 许可证
 
-[MIT License](LICENSE)
+[MIT License](LICENSE) 适用于本仓库原创工具。`bbr-tune` 基于第三方项目且上游未提供明确许可证，不纳入该 MIT 授权；公开发布前需确认授权。

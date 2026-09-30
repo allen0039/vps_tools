@@ -1,0 +1,43 @@
+{
+  "start": {
+    "test_start": {
+      "protocol": "TCP",
+      "reverse": 1
+    },
+    "connected": [
+      {
+        "socket": 5,
+        "local_host": "78.142.195.110",
+        "local_port": 5201,
+        "remote_host": "198.51.100.8",
+        "remote_port": 50000
+      }
+    ]
+  },
+  "end": {
+    "sum_sent": {
+      "start": 0,
+      "end": 10,
+      "seconds": 10,
+      "bytes": 125000000,
+      "bits_per_second": 800000000,
+      "retransmits": 1000,
+      "sender": true
+    },
+    "sum_received": {
+      "bytes": 124000000,
+      "bits_per_second": 793600000,
+      "sender": false
+    },
+    "streams": [
+      {
+        "sender": {
+          "bytes": 125000000,
+          "bits_per_second": 800000000,
+          "retransmits": 1000,
+          "mean_rtt": 180000
+        }
+      }
+    ]
+  }
+}
