@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.9.0"
+VERSION="2.9.1"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -295,6 +295,7 @@ usage() {
   sudo ./bbr-tune.sh qdisc --qdisc ALGO      单独更改出口队列，不改 TCP 参数
   ./bbr-tune.sh status [--iface DEV]         查看当前 TCP/BBR 状态
   ./bbr-tune.sh history                      查看历史测试会话
+  ./bbr-tune.sh history-compare --session ID  对比当前、测试前及历史选中参数
   ./bbr-tune.sh history-params --session ID   查看历史会话测试前的原始参数
   sudo ./bbr-tune.sh apply-history --session ID [--persist]  应用历史测试的 TCP 参数
   sudo ./bbr-tune.sh kernel [操作]         BBRv3 内核检测、安装、试用与恢复
@@ -348,7 +349,7 @@ parse_args() {
   fi
   case "$1" in
     kernel) COMMAND=kernel; shift; KERNEL_ARGS=("$@"); return ;;
-    menu|autotune|qdisc|status|history|history-params|apply-history|confirm|rollback|help) COMMAND="$1"; shift ;;
+    menu|autotune|qdisc|status|history|history-compare|history-params|apply-history|confirm|rollback|help) COMMAND="$1"; shift ;;
     --help|-h) COMMAND="help"; shift ;;
     --version) printf '%s %s\n' "$PROGRAM" "$VERSION"; exit 0 ;;
     *) die "未知命令：$1" ;;
@@ -2902,6 +2903,103 @@ status_command() {
   tc -s -d qdisc show dev "$iface" || true
 }
 
+history_snapshot_value() {
+  local file="$1" key="$2" value
+  if [[ -r "$file" ]]; then
+    value="$(awk -v key="$key" 'index($0,key"=")==1 {print substr($0,length(key)+2); exit}' "$file")"
+  fi
+  printf '%s\n' "${value:-未记录}"
+}
+
+history_snapshot_qdisc() {
+  local file="$1" value
+  if [[ -r "$file" ]]; then
+    value="$(awk '/^\[qdisc\]$/ {inside=1; next} /^\[/ {inside=0} inside && $1=="qdisc" && $4=="root" {print $2; exit}' "$file")"
+  fi
+  printf '%s\n' "${value:-未记录}"
+}
+
+history_compare_format_value() {
+  local value="$1" format="$2"
+  case "$format" in
+    bytes)
+      if [[ "$value" =~ ^[0-9]+$ ]]; then
+        awk -v n="$value" 'BEGIN {printf "%.2f MiB (%s bytes)\n",n/1048576,n}'
+      else printf '%s\n' "$value"; fi ;;
+    mib)
+      if [[ "$value" =~ ^[0-9]+$ ]]; then printf '%s MiB\n' "$value"
+      else printf '%s\n' "$value"; fi ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
+
+history_compare_row() {
+  local label="$1" key="$2" current_file="$3" before_file="$4" after_file="$5" format="${6:-raw}"
+  local current before selected marker=""
+  if [[ "$format" == qdisc ]]; then
+    current="$(history_snapshot_qdisc "$current_file")"
+    before="$(history_snapshot_qdisc "$before_file")"
+    selected="$(history_snapshot_qdisc "$after_file")"
+  else
+    current="$(history_snapshot_value "$current_file" "$key")"
+    before="$(history_snapshot_value "$before_file" "$key")"
+    selected="$(history_snapshot_value "$after_file" "$key")"
+  fi
+  current="$(history_compare_format_value "$current" "$format")"
+  before="$(history_compare_format_value "$before" "$format")"
+  selected="$(history_compare_format_value "$selected" "$format")"
+  [[ "$selected" == "$current" || "$selected" == 未记录 ]] || marker='← 与当前不同'
+  if (( ${#label} + ${#current} + ${#before} + ${#selected} <= 34 )); then
+    printf '  %s：当前 %s｜测试前 %s｜历史 %s%s%s%s\n' \
+      "$label" "$current" "$before" "$UI_YELLOW" "$selected" "$UI_RESET" "$marker"
+  else
+    printf '  %s\n' "$label"
+    printf '    当前       %s\n' "$current"
+    printf '    测试前     %s\n' "$before"
+    printf '    选中历史   %s%s%s%s\n' "$UI_YELLOW" "$selected" "$UI_RESET" "$marker"
+  fi
+}
+
+history_compare_command() (
+  require_linux
+  local session="$HISTORY_SESSION" before_file after_file current_file iface
+  [[ "$session" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || { error "history-compare 需要有效的 --session 会话编号"; return 1; }
+  [[ -d "${SESSION_ROOT}/${session}" && ! -L "${SESSION_ROOT}/${session}" ]] || { error "找不到历史会话：${session}"; return 1; }
+  before_file="${SESSION_ROOT}/${session}/system-before.txt"
+  after_file="${SESSION_ROOT}/${session}/system-after.txt"
+  [[ -r "$before_file" || -r "$after_file" ]] || { error "该会话没有保存参数快照：${session}"; return 1; }
+  iface="$(resolve_iface)"
+  [[ -n "$iface" ]] || { error "无法识别当前出口网卡"; return 1; }
+  detect_memory_limits
+  current_file="$(mktemp)" || return 1
+  trap 'rm -f "$current_file"' EXIT
+  capture_state "$iface" "$current_file"
+  section "历史会话 ${session} / 关键参数对比"
+  printf '  当前＝现在生效；测试前＝这次测试的原始值；选中历史＝这次测试结束时的值。\n'
+  printf '  ← 标出与当前不同的历史值；未记录表示当时没有保存。\n'
+  printf '\n  TCP / BBR 参数\n'
+  history_compare_row '拥塞控制算法' net.ipv4.tcp_congestion_control "$current_file" "$before_file" "$after_file"
+  history_compare_row '接收缓存硬上限' net.core.rmem_max "$current_file" "$before_file" "$after_file" bytes
+  history_compare_row '发送缓存硬上限' net.core.wmem_max "$current_file" "$before_file" "$after_file" bytes
+  history_compare_row 'tcp_rmem（最小/默认/最大，bytes）' net.ipv4.tcp_rmem "$current_file" "$before_file" "$after_file"
+  history_compare_row 'tcp_wmem（最小/默认/最大，bytes）' net.ipv4.tcp_wmem "$current_file" "$before_file" "$after_file"
+  history_compare_row 'tcp_mem（low/pressure/high，页）' net.ipv4.tcp_mem "$current_file" "$before_file" "$after_file"
+  printf '\n  队列与服务器条件（用于判断测试环境）\n'
+  history_compare_row '系统默认队列' net.core.default_qdisc "$current_file" "$before_file" "$after_file"
+  history_compare_row '出口实际队列' qdisc "$current_file" "$before_file" "$after_file" qdisc
+  history_compare_row '出口网卡' interface "$current_file" "$before_file" "$after_file"
+  history_compare_row '运行内核' kernel "$current_file" "$before_file" "$after_file"
+  history_compare_row 'BBR 运行版本' bbr_runtime_version "$current_file" "$before_file" "$after_file"
+  history_compare_row '内核可用算法' net.ipv4.tcp_available_congestion_control "$current_file" "$before_file" "$after_file"
+  history_compare_row '物理总内存' memory_total_mib "$current_file" "$before_file" "$after_file" mib
+  history_compare_row '有效总内存' memory_effective_mib "$current_file" "$before_file" "$after_file" mib
+  history_compare_row 'TCP 聚合内存预算' memory_tcp_budget_mib "$current_file" "$before_file" "$after_file" mib
+  history_compare_row '单 socket 缓存技术上限' memory_buffer_cap_mib "$current_file" "$before_file" "$after_file" mib
+  printf '\n  应用历史记录时：采用历史缓存上限，保留当前队列和 TCP 缓存最小/默认值，\n'
+  printf '  tcp_mem 会按当前内存重新计算；历史列是当时实测值，并非逐项原样写入。\n'
+  printf '  还会启用 TCP 自动缓冲、SACK/DSACK 和窗口缩放。\n'
+)
+
 history_params_command() {
   local session="$HISTORY_SESSION" snapshot label
   [[ "$session" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || { error "history-params 需要有效的 --session 会话编号"; return 1; }
@@ -3016,7 +3114,7 @@ apply_history_command() {
 }
 
 history_command() {
-  local header choice count selected action
+  local header choice count selected action snapshot_choice
   if [[ ! -r "$HISTORY_FILE" ]]; then info "尚无历史测试记录；完成一次调优后即可在此对比"; return; fi
   IFS= read -r header <"$HISTORY_FILE" || header=""
   section "历史测试 / 按时间归档"
@@ -3037,24 +3135,34 @@ history_command() {
       count="$(awk 'END {print NR-1}' "$HISTORY_FILE")"
       (( count > 0 )) || return 0
       while true; do
-        read -r -p '输入编号应用该次测试的 TCP 参数（0 返回）：' choice || return 0
+        read -r -p '输入编号查看关键参数对比（0 返回）：' choice || return 0
         [[ "$choice" == 0 || -z "$choice" ]] && return 0
         if [[ "$choice" =~ ^[0-9]+$ ]] && (( 10#$choice >= 1 && 10#$choice <= count )); then break; fi
         printf '请输入 0～%s 的编号\n' "$count"
       done
       selected="$(awk -F '\t' -v n="$choice" 'NR==n+1 {print $2}' "$HISTORY_FILE")"
+      HISTORY_SESSION="$selected"
+      history_compare_command || true
       while true; do
         printf '\n会话 %s\n' "$selected"
-        printf '  1  查看测试前原始参数\n  2  查看测试后参数\n  3  应用本次测试的 TCP 参数\n  0  返回\n'
+        printf '  1  重新查看关键参数对比\n  2  应用本次测试的 TCP 参数\n  3  查看完整原始快照\n  0  返回\n'
         read -r -p '请选择：' action || return 0
         case "$action" in
-          1) HISTORY_SESSION="$selected"; HISTORY_PARAMS_AFTER=0; history_params_command || true ;;
-          2) HISTORY_SESSION="$selected"; HISTORY_PARAMS_AFTER=1; history_params_command || true ;;
-          3)
+          1) history_compare_command || true ;;
+          2)
             history_candidate "$selected" || continue
             local args=()
             if ui_yes_no '同时写入开机配置' n; then args+=(--persist); fi
             ui_execute 1 apply-history --session "$selected" ${args[@]+"${args[@]}"} || true
+            ;;
+          3)
+            read -r -p '查看 1 测试前 / 2 测试后（0 返回）：' snapshot_choice || continue
+            case "$snapshot_choice" in
+              1) HISTORY_PARAMS_AFTER=0; history_params_command || true ;;
+              2) HISTORY_PARAMS_AFTER=1; history_params_command || true ;;
+              0|'') ;;
+              *) printf '请输入 0～2 的编号\n' ;;
+            esac
             ;;
           0|'') return 0 ;;
           *) printf '请输入 0～3 的编号\n' ;;
@@ -3088,7 +3196,7 @@ ui_menu_options() {
   printf '  调优与记录\n'
   printf '    %s1%s  自动测试并选择 TCP 参数\n' "$UI_GREEN" "$UI_RESET"
   printf '    2  查看当前 TCP / BBR 状态\n'
-  printf '    3  查看历史测试 / 原始参数 / 选择应用\n'
+  printf '    3  查看历史测试 / 关键参数对比 / 应用\n'
   printf '\n  参数管理\n'
   printf '    4  确认保留当前参数\n'
   printf '    5  恢复调优前参数\n'
@@ -3310,6 +3418,7 @@ main() {
     kernel) kernel_command ;;
     status) status_command ;;
     history) history_command ;;
+    history-compare) history_compare_command ;;
     history-params) history_params_command ;;
     apply-history) apply_history_command ;;
     confirm) confirm_tuning ;;

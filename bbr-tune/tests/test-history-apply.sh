@@ -16,8 +16,40 @@ BASELINE_SINGLE_MBPS=100; FINAL_SINGLE_MBPS=120
 BASELINE_MULTI_MBPS=300; FINAL_MULTI_MBPS=340
 append_history
 printf 'stage\tround\tmode\tconfig\tstreams\tbuffer_mib\nfinal\t1\tsingle\tbbr-fq\t1\t8\nfinal\t1\tmulti\tbbr-fq\t8\t8\n' >"$SESSION_ROOT/$SESSION_ID/results.tsv"
-printf 'interface=eth0\nnet.ipv4.tcp_congestion_control=cubic\nnet.core.rmem_max=4194304\n' >"$SESSION_ROOT/$SESSION_ID/system-before.txt"
-printf 'net.core.rmem_max=8388608\nnet.core.wmem_max=8388608\n' >"$SESSION_ROOT/$SESSION_ID/system-after.txt"
+cat >"$SESSION_ROOT/$SESSION_ID/system-before.txt" <<'BEFORE'
+kernel=Linux old
+interface=eth0
+net.ipv4.tcp_congestion_control=cubic
+net.core.default_qdisc=fq
+net.core.rmem_max=4194304
+net.core.wmem_max=4194304
+net.ipv4.tcp_rmem=4096 87380 4194304
+net.ipv4.tcp_wmem=4096 16384 4194304
+net.ipv4.tcp_mem=100 200 300
+memory_total_mib=1024
+memory_effective_mib=1024
+memory_tcp_budget_mib=682
+memory_buffer_cap_mib=682
+[qdisc]
+qdisc fq 0: root
+BEFORE
+cat >"$SESSION_ROOT/$SESSION_ID/system-after.txt" <<'AFTER'
+kernel=Linux old
+interface=eth0
+net.ipv4.tcp_congestion_control=bbr
+net.core.default_qdisc=fq
+net.core.rmem_max=8388608
+net.core.wmem_max=8388608
+net.ipv4.tcp_rmem=4096 87380 8388608
+net.ipv4.tcp_wmem=4096 16384 8388608
+net.ipv4.tcp_mem=100 200 300
+memory_total_mib=1024
+memory_effective_mib=1024
+memory_tcp_budget_mib=682
+memory_buffer_cap_mib=682
+[qdisc]
+qdisc fq 0: root
+AFTER
 HISTORY_SESSION=old-session
 history_params_command >"$tmp/before.txt" || fail 'original parameters unavailable'
 grep -Fq 'net.ipv4.tcp_congestion_control=cubic' "$tmp/before.txt" || fail 'original congestion control missing'
@@ -29,14 +61,49 @@ HISTORY_PARAMS_AFTER=0
 mv "$SESSION_ROOT/$SESSION_ID/system-before.txt" "$tmp/before.saved"
 if history_params_command >"$tmp/missing.log" 2>&1; then fail 'missing original snapshot accepted'; fi
 mv "$tmp/before.saved" "$SESSION_ROOT/$SESSION_ID/system-before.txt"
+require_linux() { :; }; resolve_iface() { printf 'eth0\n'; }; detect_memory_limits() { :; }
+capture_state() {
+  cat >"$2" <<'CURRENT'
+kernel=Linux current
+interface=eth0
+net.ipv4.tcp_congestion_control=bbr
+net.core.default_qdisc=fq
+net.core.rmem_max=12582912
+net.core.wmem_max=12582912
+net.ipv4.tcp_rmem=4096 87380 12582912
+net.ipv4.tcp_wmem=4096 16384 12582912
+net.ipv4.tcp_mem=120 240 360
+memory_total_mib=2048
+memory_effective_mib=2048
+memory_tcp_budget_mib=1365
+memory_buffer_cap_mib=1365
+[qdisc]
+qdisc fq 0: root
+CURRENT
+}
+history_compare_command >"$tmp/comparison.txt" || fail 'three-way history comparison failed'
+grep -Fq '当前' "$tmp/comparison.txt" || fail 'current column missing'
+grep -Fq '测试前' "$tmp/comparison.txt" || fail 'original column missing'
+grep -Fq '选中历史' "$tmp/comparison.txt" || fail 'selected history column missing'
+grep -Fq '12.00 MiB (12582912 bytes)' "$tmp/comparison.txt" || fail 'current buffer missing'
+grep -Fq '4.00 MiB (4194304 bytes)' "$tmp/comparison.txt" || fail 'original buffer missing'
+grep -Fq '8.00 MiB (8388608 bytes)' "$tmp/comparison.txt" || fail 'historical buffer missing'
+if grep -Fq 'kernel.panic=' "$tmp/comparison.txt"; then fail 'unrelated raw settings leaked into comparison'; fi
+mv "$SESSION_ROOT/$SESSION_ID/system-after.txt" "$tmp/after.saved"
+history_compare_command >"$tmp/comparison-missing.txt" || fail 'comparison should tolerate a missing final snapshot'
+grep -Fq '未记录' "$tmp/comparison-missing.txt" || fail 'missing historical values not marked'
+mv "$tmp/after.saved" "$SESSION_ROOT/$SESSION_ID/system-after.txt"
 python3 - "$ROOT/bbr-tune.sh" "$STATE_DIR" <<'PY'
 import os, pty, select, subprocess, sys, time
 master, slave = pty.openpty()
-command = 'source "$1"; STATE_DIR="$2"; SESSION_ROOT="$STATE_DIR/sessions"; HISTORY_FILE="$STATE_DIR/history.tsv"; history_command'
+command = '''source "$1"; STATE_DIR="$2"; SESSION_ROOT="$STATE_DIR/sessions"; HISTORY_FILE="$STATE_DIR/history.tsv"
+require_linux() { :; }; resolve_iface() { printf 'eth0\\n'; }; detect_memory_limits() { :; }
+capture_state() { printf 'interface=eth0\\nnet.ipv4.tcp_congestion_control=bbr\\nnet.core.rmem_max=12582912\\n' >"$2"; }
+history_command'''
 child = subprocess.Popen(['bash', '-c', command, '_', sys.argv[1], sys.argv[2]],
                          stdin=slave, stdout=slave, stderr=slave)
 os.close(slave)
-os.write(master, b'1\n1\n0\n')
+os.write(master, b'1\n0\n')
 output = bytearray()
 deadline = time.monotonic() + 5
 while time.monotonic() < deadline:
@@ -55,8 +122,8 @@ child.wait(timeout=1)
 os.close(master)
 screen = output.decode('utf-8', errors='replace')
 assert child.returncode == 0, screen
-assert '查看测试前原始参数' in screen, screen
-assert 'net.ipv4.tcp_congestion_control=cubic' in screen, screen
+assert '关键参数对比' in screen, screen
+assert '选中历史' in screen and '8.00 MiB' in screen, screen
 PY
 history_candidate old-session || fail 'valid historical candidate rejected'
 [[ "${HISTORY_FIELDS[3]}" == 8 ]] || fail 'wrong historical buffer'
