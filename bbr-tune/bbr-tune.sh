@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.8"
+VERSION="2.10.9"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -23,6 +23,7 @@ SERVICE_FILE="/etc/systemd/system/bbr-tcp-tuning.service"
 
 KERNEL_ARGS=()
 COMMAND="menu"
+NETWORK_TEST_MODE="both"
 IFACE="auto"
 SERVER_ADDRESS=""
 TARGET_MBPS=""
@@ -294,6 +295,8 @@ usage() {
   bbrtcp                                    打开交互界面（安装后）
   sudo ./bbr-tune.sh                         交互界面
   sudo ./bbr-tune.sh autotune [参数]         自动测试并选择最优参数
+  sudo ./bbr-tune.sh network-test [--mode both|route|speed]
+                                           三网回程与单线程速度检测
   sudo ./bbr-tune.sh qdisc --qdisc ALGO      单独更改出口队列，不改 TCP 参数
   ./bbr-tune.sh status [--iface DEV]         查看当前 TCP/BBR 状态
   ./bbr-tune.sh history                      查看历史测试会话
@@ -335,6 +338,12 @@ usage() {
   7. 不设固定候选数量；BDP/内存约束下探测，连续两档无收益停止，回落后回退精调。
   8. 每轮等待连接 300 秒；每次测量前续期 3600 秒回滚，完成后重新计时等待确认。
   9. 结果和原始 JSON 保存在 /var/lib/bbr-tcp-tuning/sessions，可从清理菜单逐条删除。
+
+调优后检测：
+  使用 TcpQuality 的独立检测入口；both 默认运行 IPv4/IPv6/IPv4 大包
+  回程及三网单线程速度，route 仅运行回程，speed 仅运行速度。
+  检测需联网下载并运行 TcpQuality，可能下载临时 Debian rootfs；
+  默认不上传在线报告。测速期间仍受本工具的安全回滚计时器约束。
 USAGE
 }
 is_integer() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
@@ -355,7 +364,7 @@ parse_args() {
   fi
   case "$1" in
     kernel) COMMAND=kernel; shift; KERNEL_ARGS=("$@"); return ;;
-    menu|autotune|qdisc|status|history|history-compare|history-params|apply-history|update|confirm|rollback|cleanup-data|cleanup-backups|cleanup-history|help) COMMAND="$1"; shift ;;
+    menu|autotune|network-test|qdisc|status|history|history-compare|history-params|apply-history|update|confirm|rollback|cleanup-data|cleanup-backups|cleanup-history|help) COMMAND="$1"; shift ;;
     --help|-h) COMMAND="help"; shift ;;
     --version) printf '%s %s\n' "$PROGRAM" "$VERSION"; exit 0 ;;
     *) die "未知命令：$1" ;;
@@ -378,6 +387,7 @@ parse_args() {
       --session) need_value "$@"; HISTORY_SESSION="$2"; shift 2 ;;
       --after) HISTORY_PARAMS_AFTER="1"; shift ;;
       --channel) need_value "$@"; UPDATE_CHANNEL="$2"; shift 2 ;;
+      --mode) need_value "$@"; NETWORK_TEST_MODE="$2"; shift 2 ;;
       --persist) PERSIST_FINAL="1"; shift ;;
       --force) FORCE="1"; shift ;;
       --yes|-y) YES="1"; shift ;;
@@ -3152,6 +3162,46 @@ autotune() {
   info "完整运行日志：$RUN_LOG"
   info "专业评估报告：$COMPARISON_FILE"
 }
+
+network_test_command() (
+  require_linux; require_root
+  local entry log rc
+  local -a test_args=(--no-rank-upload)
+  case "$NETWORK_TEST_MODE" in
+    both) test_args=(-v4 -v6 --speedtest "${test_args[@]}") ;;
+    route) test_args=(-v4 -v6 "${test_args[@]}") ;;
+    speed) test_args=(--only-speedtest "${test_args[@]}") ;;
+    *) die "检测模式只能是 both、route 或 speed" ;;
+  esac
+  have curl || die "缺少 curl，无法下载 TcpQuality 检测入口"
+  have mktemp || die "缺少 mktemp，无法安全保存 TcpQuality 检测入口"
+  have tee || die "缺少 tee，无法保存检测日志"
+  umask 077
+  entry="$(mktemp "${TMPDIR:-/tmp}/bbr-tcpquality.XXXXXX")" || die "无法创建临时文件"
+  trap 'rm -f -- "$entry"' EXIT
+  if ! curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 \
+      https://tcpquality.ibsgss.uk/run -o "$entry"; then
+    die "无法下载 TcpQuality 检测入口，请检查网络后重试"
+  fi
+  [[ -s "$entry" ]] && bash -n "$entry" || die "TcpQuality 检测入口内容无效"
+  mkdir -p "${STATE_DIR}/network-tests"
+  log="${STATE_DIR}/network-tests/$(date +%Y%m%d-%H%M%S)-${NETWORK_TEST_MODE}-$$-${RANDOM}.log"
+  section "TcpQuality 三网检测"
+  printf '  模式：%s\n  来源：https://tcpquality.ibsgss.uk/run\n' "$NETWORK_TEST_MODE"
+  printf '  检测日志：%s\n' "$log"
+  if [[ -f "${PENDING_LATEST}/armed" ]]; then
+    warn "当前配置仍受安全回滚计时器约束；长时间检测可能跨过回滚时间，请及时验证并确认参数"
+  fi
+  printf '  检测会访问上游节点并消耗流量；已关闭在线报告上传。\n\n'
+  if bash "$entry" "${test_args[@]}" 2>&1 | tee "$log"; then
+    info "三网检测完成；日志：$log"
+  else
+    rc=$?
+    warn "三网检测未完成（退出码 ${rc}）；已保留日志：$log"
+    return "$rc"
+  fi
+)
+
 qdisc_command() {
   require_linux; require_root; validate_qdisc_options
   case "$REQUESTED_QDISC" in fq|fq_codel|cake) ;; *) die "单独切换队列需要 --qdisc fq、fq_codel 或 cake" ;; esac
@@ -3658,6 +3708,7 @@ ui_menu_options() {
   printf '    8  BBRv3 内核管理\n'
   printf '    9  更新工具（GitHub / Gitee）\n'
   printf '   10  清理数据\n'
+  printf '   11  三网回程 / 单线程速度检测\n'
   printf '    0  退出\n\n'
 }
 
@@ -3843,6 +3894,23 @@ ui_autotune() {
     --parallel "$streams" --duration "$duration" \
     --target-utilization "$util" --max-retrans-percent "$retrans" ${args[@]+"${args[@]}"}
 }
+
+ui_network_test() {
+  local choice mode
+  section "三网检测 / TcpQuality"
+  printf '  1  三网回程 + 单线程速度\n'
+  printf '  2  三网回程（IPv4 / IPv6 / IPv4 大包）\n'
+  printf '  3  三网单线程速度\n'
+  printf '  0  返回\n'
+  read -r -p '请选择：' choice || return 1
+  case "$choice" in
+    1) mode=both ;; 2) mode=route ;; 3) mode=speed ;;
+    0|'') return 0 ;;
+    *) printf '请输入 0～3 的编号\n'; return 1 ;;
+  esac
+  printf '  将下载并运行 TcpQuality；检测流量及耗时取决于上游节点。\n'
+  ui_execute 1 network-test --mode "$mode"
+}
 kernel_command() {
   local canonical helper
   canonical="$(readlink -f "$SCRIPT_PATH" 2>/dev/null || printf '%s' "$SCRIPT_PATH")"
@@ -3879,6 +3947,7 @@ menu() {
         fi
         ;;
       10) ui_execute 1 cleanup-data || true ;;
+      11) ui_network_test || true ;;
       0) return ;;
       *) printf '%s无效选择%s\n' "$UI_RED" "$UI_RESET" ;;
     esac
@@ -3897,6 +3966,7 @@ main() {
   case "$COMMAND" in
     menu) menu ;;
     autotune) autotune ;;
+    network-test) network_test_command ;;
     qdisc) qdisc_command ;;
     kernel) kernel_command ;;
     status) status_command ;;
