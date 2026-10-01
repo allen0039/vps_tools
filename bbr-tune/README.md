@@ -1,6 +1,6 @@
 # bbr-tune 使用指南
 
-**版本 2.10.15** · 在远程 Linux 服务器上运行的 TCP / BBR 调优工具。
+**版本 2.10.16** · 在远程 Linux 服务器上运行的 TCP / BBR 调优工具。
 
 本目录基于 [dingding229/bbr-tune](https://github.com/dingding229/bbr-tune) 修改。上游仓库目前未提供明确的开源许可证；本目录不适用 VPS Tools 根目录的 MIT 许可证。公开发布或分发修改版前，请先确认已获得相应授权。
 

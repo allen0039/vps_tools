@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Remote Linux kernel lifecycle; kept separate from TCP measurement and rollback.
 set -Eeuo pipefail
-KERNEL_HELPER_VERSION="2.10.15"
+KERNEL_HELPER_VERSION="2.10.16"
 K_ROOT="/var/lib/bbr-tcp-tuning/kernels"
 K_LATEST="${K_ROOT}/latest"
 K_YES=0
@@ -514,9 +514,13 @@ k_finalize_installed_target() {
   [[ "$(k_grub_entry "$K_OLD")" == "$K_OLD_ENTRY" ]] || k_die '旧内核启动项发生变化，停止'
   grub-editenv "$K_GRUB_ENV" list | grep -Fxq "saved_entry=${K_OLD_ENTRY}" || k_die '默认启动项不再是旧内核，请检查 GRUB'
   K_STATUS=installed; k_save_state
-  k_log "目标内核已纳入安全试用流程：${K_TARGET}；当前仍运行 ${K_OLD}"
-  k_log '下一步：sudo bbr-tune kernel trial；阅读恢复说明后自行安排重启'
-  k_log '重启后：sudo bbr-tune kernel verify；验证业务后 sudo bbr-tune kernel accept'
+  k_log "BBRv3 内核安装完成：${K_TARGET}；当前仍运行旧内核 ${K_OLD}"
+  k_log '请按以下顺序执行；本工具不会自动安排试启动，也不会自动重启：'
+  k_log '  1) sudo bbr-tune kernel trial       # 设置下一次启动试用 BBRv3（需要云控制台/救援能力）'
+  k_log '  2) sudo reboot                        # 自行安排维护窗口重启'
+  k_log '  3) 重连后执行 sudo bbr-tune kernel verify  # 确认运行内核和 BBR 版本均为目标值'
+  k_log '  4) 业务验证通过后执行 sudo bbr-tune kernel accept  # 将 BBRv3 设为默认内核'
+  k_log '如需取消尚未重启的试用：sudo bbr-tune kernel fallback'
   k_log '未添加软件源、未运行上游脚本；后续安全更新需重新执行 install 并经过试启动/验证'
 }
 k_adopt_existing_target() {
