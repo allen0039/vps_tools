@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.13"
+VERSION="2.10.14"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -65,6 +65,7 @@ PERSIST_FINAL="0"
 FORCE="0"
 YES="0"
 BACKUP_PATH=""
+BACKUP_REMARK=""
 HISTORY_SESSION=""
 HISTORY_PARAMS_AFTER="0"
 UPDATE_CHANNEL="github"
@@ -299,6 +300,8 @@ usage() {
                                            三网回程与单线程速度检测
   sudo ./bbr-tune.sh qdisc --qdisc ALGO      单独更改出口队列，不改 TCP 参数
   ./bbr-tune.sh status [--iface DEV]         查看当前 TCP/BBR 状态
+  sudo ./bbr-tune.sh backup-current [--iface DEV] [--remark TEXT]
+                                           手动备份当前参数（首次备份作为原始参数）
   ./bbr-tune.sh history                      查看历史测试会话
   ./bbr-tune.sh history-compare --session ID  对比当前、测试前及历史选中参数
   ./bbr-tune.sh history-params --session ID   查看历史会话测试前的原始参数
@@ -364,7 +367,7 @@ parse_args() {
   fi
   case "$1" in
     kernel) COMMAND=kernel; shift; KERNEL_ARGS=("$@"); return ;;
-    menu|autotune|network-test|qdisc|status|history|history-compare|history-params|apply-history|update|confirm|rollback|cleanup-data|cleanup-backups|cleanup-history|help) COMMAND="$1"; shift ;;
+    menu|autotune|network-test|qdisc|status|backup-current|history|history-compare|history-params|apply-history|update|confirm|rollback|cleanup-data|cleanup-backups|cleanup-history|help) COMMAND="$1"; shift ;;
     --help|-h) COMMAND="help"; shift ;;
     --version) printf '%s %s\n' "$PROGRAM" "$VERSION"; exit 0 ;;
     *) die "未知命令：$1" ;;
@@ -384,6 +387,7 @@ parse_args() {
       --target-utilization) need_value "$@"; TARGET_UTILIZATION="$2"; shift 2 ;;
       --max-retrans-percent) need_value "$@"; MAX_RETRANS_PERCENT="$2"; shift 2 ;;
       --backup) need_value "$@"; BACKUP_PATH="$2"; shift 2 ;;
+      --remark) need_value "$@"; BACKUP_REMARK="$2"; shift 2 ;;
       --session) need_value "$@"; HISTORY_SESSION="$2"; shift 2 ;;
       --after) HISTORY_PARAMS_AFTER="1"; shift ;;
       --channel) need_value "$@"; UPDATE_CHANNEL="$2"; shift 2 ;;
@@ -1429,7 +1433,7 @@ EOF_SERVICE
 backup_file() {
   local backup="$1" path="$2" tag="$3"
   if [[ -e "$path" || -L "$path" ]]; then
-    cp -a "$path" "${backup}/${tag}.file"
+    cp -a "$path" "${backup}/${tag}.file" || return 1
     printf '%s\tpresent\t%s\n' "$tag" "$path" >>"${backup}/files.tsv"
   else
     printf '%s\tabsent\t%s\n' "$tag" "$path" >>"${backup}/files.tsv"
@@ -1471,15 +1475,15 @@ original_backup_path() {
 }
 
 create_backup() {
-  local iface="$1" backup key value layout service_enabled="unknown" service_active="unknown"
+  local iface="$1" update_latest="${2:-1}" backup_remark="${3:-}" backup key value layout service_enabled="unknown" service_active="unknown"
   backup="${BACKUP_ROOT}/${SESSION_ID}"
-  mkdir -p "$backup"
-  : >"${backup}/files.tsv"
-  backup_file "$backup" "$SYSCTL_FILE" sysctl
-  backup_file "$backup" "$MODULES_FILE" modules
-  backup_file "$backup" "$ENV_FILE" env
-  backup_file "$backup" "$QDISC_HELPER" helper
-  backup_file "$backup" "$SERVICE_FILE" service
+  mkdir -p "$BACKUP_ROOT" "$backup" || return 1
+  : >"${backup}/files.tsv" || return 1
+  backup_file "$backup" "$SYSCTL_FILE" sysctl || return 1
+  backup_file "$backup" "$MODULES_FILE" modules || return 1
+  backup_file "$backup" "$ENV_FILE" env || return 1
+  backup_file "$backup" "$QDISC_HELPER" helper || return 1
+  backup_file "$backup" "$SERVICE_FILE" service || return 1
   if systemd_available; then
     service_enabled="$(systemctl is-enabled bbr-tcp-tuning.service 2>/dev/null || true)"
     service_active="$(systemctl is-active bbr-tcp-tuning.service 2>/dev/null || true)"
@@ -1491,30 +1495,55 @@ create_backup() {
     qdisc_json equal "$QDISC_ORIGINAL_JSON" "${backup}/qdisc-original.json" || { error "队列配置在预检后发生变化，未开始修改"; return 1; }
     qdisc_json plan "${backup}/qdisc-original.json" >"${backup}/qdisc-original.tsv" || return 1
   fi
-  cat >"${backup}/meta.env" <<EOF_META
+  cat >"${backup}/meta.env" <<EOF_META || return 1
 IFACE=$(printf '%q' "$iface")
 ROOT_QDISC=$(printf '%q' "$(awk '$1=="root"{print $2}' <<<"$layout")")
 SERVICE_ENABLED=$(printf '%q' "$service_enabled")
 SERVICE_ACTIVE=$(printf '%q' "$service_active")
 QDISC_POLICY=$(printf '%q' "$QDISC_POLICY")
 EOF_META
-  : >"${backup}/sysctl.tsv"
+  : >"${backup}/sysctl.tsv" || return 1
   for key in "${TUNING_SYSCTL_KEYS[@]}"; do
     (( ! QDISC_ONLY )) || continue
     [[ "$QDISC_POLICY" != preserve || "$key" != net.core.default_qdisc ]] || continue
     if sysctl_exists "$key"; then
       value="$(sysctl_get "$key")"
-      printf '%s\t%s\n' "$key" "$value" >>"${backup}/sysctl.tsv"
+      printf '%s\t%s\n' "$key" "$value" >>"${backup}/sysctl.tsv" || return 1
     fi
   done
-  : >"${backup}/observed.tsv"
+  : >"${backup}/observed.tsv" || return 1
   for key in "${OBSERVED_SYSCTL_KEYS[@]}"; do
     value="$(sysctl_get "$key")"
-    printf '%s\t%s\n' "$key" "${value:-<内核不支持>}" >>"${backup}/observed.tsv"
+    printf '%s\t%s\n' "$key" "${value:-<内核不支持>}" >>"${backup}/observed.tsv" || return 1
   done
+  if [[ -n "$backup_remark" ]]; then printf '%s\n' "$backup_remark" >"${backup}/remark.txt" || return 1; fi
   original_backup_path >/dev/null || return 1
-  ln -sfn "$backup" "$LATEST_BACKUP"
+  if [[ "$update_latest" == 1 ]]; then ln -sfn "$backup" "$LATEST_BACKUP" || return 1; fi
   printf '%s\n' "$backup"
+}
+
+backup_current_command() {
+  require_linux; require_root
+  for cmd in ip tc sysctl awk; do have "$cmd" || die "缺少命令：$cmd"; done
+  local iface backup original remark="${BACKUP_REMARK:-默认}"
+  [[ "$remark" != *$'\n'* && "$remark" != *$'\r'* && "$remark" != *$'\t'* && ${#remark} -le 100 ]] || die "备注须为 100 字以内的单行文字"
+  iface="$(resolve_iface)"
+  [[ -n "$iface" ]] || die "无法识别出口网卡，请使用 --iface 指定"
+  SESSION_ID="manual-$(date +%Y%m%d-%H%M%S-%N)-$$"
+  backup="${BACKUP_ROOT}/${SESSION_ID}"
+  [[ ! -e "$backup" && ! -L "$backup" ]] || die "备份目录已存在：$backup"
+  if ! create_backup "$iface" 0 "$remark" >/dev/null; then
+    [[ ! -d "$backup" || -L "$backup" ]] || rm -rf -- "$backup"
+    die "手动备份失败，未保存当前参数"
+  fi
+  original="$(original_backup_path_readonly)" || die "已保存备份，但无法读取原始备份标记：$backup"
+  info "当前参数已备份：$backup"
+  info "备注：$remark"
+  if [[ "$original" == "$backup" ]]; then
+    info "此备份已设为原始参数；后续状态对比将使用它"
+  else
+    info "原始参数仍为首次备份：$original"
+  fi
 }
 
 cleanup_parse_selection() {
@@ -1536,7 +1565,7 @@ cleanup_parse_selection() {
 }
 
 cleanup_backups_interactive() {
-  local original backup selected choice index answer latest newest active
+  local original backup selected choice index answer latest newest active remark
   local -a backups=() selected_backups=()
   [[ -d "$BACKUP_ROOT" && ! -L "$BACKUP_ROOT" ]] || { info "当前没有备份可清理"; return 0; }
   original="$(original_backup_path)" || { error "无法确认原始备份，已停止清理"; return 1; }
@@ -1550,14 +1579,16 @@ cleanup_backups_interactive() {
     printf '  原始备份、当前使用会话的备份及待确认的安全回滚备份不可删除。\n'
     for index in "${!backups[@]}"; do
       backup="${backups[$index]}"
+      remark=""
+      if [[ -r "${backup}/remark.txt" ]]; then remark="  备注：$(head -n 1 "${backup}/remark.txt")"; fi
       if [[ "$backup" == "$original" ]]; then
-        printf '  %2d  %s  [原始备份，保留]\n' "$((index+1))" "${backup##*/}"
+        printf '  %2d  %s  [原始备份，保留]%s\n' "$((index+1))" "${backup##*/}" "$remark"
       elif [[ "${backup##*/}" == "$active" ]]; then
-        printf '  %2d  %s  [当前使用，保留]\n' "$((index+1))" "${backup##*/}"
+        printf '  %2d  %s  [当前使用，保留]%s\n' "$((index+1))" "${backup##*/}" "$remark"
       elif [[ -f "$(pending_path "$backup")/armed" ]]; then
-        printf '  %2d  %s  [等待安全回滚，保留]\n' "$((index+1))" "${backup##*/}"
+        printf '  %2d  %s  [等待安全回滚，保留]%s\n' "$((index+1))" "${backup##*/}" "$remark"
       else
-        printf '  %2d  %s\n' "$((index+1))" "${backup##*/}"
+        printf '  %2d  %s%s\n' "$((index+1))" "${backup##*/}" "$remark"
       fi
     done
     printf '   0  返回\n'
@@ -3341,12 +3372,17 @@ status_original_comparison() {
   original="$(original_backup_path_readonly)" || {
     if [[ -e "${BACKUP_ROOT%/*}/original-backup" || -L "${BACKUP_ROOT%/*}/original-backup" ]]; then
       printf '  无法读取原始备份；请检查原始备份标记和备份目录。\n'
+    elif [[ -d "$BACKUP_ROOT" && ! -r "$BACKUP_ROOT" ]]; then
+      printf '  无法读取备份目录；请使用 sudo 查看原始参数。\n'
     else
       printf '  尚无可用的原始备份；首次调优前会自动保存。\n'
     fi
     return 0
   }
   printf '  原始＝首次完整备份 %s；当前＝现在生效。\n' "${original##*/}"
+  if [[ -r "${original}/remark.txt" ]]; then
+    printf '  原始备份备注：%s\n' "$(cat "${original}/remark.txt")"
+  fi
   snapshot="${original}/observed.tsv"
   [[ -r "$snapshot" ]] || snapshot="${original}/sysctl.tsv"
   for key in net.ipv4.tcp_congestion_control net.core.default_qdisc \
@@ -3831,6 +3867,22 @@ ui_execute() {
   return "$rc"
 }
 
+ui_status() {
+  local choice remark
+  ui_execute 1 status --iface "$IFACE" || return 1
+  printf '\n  1  手动备份当前参数\n  0  返回主菜单\n'
+  while true; do
+    read -r -p '请选择：' choice || return 0
+    case "$choice" in
+      1) break ;;
+      0|'') return 0 ;;
+      *) printf '请输入 0 或 1\n' ;;
+    esac
+  done
+  remark="$(ui_read_text '备份备注（留空使用默认）' '默认')" || return 0
+  ui_execute 1 backup-current --iface "$IFACE" --remark "$remark"
+}
+
 ui_update() {
   local choice channel base
   section "更新工具 / 选择下载渠道"
@@ -4003,7 +4055,7 @@ menu() {
     read -r -p "请选择：" choice || return
     case "$choice" in
       1) ui_autotune || true ;;
-      2) ui_execute 0 status --iface "$IFACE" || true ;;
+      2) ui_status || true ;;
       3) ui_execute 1 history || true ;;
       4) ui_execute 1 confirm || true ;;
       5) ui_execute 1 rollback || true ;;
@@ -4033,7 +4085,7 @@ main() {
     require_linux; require_root
     stop_expired_session
   fi
-  case "$COMMAND" in autotune|qdisc|apply-history|confirm|rollback|cleanup-data|cleanup-backups|cleanup-history) acquire_operation_lock ;; esac
+  case "$COMMAND" in autotune|qdisc|backup-current|apply-history|confirm|rollback|cleanup-data|cleanup-backups|cleanup-history) acquire_operation_lock ;; esac
   case "$COMMAND" in
     menu) menu ;;
     autotune) autotune ;;
@@ -4041,6 +4093,7 @@ main() {
     qdisc) qdisc_command ;;
     kernel) kernel_command ;;
     status) status_command ;;
+    backup-current) backup_current_command ;;
     history) history_command ;;
     history-compare) history_compare_command ;;
     history-params) history_params_command ;;
