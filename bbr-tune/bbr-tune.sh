@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.16"
+VERSION="2.10.17"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -1371,7 +1371,14 @@ atomic_write() {
 }
 
 write_persistent_config() {
-  local iface="$1" buffer_mib="$2" buffer_bytes raw filtered
+  local iface="$1" buffer_mib="$2" scope="${3:-all}" buffer_bytes raw filtered
+  case "$scope" in
+    all) ;;
+    tcp-only)
+      [[ "$QDISC_POLICY" == preserve ]] || die "仅保存 TCP 参数时必须保留当前队列"
+      ;;
+    *) die "不支持的持久化范围：$scope" ;;
+  esac
   buffer_bytes=$(( buffer_mib * 1048576 ))
   raw="$(mktemp)"; filtered="$(mktemp)"
   build_sysctl_content "$buffer_bytes" >"$raw"
@@ -1381,6 +1388,17 @@ write_persistent_config() {
   fi
   atomic_write "$SYSCTL_FILE" 0644 <"$filtered"
   rm -f "$raw" "$filtered"
+  if [[ "$scope" == tcp-only ]]; then
+    # Leave queue boot settings with their existing service or manager.
+    # Add BBR without replacing other module declarations.
+    if [[ ! -r "$MODULES_FILE" ]] || ! grep -Eq '^[[:space:]]*tcp_bbr([[:space:]]*(#.*)?)?$' "$MODULES_FILE"; then
+      {
+        if [[ -r "$MODULES_FILE" ]]; then cat "$MODULES_FILE"; fi
+        printf '\ntcp_bbr\n'
+      } | atomic_write "$MODULES_FILE" 0644
+    fi
+    return 0
+  fi
   write_qdisc_persistence "$iface"
 }
 
@@ -3653,7 +3671,7 @@ apply_history_command() {
   printf '  待应用：BBR、TCP 自动缓冲及 %s MiB 缓存上限\n' "$historical_mib"
   printf '  当前网卡：%s；保留当前出口队列和整形设置\n' "$iface"
   printf '  TCP 聚合内存阈值按当前服务器内存重新计算\n'
-  printf '  开机配置：%s；安全回滚：%s 秒\n' "$([[ "$PERSIST_FINAL" == 1 ]] && echo 写入 || echo 不写入)" "$AUTO_ROLLBACK_SECONDS"
+  printf '  开机配置：%s；安全回滚：%s 秒\n' "$([[ "$PERSIST_FINAL" == 1 ]] && echo 仅写入TCP参数 || echo 不写入)" "$AUTO_ROLLBACK_SECONDS"
   printf '  历史测速不会代表当前链路表现；应用后请从独立 SSH 会话验证业务。\n'
   if (( ! YES )); then
     [[ -t 0 ]] || die "非交互应用历史参数需要 --yes"
@@ -3671,12 +3689,12 @@ apply_history_command() {
   pending_guard
   schedule_rollback "$BACKUP_DIR"
   apply_candidate "$iface" "$((10#$historical_mib))"
-  if (( PERSIST_FINAL )); then write_persistent_config "$iface" "$((10#$historical_mib))"; fi
+  if (( PERSIST_FINAL )); then write_persistent_config "$iface" "$((10#$historical_mib))" tcp-only; fi
   capture_state "$iface" "${SESSION_DIR}/system-after.txt"
   {
     printf '历史参数应用记录\n来源会话：%s\n来源时间：%s\n' "$HISTORY_SESSION" "$historical_time"
     printf 'TCP 缓存上限：%s MiB\n当前出口网卡：%s\n当前队列：保留\n' "$historical_mib" "$iface"
-    printf '开机配置：%s\n安全回滚：%s 秒\n' "$([[ "$PERSIST_FINAL" == 1 ]] && echo 已写入 || echo 未写入)" "$AUTO_ROLLBACK_SECONDS"
+    printf '开机配置：%s\n队列开机配置：保留，未修改\n安全回滚：%s 秒\n' "$([[ "$PERSIST_FINAL" == 1 ]] && echo 仅写入TCP参数 || echo 未写入)" "$AUTO_ROLLBACK_SECONDS"
   } >"${SESSION_DIR}/history-application.txt"
   rm -f "$(pending_path "$BACKUP_DIR")/owner"
   if (( AUTO_ROLLBACK_SECONDS == 0 )); then

@@ -151,7 +151,7 @@ pending_guard() { :; }
 schedule_rollback() { mkdir -p "$PENDING_DIR/new-session"; : >"$PENDING_DIR/new-session/owner"; }
 apply_candidate() { printf '%s %s\n' "$1" "$2" >"$tmp/applied"; }
 capture_state() { printf 'applied\n' >"$2"; }
-write_persistent_config() { : >"$tmp/persisted"; }
+write_persistent_config() { [[ "${3:-}" == tcp-only ]] || fail 'historical persistence may overwrite queue settings'; : >"$tmp/persisted"; }
 HISTORY_SESSION=old-session; YES=1; PERSIST_FINAL=0
 (apply_history_command) >"$tmp/apply.log"
 [[ "$(cat "$tmp/applied")" == 'eth0 8' ]] || fail 'historical buffer not applied'

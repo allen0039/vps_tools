@@ -1,6 +1,6 @@
 # bbr-tune 使用指南
 
-**版本 2.10.16** · 在远程 Linux 服务器上运行的 TCP / BBR 调优工具。
+**版本 2.10.17** · 在远程 Linux 服务器上运行的 TCP / BBR 调优工具。
 
 本目录基于 [dingding229/bbr-tune](https://github.com/dingding229/bbr-tune) 修改。上游仓库目前未提供明确的开源许可证；本目录不适用 VPS Tools 根目录的 MIT 许可证。公开发布或分发修改版前，请先确认已获得相应授权。
 
@@ -302,6 +302,8 @@ sudo bbr-tune history-params --session 20260929-183916-417057 --after
 sudo bbr-tune apply-history --session 20260929-183916-417057
 sudo bbr-tune apply-history --session 20260929-183916-417057 --persist
 ```
+
+应用历史参数时，`--persist` 仅保存 TCP 参数，不更改队列的开机配置。已有 CAKE 带宽、队列加载脚本及服务启用状态保持不变；没有队列开机配置时也不会新建。本工具会确保 BBR 模块可在开机时加载，并保留其他模块设置。
 
 缺少最终复核或生效状态文件的旧记录仍可查看，但不能直接应用。
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Remote Linux kernel lifecycle; kept separate from TCP measurement and rollback.
 set -Eeuo pipefail
-KERNEL_HELPER_VERSION="2.10.16"
+KERNEL_HELPER_VERSION="2.10.17"
 K_ROOT="/var/lib/bbr-tcp-tuning/kernels"
 K_LATEST="${K_ROOT}/latest"
 K_YES=0
