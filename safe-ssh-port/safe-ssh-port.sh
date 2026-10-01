@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
-ALLENTOOL_VERSION=0.1.11
+ALLENTOOL_VERSION=0.1.12
 INSTALL_PATH=${SAFE_SSH_PORT_INSTALL_PATH:-/usr/local/sbin/safe-ssh-port}
 ALLENTOOL_PATH=${ALLENTOOL_PATH:-/usr/local/bin/allentool}
 SSHD_CONFIG=${SAFE_SSH_PORT_CONFIG:-/etc/ssh/sshd_config}
@@ -1097,6 +1097,8 @@ occupied_port_records() {
 
 show_occupied_ports() {
     local tcp_snapshot udp_snapshot records
+    printf '\n已占用的监听端口（含本机回环地址）\n'
+    printf '%s\n' '----------------------------------------'
     if ! tcp_snapshot=$("$SS_BIN" -H -ltnp 2>/dev/null) ||
        ! udp_snapshot=$("$SS_BIN" -H -lunp 2>/dev/null); then
         warn '无法读取监听端口，请检查 ss 命令是否可用。'
@@ -1109,8 +1111,6 @@ show_occupied_ports() {
             printf '%s\n' "$udp_snapshot" | occupied_port_records udp
         } | sort -t $'\t' -k1,1n -k2,2 -k3,3 -u
     )
-    printf '\n已占用的监听端口（含本机回环地址）\n'
-    printf '%s\n' '----------------------------------------'
     if [[ -z $records ]]; then
         printf '  （未发现 TCP/UDP 监听端口）\n'
         return 0
@@ -2689,7 +2689,7 @@ firewall_menu() {
         printf '%s\n' '----------------------------------------'
         printf '  0. 返回上一级菜单\n'
         printf '请选择 [0-12]: '
-        read -r choice
+        if ! read -r choice; then return 0; fi
         case $choice in
             1) firewall_open_interactive ;;
             2) firewall_close_interactive ;;
@@ -2702,7 +2702,11 @@ firewall_menu() {
             9) country_access_menu ;;
             10) show_firewall_operation_history ;;
             11) firewall_allow_all_interactive ;;
-            12) show_occupied_ports ;;
+            12)
+                show_occupied_ports || true
+                printf '\n按回车返回防火墙菜单...'
+                if ! read -r _; then return 0; fi
+                ;;
             0|q|Q) return 0 ;;
             *) printf '选项无效，请重新输入。\n' ;;
         esac
