@@ -1,0 +1,17 @@
+name: VPS Toolbox Checks
+on:
+  push:
+    paths: ["vpstools.sh", "install.sh", "tests/**", ".github/workflows/toolbox.yml"]
+  pull_request:
+    paths: ["vpstools.sh", "install.sh", "tests/**", ".github/workflows/toolbox.yml"]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell syntax
+        run: bash -n install.sh && bash -n vpstools.sh
+      - name: Check toolbox routing and installation
+        run: python3 -m unittest discover -s tests -p 'test_*.py'

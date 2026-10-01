@@ -1,153 +1,177 @@
 # VPS Tools
 
-个人 VPS 运维脚本集合。每个工具使用独立目录，包含可执行脚本和详细说明。
-安装命令同时提供 GitHub 和 Gitee 两种来源，任选一种；无法访问时可自行切换。
+面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、DNS、Swap、TCP / BBR 调优和妙妙屋 Agent 重启整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
 
-## 工具列表
+[GitHub 仓库](https://github.com/allen0039/vps_tools) · [Gitee 镜像](https://gitee.com/allen0039/vps_tools)
 
-| 工具 | 用途 | 文档 |
-| --- | --- | --- |
-| `restart-mmw-agent` | 完整重启并验证 `mmw-agent.service`，显示 PID、内存和 TCP 连接变化 | [查看说明](restart-mmw-agent/README.md) |
-| `safe-ssh-port` | 安全切换 OpenSSH 单端口，并管理端口、IP 与国家黑白名单 | [查看说明](safe-ssh-port/README.md) |
-| `dns_tool` | 一键切换公共或自定义 DNS，自动适配常见管理服务并支持原始配置恢复 | [查看说明](dns_tool/README.md) |
-| `swap_tool` | 创建或修复 Btrfs 等文件系统上的 `/swapfile`，确认实际启用后写入开机配置 | [查看说明](swap_tool/README.md) |
-| `bbr-tune` | 自动测试 TCP/BBR 参数、切换出口队列并提供安全回滚，快捷命令 `bbrtcp` | [查看说明](bbr-tune/README.md) |
+## 工具一览
 
-## safe-ssh-port 快速使用
+| 功能 | 能做什么 | 独立命令 | 详细文档 |
+| --- | --- | --- | --- |
+| SSH 管理 | 切换 SSH 单端口、查看状态、从历史备份恢复配置 | `allentool` / `safe-ssh-port` | [SSH 使用指南](safe-ssh-port/README.md) |
+| 防火墙管理 | 管理 TCP/UDP 端口、保护 SSH、配置 IP 与国家黑白名单 | `allentool` 内的防火墙菜单 | [防火墙说明](safe-ssh-port/README.md#交互式防火墙管理) |
+| DNS 切换 | 切换公共或自定义 IPv4/IPv6 DNS，恢复首次安装前的配置 | `dnstool` | [DNS 使用指南](dns_tool/README.md) |
+| Swap 管理 | 创建或调整 `/swapfile`，支持 Btrfs、ext4/XFS，检查实际启用状态 | `swaptool` | [Swap 使用指南](swap_tool/README.md) |
+| TCP / BBR 调优 | 测试 TCP 参数、管理出口队列、应用历史参数与回滚 | `bbrtcp` / `bbr-tune` | [BBR 使用指南](bbr-tune/README.md) |
+| 妙妙屋 Agent 重启 | 重启并验证 `mmw-agent.service`，展示 PID、内存与 TCP 连接变化 | `restart-mmw-agent` | [Agent 使用指南](restart-mmw-agent/README.md) |
 
-下载安装脚本：
+## 快速安装
+
+在 **Linux VPS 终端**执行，任选一个下载渠道。需要 Bash、root 或 sudo 权限，以及 `flock`（通常由 `util-linux` 提供）；下列命令使用 `curl` 下载。
 
 **GitHub：**
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/safe-ssh-port/safe-ssh-port.sh' -o /tmp/safe-ssh-port.sh && sudo bash /tmp/safe-ssh-port.sh install
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/install.sh' -o /tmp/vpstools-install.sh && sudo bash /tmp/vpstools-install.sh --channel github
 ```
 
 **Gitee：**
 
 ```bash
-curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/safe-ssh-port/safe-ssh-port.sh' -o /tmp/safe-ssh-port.sh && sudo bash /tmp/safe-ssh-port.sh install
+curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/install.sh' -o /tmp/vpstools-install.sh && sudo bash /tmp/vpstools-install.sh --channel gitee
 ```
 
-这是可直接复制的一整行命令，安装过程中不会进入 `less` 查看器。
-
-首次安装会同时创建正式命令 `safe-ssh-port` 和快捷命令 `allentool`。
-打开工具菜单：
+安装完成后打开工具箱：
 
 ```bash
+vpstools
+```
+
+已登录 root 的用户可以省略 `sudo`。建议先下载并检查安装器，再运行安装步骤。
+
+统一安装会部署全部 5 个工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或 DNS、创建 Swap、应用 TCP 调优参数或重启 Agent。BBR 安装器可能通过系统包管理器补齐基础依赖。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
+
+也可以克隆仓库后安装本地文件：
+
+```bash
+git clone https://github.com/allen0039/vps_tools.git
+cd vps_tools
+sudo bash install.sh
+vpstools
+```
+
+从完整本地仓库运行时，安装器使用本地文件；`--channel` 只决定需要远程下载时的来源。
+
+## 中文菜单
+
+```text
+VPS Tools 工具箱
+  1. SSH 端口与备份恢复
+  2. 防火墙管理
+  3. DNS 切换与恢复
+  4. Swap 虚拟内存
+  5. TCP / BBR 调优
+  6. 重启妙妙屋 Agent
+  7. 查看工具安装状态
+  8. 安装 / 更新全部工具
+  0. 退出
+```
+
+退出子工具后会回到总菜单。Agent 重启需要单独确认，直接回车默认取消。其他系统修改遵循各工具自己的权限检查、备份及确认流程。
+
+菜单需要交互终端；脚本或自动化场景可使用下面的命令模式。
+
+## 常用命令
+
+查看安装状态、版本和帮助：
+
+```bash
+vpstools list
+vpstools --version
+vpstools --help
+```
+
+通过统一入口调用工具：
+
+```bash
+# SSH 与防火墙菜单
+vpstools run ssh interactive
+vpstools run firewall
+
+# 查看 DNS、Swap 和 BBR 状态
+sudo vpstools run dns status
+vpstools run swap status
+vpstools run bbr status
+
+# 查看 Agent 帮助，不执行重启
+vpstools run agent --help
+```
+
+`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`firewall`、`dns`、`swap`、`bbr`、`agent`。直接执行 `vpstools run agent` 会重启服务；总菜单中的额外确认只适用于菜单操作。
+
+也可使用独立命令，例如：
+
+```bash
+dnstool
+swaptool
+bbrtcp
 allentool
 ```
 
-菜单可以修改 SSH 端口、恢复历史 SSH 设置、查看状态或管理主机防火墙。修改端口时，
-按照提示选择是否将主配置中的 `PasswordAuthentication no` 改为 `yes`、
-输入新端口，并确认云厂商安全组已经放行该端口。脚本会直接切换并自动提交，
-最终只监听新端口，不提供双端口模式。唯一有效的 `Port` 会写入
-`/etc/ssh/sshd_config`，兼容只读取主配置的 Kejilion 防火墙流程。
-服务器若启用了 UFW、firewalld 或
-restrictive iptables/ip6tables，脚本会自动在主机防火墙放行新端口。
-Debian/Ubuntu 缺少持久化工具时还会自动安装 `iptables-persistent` 并保存规则。
+需要管理员权限的操作请按提示使用 `sudo`；非交互运行时建议显式加上 `sudo`。只想安装某个工具时，使用上表对应文档中的独立安装命令。
 
-防火墙菜单会直接显示明确放行和明确关闭的 TCP/UDP 端口，并支持保护及修复 SSH
-规则、仅保留 SSH 入站、保留 SSH 与当前非回环监听端口、IP 黑白名单、国家
-黑白名单，以及安装持久化工具。IP/国家功能使用 allentool 独立链，仅在
-iptables/iptables-nft 后端启用；国家网段通过 IPdeny HTTPS 同时下载并校验
-IPv4 和 IPv6 数据。脚本会拒绝拉黑当前 SSH 客户端，并在“仅允许指定国家”
-模式中保留当前 SSH 来源。
-进入防火墙菜单时如果 Debian/Ubuntu 未安装 `iptables`，脚本会询问是否
-安装 `iptables/iptables-nft` 兼容工具，并把安装设为默认推荐选项。
-防火墙规则直接修改，不再产生按时间命名的快照备份。原生自定义 nftables 只做
-状态展示，不会猜测表和链。
-云厂商安全组仍需在服务商控制台单独管理。
+## 更新与安装机制
 
-每次修改产生的备份会保留在 `/var/lib/safe-ssh-port/backups/`。需要恢复时运行
-`allentool` 并选择“从备份恢复 SSH 设置”；脚本会列出备份时间及其中的端口。
-恢复前还会保存当前配置，恢复失败则自动还原。
-
-保持当前 SSH 会话。切换完成后另开一个终端测试新端口：
+更新全部工具：
 
 ```bash
-ssh -p 新端口 root@服务器IP
+vpstools update github
+# 或使用 Gitee
+vpstools update gitee
 ```
 
-完整参数模式、状态检查和适用范围请查看
-[safe-ssh-port 详细说明](safe-ssh-port/README.md)。
+也可以选择总菜单第 8 项，或重新执行快速安装命令。
 
-## restart-mmw-agent 快速使用
+远程安装时，安装器先查询所选渠道 `main` 分支的最新提交，再从同一个固定提交下载全部脚本。所有文件通过非空、Bash 脚本头及语法检查后，才开始部署；下载失败时尚未执行各工具安装步骤。安装锁用于防止两个工具箱安装同时运行。
 
-请先查看[工具说明](restart-mmw-agent/README.md)，然后按文档安装并运行：
+部署阶段如某个工具安装失败，安装器会停止，已经完成的安装会保留。修复错误后重新运行即可。更新覆盖确认和配置备份规则沿用各独立工具。
+
+| 安装位置 | 用途 |
+| --- | --- |
+| `/usr/local/bin/vpstools` | 工具箱统一入口 |
+| `/usr/local/lib/vpstools/install.sh` | 保存的工具箱安装器 |
+| `/usr/local/bin/`、`/usr/local/sbin/` | 各工具命令；可用 `vpstools list` 查看实际路径 |
+
+## 使用前须知
+
+主要面向 Linux VPS；SSH 工具以使用 `ssh.service` 或 `sshd.service` 的 Debian/Ubuntu 为主要适用环境。其他发行版及特殊配置请先阅读对应工具文档。Agent 重启功能需要 systemd 和已配置的 `mmw-agent.service`。
+
+- **SSH 与防火墙：** 修改端口前先放行云厂商安全组，保留当前 SSH 会话，完成后另开终端验证新端口。主机防火墙功能不代替云安全组；Docker 发布端口通常经过转发链，不在宿主机 `INPUT` 管理范围内。原生自定义 nftables、`ssh.socket` 和 SELinux 等特殊配置需按工具文档处理。
+- **DNS：** 首次安装保存的配置可用于恢复。切换成功表示配置写入成功，实际解析仍取决于 DNS 的网络可达性。可用 `getent hosts example.com` 验证，必要时运行 `sudo dnstool restore`。
+- **Swap：** 创建或调整需要足够磁盘空间。工具确认交换空间实际启用后才写入开机配置；现有 `/swapfile` 有使用量时会停止调整。特殊 Btrfs 存储布局仍可能不支持交换文件。
+- **TCP / BBR：** 测速会消耗时间与流量，结果取决于线路和测试环境。调整后按提示验证、确认或回滚；第三方内核安装需单独评估启动与驱动兼容性。
+- **Agent：** 重启会短暂中断现有代理连接。工具验证 Agent 状态并展示变化，不重启 Guard 服务。
+
+在远程服务器修改网络或启动相关配置前，建议准备云控制台、VNC 或串口等救援入口。生产环境可使用固定提交的下载地址，并在测试环境验证后部署。
+
+## 仓库结构与验证
+
+```text
+vps_tools/
+├── vpstools.sh           # 统一菜单与命令分发
+├── install.sh            # 全量安装与更新
+├── safe-ssh-port/        # SSH 与防火墙
+├── dns_tool/             # DNS 切换与恢复
+├── swap_tool/            # Swap 管理
+├── bbr-tune/             # TCP / BBR 调优
+├── restart-mmw-agent/    # Agent 重启
+└── tests/                # 工具箱测试
+```
+
+工具箱基础检查：
 
 ```bash
-sudo restart-mmw-agent
+bash -n install.sh
+bash -n vpstools.sh
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-## dns_tool 快速使用
+工具箱测试使用临时目录和模拟命令，覆盖参数转发、退出码、菜单返回、安装器调用及下载校验等行为。各子目录还包含对应工具的测试；这些检查不能替代真实 Linux VPS 上的系统兼容性验证。
 
-下载安装脚本：
+遇到问题可在 [GitHub Issues](https://github.com/allen0039/vps_tools/issues) 反馈，并提供系统版本、工具版本、执行命令及脱敏后的错误日志。
 
-**GitHub：**
+## 许可证与致谢
 
-```bash
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/dns_tool/dns_tool.sh' -o /tmp/dns_tool.sh && sudo bash /tmp/dns_tool.sh install
-```
+本仓库原创工具采用 [MIT License](LICENSE)。
 
-**Gitee：**
-
-```bash
-curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/dns_tool/dns_tool.sh' -o /tmp/dns_tool.sh && sudo bash /tmp/dns_tool.sh install
-```
-
-安装后直接运行 `dnstool` 进入中文菜单；脚本会自动通过 `sudo` 获取管理员权限。
-首次安装会立即保存初始 DNS 配置，菜单可随时一键恢复。也可以使用命令模式：
-
-```bash
-sudo dnstool set cloudflare
-sudo dnstool status
-```
-
-工具支持 Cloudflare、Google、Quad9、AdGuard、AliDNS 和 1 至 4 个自定义 IPv4/IPv6
-地址，不会重启网卡。后续重复安装或切换不会覆盖初始备份。完整菜单、多个 DNS 的
-使用方式和不同系统的处理逻辑请查看 [dns_tool 详细说明](dns_tool/README.md)。
-
-## swap_tool 快速使用
-
-在 VPS 上一键下载安装，然后通过菜单选择 1024M、2048M、4096M 或自定义大小：
-
-```bash
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/swap_tool/swap_tool.sh' -o /tmp/swap_tool.sh && sudo bash /tmp/swap_tool.sh install
-```
-
-安装后运行 `swaptool` 可以再次打开菜单；用 `swaptool --version` 查看版本号
-（当前为 0.1.3）。成功调整后会自动删除旧的 swap 文件；已存在的残余可运行
-`sudo swaptool cleanup` 清理。用 `swaptool status` 或
-`swapon --show` 检查实际启用状态。详细使用方式和安全行为见
-[swap_tool 详细说明](swap_tool/README.md)。
-
-## bbr-tune 快速使用
-
-在远程 Linux 服务器安装：
-
-**GitHub：**
-
-```bash
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/bbr-tune/install.sh' | sudo bash -s -- --install-only
-```
-
-**Gitee：**
-
-```bash
-curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/bbr-tune/install.sh' | sudo env BBR_TUNE_RAW_BASE='https://gitee.com/allen0039/vps_tools/raw/main/bbr-tune' bash -s -- --install-only
-```
-
-安装后输入 `bbrtcp` 打开交互菜单。工具在服务器上测试 TCP/BBR 参数，测速客户端在本地电脑运行；调整前会备份，完成后需确认保留，否则到期尝试回滚。详情见 [bbr-tune 使用指南](bbr-tune/README.md)。上述远程命令需等待本目录发布到对应仓库后使用。
-
-## 安全原则
-
-- 建议先下载并检查脚本，再以 `root` 权限运行。
-- 修改 SSH 端口前必须保留当前会话，并先在云厂商安全组放行新端口。
-- 使用“关闭所有宿主机入站”前应检查脚本展示的保留列表，并确保有云控制台/VNC 救援入口。
-- 脚本无法替代云控制台、VNC、IPMI 或串口等救援入口。
-- 固定版本或固定提交链接比直接执行不断变化的 `main` 分支更适合生产环境。
-
-## 许可证
-
-[MIT License](LICENSE) 适用于本仓库原创工具。`bbr-tune` 基于第三方项目且上游未提供明确许可证，不纳入该 MIT 授权；公开发布前需确认授权。
+`bbr-tune` 基于 [dingding229/bbr-tune](https://github.com/dingding229/bbr-tune) 修改，上游目前未提供明确的开源许可证，该目录不适用根目录的 MIT 授权；再分发或公开发布修改版前需确认相应授权。具体来源与第三方组件说明见 [BBR 使用指南](bbr-tune/README.md)。
