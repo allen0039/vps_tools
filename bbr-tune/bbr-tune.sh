@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.18"
+VERSION="2.10.19"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -3878,7 +3878,7 @@ ui_menu_options() {
   printf '\n  %s工具%s\n' "$UI_BLUE" "$UI_RESET"
   ui_menu_item 7 '使用说明'
   ui_menu_item 8 'BBRv3 内核管理'
-  ui_menu_item 9 '更新工具（GitHub / Gitee）'
+  ui_menu_item 9 '更新工具'
   ui_menu_item 10 '清理数据'
   ui_menu_item 11 '三网回程 / 单线程速度检测'
   ui_menu_item 0 '退出'
