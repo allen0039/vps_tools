@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.14"
+VERSION="2.10.15"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -346,7 +346,8 @@ usage() {
   使用 TcpQuality 的独立检测入口；both 默认运行 IPv4/IPv6/IPv4 大包
   回程及三网单线程速度，route 仅运行回程，speed 仅运行速度。
   检测需联网下载并运行 TcpQuality，可能下载临时 Debian rootfs；
-  默认不上传在线报告。测速期间仍受本工具的安全回滚计时器约束。
+  检测结束后可选择上传在线报告，回车默认不上传；非交互运行不上传。
+  测速期间仍受本工具的安全回滚计时器约束。
 USAGE
 }
 is_integer() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
@@ -3260,9 +3261,28 @@ cleanup_network_test_logs() {
   rmdir -- "$dir" 2>/dev/null || true
 }
 
+network_test_can_ask_upload() { [[ -t 0 && -t 1 ]]; }
+
+network_test_upload_report() {
+  local csv="$1" response="$2" report_time="$3" http_code report_url
+  if ! http_code="$(curl -4 -sS --connect-timeout 10 --max-time 30 --retry 2 \
+      -o "$response" -w '%{http_code}' \
+      -H 'Content-Type: text/csv; charset=utf-8' \
+      -H "X-Report-Time: $report_time" \
+      --data-binary "@$csv" https://tcpquality.ibsgss.uk/generate)"; then
+    return 1
+  fi
+  [[ "$http_code" =~ ^2[0-9][0-9]$ && -s "$response" ]] || return 1
+  report_url="$(sed -nE 's/.*"url"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$response" | head -n 1)"
+  [[ "$report_url" == https://tcpquality.ibsgss.uk/* ]] || return 1
+  printf '%s\n' "$report_url" | LC_ALL=C grep -Eq '^https://tcpquality\.ibsgss\.uk/[A-Za-z0-9._~:/?&=%#-]+$' || return 1
+  info "报告链接：$report_url"
+}
+
 network_test_command() (
   require_linux; require_root
-  local entry rc
+  local entry rc run_dir answer csv response report_time
+  local -a csv_files=()
   local -a test_args=(--no-rank-upload)
   case "$NETWORK_TEST_MODE" in
     both) test_args=(-v4 -v6 --speedtest "${test_args[@]}") ;;
@@ -3275,8 +3295,10 @@ network_test_command() (
   have awk || die "缺少 awk，无法处理 TcpQuality 检测输出"
   cleanup_network_test_logs || warn "旧版三网检测日志未能完整清理"
   umask 077
-  entry="$(mktemp "${TMPDIR:-/tmp}/bbr-tcpquality.XXXXXX")" || die "无法创建临时文件"
-  trap 'rm -f -- "$entry"; cleanup_network_test_logs || warn "旧版三网检测日志未能完整清理"' EXIT
+  run_dir="$(mktemp -d "${TMPDIR:-/tmp}/bbr-tcpquality.XXXXXX")" || die "无法创建临时目录"
+  entry="${run_dir}/entry.sh"
+  response="${run_dir}/upload-response.json"
+  trap 'rm -rf -- "$run_dir"; cleanup_network_test_logs || warn "旧版三网检测日志未能完整清理"' EXIT
   if ! curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 \
       https://tcpquality.ibsgss.uk/run -o "$entry"; then
     die "无法下载 TcpQuality 检测入口，请检查网络后重试"
@@ -3287,14 +3309,28 @@ network_test_command() (
   if [[ -f "${PENDING_LATEST}/armed" ]]; then
     warn "当前配置仍受安全回滚计时器约束；长时间检测可能跨过回滚时间，请及时验证并确认参数"
   fi
-  printf '  检测会访问上游节点并消耗流量；已关闭在线报告上传。\n\n'
-  if bash "$entry" "${test_args[@]}" 2>&1 \
+  printf '  检测会访问上游节点并消耗流量；结束后可选择上传报告，默认不上传。\n\n'
+  if TCPQUALITY_OUTPUT_DIR="$run_dir" bash "$entry" "${test_args[@]}" 2>&1 \
       | awk 'index($0, "特价VPS补货TG频道：") == 0 { print; fflush() }'; then
     info "三网检测完成"
   else
     rc=$?
     warn "三网检测未完成（退出码 ${rc}）"
     return "$rc"
+  fi
+  report_time="$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST')"
+  network_test_can_ask_upload || return 0
+  read -r -p '上传本次检测结果并生成报告链接？[y/N]：' answer || answer=""
+  case "$answer" in y|Y|yes|YES|Yes|是) ;; *) info "已跳过报告上传"; return 0 ;; esac
+  for csv in "$run_dir"/zstatic_nping_*.csv; do
+    [[ -f "$csv" && ! -L "$csv" ]] && csv_files+=("$csv")
+  done
+  if (( ${#csv_files[@]} != 1 )) || [[ ! -s "${csv_files[0]:-}" ]]; then
+    warn "未找到唯一且有效的本次测速 CSV，无法上传报告"
+    return 0
+  fi
+  if ! network_test_upload_report "${csv_files[0]}" "$response" "$report_time"; then
+    warn "报告上传失败，请稍后重新检测并重试"
   fi
 )
 
