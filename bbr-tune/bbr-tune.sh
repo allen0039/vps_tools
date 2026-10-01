@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.17"
+VERSION="2.10.18"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -3279,6 +3279,18 @@ cleanup_network_test_logs() {
   rmdir -- "$dir" 2>/dev/null || true
 }
 
+network_test_display_output() {
+  # TcpQuality redraws its progress bars with carriage returns, often without
+  # a newline until the entire test ends. Flush each update as it arrives.
+  if have gawk; then
+    gawk 'BEGIN { RS="\r|\n" }
+      index($0, "特价VPS补货TG频道：") == 0 { printf "%s%s", $0, RT; fflush() }'
+  else
+    awk 'BEGIN { RS="\r|\n" }
+      index($0, "特价VPS补货TG频道：") == 0 { print; fflush() }'
+  fi
+}
+
 network_test_can_ask_upload() { [[ -t 0 && -t 1 ]]; }
 
 network_test_upload_report() {
@@ -3329,7 +3341,7 @@ network_test_command() (
   fi
   printf '  检测会访问上游节点并消耗流量；结束后可选择上传报告，默认不上传。\n\n'
   if TCPQUALITY_OUTPUT_DIR="$run_dir" bash "$entry" "${test_args[@]}" 2>&1 \
-      | awk 'index($0, "特价VPS补货TG频道：") == 0 { print; fflush() }'; then
+      | network_test_display_output; then
     info "三网检测完成"
   else
     rc=$?

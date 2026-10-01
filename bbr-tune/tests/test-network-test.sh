@@ -41,6 +41,11 @@ curl() {
 printf '%s\n' "$*" >>"$NETWORK_TEST_CALLS"
 printf '\033[2m特价VPS补货TG频道： ibsgss | 感谢 Zstatic CDN 节点\033[0m\n'
 printf 'mock TcpQuality result\n'
+if [[ -n "${NETWORK_PROGRESS_GATE:-}" ]]; then
+  printf '\r测速进度 [----------] 0/2\r测速进度 [#####-----] 1/2\r'
+  while [[ ! -e "$NETWORK_PROGRESS_GATE" ]]; do sleep 0.05; done
+  printf '\n'
+fi
 if [[ "$NETWORK_TEST_CSV" == 1 ]]; then
   printf 'mock CSV for %s\n' "$*" >"$TCPQUALITY_OUTPUT_DIR/zstatic_nping_mock.csv"
 fi
@@ -65,6 +70,26 @@ if grep -q '特价VPS补货TG频道' "$tmp/both.out"; then
 fi
 grep -q 'mock TcpQuality result' "$tmp/both.out" || fail 'measurement output was hidden'
 if grep -q 'network-tests/' "$tmp/both.out"; then fail 'obsolete log path was shown'; fi
+
+NETWORK_PROGRESS_GATE="$tmp/progress-release"
+export NETWORK_PROGRESS_GATE
+NETWORK_TEST_MODE=speed network_test_command >"$tmp/progress.out" 2>&1 &
+progress_pid=$!
+for (( attempt=0; attempt<60; attempt++ )); do
+  grep -q '测速进度.*0/2' "$tmp/progress.out" && break
+  sleep 0.05
+done
+if ! grep -q '测速进度.*0/2' "$tmp/progress.out"; then
+  : >"$NETWORK_PROGRESS_GATE"
+  wait "$progress_pid" || true
+  fail 'carriage-return progress was buffered until test exit'
+fi
+: >"$NETWORK_PROGRESS_GATE"
+wait "$progress_pid" || fail 'progress test failed'
+grep -q 'mock TcpQuality result' "$tmp/progress.out" || fail 'progress filtering hid the result'
+if grep -q '特价VPS补货TG频道' "$tmp/progress.out"; then fail 'progress filtering leaked the advertisement'; fi
+unset NETWORK_PROGRESS_GATE
+
 NETWORK_TEST_RC=37
 export NETWORK_TEST_RC
 printf 'legacy failure log\n' >"$STATE_DIR/network-tests/previous-failure.log"
@@ -79,7 +104,7 @@ fi
 if NETWORK_TEST_MODE=unknown network_test_command >"$tmp/invalid.out" 2>&1; then
   fail 'invalid test mode accepted'
 fi
-[[ "$(wc -l <"$NETWORK_TEST_CALLS" | tr -d ' ')" == 4 ]] || fail 'unexpected upstream invocation'
+[[ "$(wc -l <"$NETWORK_TEST_CALLS" | tr -d ' ')" == 5 ]] || fail 'unexpected upstream invocation'
 
 # Tuning ends without starting or offering a three-network test.
 guess_server_address() { echo 203.0.113.10; }
