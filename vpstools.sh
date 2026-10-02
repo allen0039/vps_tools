@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # VPS Tools 的统一入口；具体操作交给独立工具。
 set -Eeuo pipefail
-VERSION=0.2.0
+VERSION=0.2.1
 BIN_DIR=${VPS_TOOLS_BIN_DIR:-/usr/local/bin}
 SBIN_DIR=${VPS_TOOLS_SBIN_DIR:-/usr/local/sbin}
 LIB_DIR=${VPS_TOOLS_LIB_DIR:-/usr/local/lib/vpstools}

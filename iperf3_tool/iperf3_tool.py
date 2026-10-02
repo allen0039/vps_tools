@@ -31,7 +31,7 @@ if sys.version_info < (3, 8):
 
 from dataclasses import asdict, dataclass
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 SCRIPT = Path(__file__).resolve()
 DIRECTION_NAMES = {"download": "下载：VPS → 本地", "upload": "上传：本地 → VPS"}
 
@@ -46,6 +46,68 @@ class Cancelled(Exception):
 
 def say(message):
     print(message, flush=True)
+
+
+def system_package_manager():
+    release = {}
+    try:
+        for line in Path("/etc/os-release").read_text().splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in ("ID", "ID_LIKE", "PRETTY_NAME"):
+                release[key] = value.strip().strip("\"'")
+    except OSError:
+        pass
+    managers = {"debian": ("apt-get",), "ubuntu": ("apt-get",),
+                "rhel": ("dnf", "yum"), "fedora": ("dnf", "yum"),
+                "centos": ("dnf", "yum"), "rocky": ("dnf", "yum"),
+                "almalinux": ("dnf", "yum"), "amzn": ("dnf", "yum"),
+                "suse": ("zypper",), "opensuse": ("zypper",),
+                "opensuse-leap": ("zypper",), "opensuse-tumbleweed": ("zypper",),
+                "alpine": ("apk",), "arch": ("pacman",), "manjaro": ("pacman",)}
+    candidates = ("apt-get", "dnf", "yum", "zypper", "apk", "pacman")
+    for identity in (release.get("ID", "") + " " + release.get("ID_LIKE", "")).split():
+        if identity in managers:
+            candidates = managers[identity]
+            break
+    for manager in candidates:
+        if shutil.which(manager):
+            return release.get("PRETTY_NAME", "Linux"), manager
+    raise ProbeError("无法识别可用的系统包管理器，请手动安装 iperf3 后重试")
+
+
+def ensure_iperf3():
+    if shutil.which("iperf3"):
+        return
+    system, manager = system_package_manager()
+    prefix = []
+    if os.geteuid() != 0:
+        if not shutil.which("sudo"):
+            raise ProbeError("自动安装 iperf3 需要 root 或 sudo 权限，请以 root 重新运行")
+        prefix = ["sudo", "--"]
+    say("检测到 {}，缺少 iperf3，正在使用 {} 自动安装……".format(system, manager))
+
+    def run(command, **kwargs):
+        result = subprocess.run(prefix + command, **kwargs)
+        if result.returncode:
+            raise ProbeError("依赖安装失败（{}，退出码 {}）；请检查权限、网络及软件源后重试"
+                             .format(command[0], result.returncode))
+
+    if manager == "apt-get":
+        run(["apt-get", "update"])
+        # Debian 的 iperf3 安装脚本依据此选项决定是否启用常驻服务。
+        run(["debconf-set-selections"], input="iperf3 iperf3/start_daemon boolean false\n", text=True)
+        run(["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "iperf3"])
+    elif manager in ("dnf", "yum"):
+        run([manager, "install", "-y", "iperf3"])
+    elif manager == "zypper":
+        run([manager, "--non-interactive", "install", "iperf3"])
+    elif manager == "apk":
+        run([manager, "add", "--no-cache", "iperf3"])
+    else:
+        run([manager, "-S", "--needed", "--noconfirm", "iperf3"])
+    if not shutil.which("iperf3"):
+        raise ProbeError("安装完成后仍未找到 iperf3，请检查软件包及 PATH 后重试")
+    say("iperf3 已安装，继续测速。")
 
 
 def integer(value, low, high, name):
@@ -704,16 +766,15 @@ def main(argv=None):
     if not sys.platform.startswith("linux"):
         print("请在 Linux VPS 的 SSH 终端运行；本地设备仅运行 iperf3 客户端。", file=sys.stderr)
         return 1
-    if not shutil.which("iperf3"):
-        print("缺少 iperf3。Debian/Ubuntu：sudo apt-get install iperf3；RHEL：sudo dnf install iperf3。\n"
-              "安装时选择不启动常驻服务，再运行本工具。", file=sys.stderr)
-        return 1
-    install_signal_handlers()
     try:
         interactive = not argv
         if interactive and (not sys.stdin.isatty() or not sys.stdout.isatty()):
             raise ProbeError("菜单需要交互终端；脚本模式请使用 --host VPS地址")
-        config = menu() if interactive else cli_config(args)
+        config = None if interactive else cli_config(args)
+        ensure_iperf3()
+        install_signal_handlers()
+        if interactive:
+            config = menu()
         return Session(config, interactive).run()
     except (Cancelled, KeyboardInterrupt):
         say("已退出。")

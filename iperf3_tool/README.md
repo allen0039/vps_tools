@@ -8,14 +8,11 @@ VPS 负责逐轮监听和校验结果。本地不需要开放入站端口、不�
 
 VPS 需要 Python 3.8+、iperf3，以及可读取自身进程信息的 `/proc`。所有 Python 功能使用标准库，无需 pip。高位端口测速本身不需要 root。
 
-Debian / Ubuntu 安装依赖：
+启动测速时自动检测 iperf3，缺失则根据 `/etc/os-release` 和可用包管理器安装：Debian/Ubuntu 使用 apt-get，RHEL/Fedora 使用 dnf（旧系统使用 yum），另支持 openSUSE 的 zypper、Alpine 的 apk 和 Arch 的 pacman。已经安装的依赖会跳过；安装成功后直接继续，无需重新运行。
 
-```bash
-sudo apt-get update
-sudo apt-get install python3 iperf3
-```
+依赖安装需要 root 或 sudo 权限，普通用户运行时会自动调用 sudo（可能需要输入密码）。Debian/Ubuntu 会刷新软件包索引，并自动选择不启动 iperf3 常驻服务。本工具不管理已有 iperf3 服务；软件源不可用或不提供所需包时会明确报错，请修复软件源后重试。
 
-若安装器询问是否启动 iperf3 常驻服务，选择 **否**。RHEL 系发行版可用 `sudo dnf install python3 iperf3`，部分发行版需要先启用对应软件源。本工具不会自动安装依赖或管理系统中已有的 iperf3 服务。
+仓库的 `bash iperf3-tool.sh` 入口还会自动检测并安装 Python 3.8+。独立 Python 命令和工具箱统一安装器需要系统预先提供 Python 3.8+；老系统的软件源若仅提供更早版本，Shell 入口会提示升级。
 
 从仓库运行：
 
@@ -117,4 +114,4 @@ bash -n iperf3-tool.sh
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-测试不安装依赖、不修改系统配置。覆盖双向 JSON、参数不符、零占位结果、占用端口、报告保留，并在已安装 iperf3 时执行限速回环测试：1 / 4 / 8 连接的六种组合、监听释放、错误连接数、控制管道断开、最大生存时间和主进程强制退出清理。没有 iperf3 时真实测试明确跳过。macOS 开发回环测试另需 lsof；正式入口限制为 Linux VPS。
+测试不安装依赖、不修改系统配置。依赖安装测试模拟发行版、权限及包管理器，覆盖安装跳过、自动安装、服务选项和失败处理。另覆盖双向 JSON、参数不符、零占位结果、占用端口、报告保留，并在已安装 iperf3 时执行限速回环测试：1 / 4 / 8 连接的六种组合、监听释放、错误连接数、控制管道断开、最大生存时间和主进程强制退出清理。没有 iperf3 时真实测试明确跳过。macOS 开发回环测试另需 lsof；正式入口限制为 Linux VPS。
