@@ -6,6 +6,7 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 STATE_DIR="$tmp/state"; SESSION_ROOT="$STATE_DIR/sessions"; BACKUP_ROOT="$STATE_DIR/backups"
+LATEST_BACKUP="$STATE_DIR/latest"; ACTIVE_SESSION_FILE="$STATE_DIR/active-session"
 PENDING_DIR="$STATE_DIR/pending"; PENDING_LATEST="$STATE_DIR/pending-latest"
 HISTORY_FILE="$STATE_DIR/history.tsv"; SESSION_ID=old-session
 mkdir -p "$SESSION_ROOT/$SESSION_ID"
@@ -147,6 +148,7 @@ init_session() {
 select_tuning_qdisc() { QDISC_POLICY=preserve; }
 ensure_bbr() { :; }
 create_backup() { mkdir -p "$BACKUP_ROOT/new-session"; printf '%s\n' "$BACKUP_ROOT/new-session"; }
+real_pending_guard="$(declare -f pending_guard)"
 pending_guard() { :; }
 schedule_rollback() { mkdir -p "$PENDING_DIR/new-session"; : >"$PENDING_DIR/new-session/owner"; }
 apply_candidate() { printf '%s %s\n' "$1" "$2" >"$tmp/applied"; }
@@ -160,6 +162,121 @@ HISTORY_SESSION=old-session; YES=1; PERSIST_FINAL=0
 [[ -d "$BACKUP_ROOT/new-session" ]] || fail 'backup missing'
 (PERSIST_FINAL=1; apply_history_command) >"$tmp/persist.log"
 [[ -e "$tmp/persisted" ]] || fail 'requested persistence skipped'
+
+# Skipping backup must not leave a new timer or reuse the previous backup.
+mkdir -p "$PENDING_DIR/previous"
+printf '%s\n' "$BACKUP_ROOT/new-session" >"$PENDING_DIR/previous/backup"
+: >"$PENDING_DIR/previous/armed"
+ln -sfn "$PENDING_DIR/previous" "$PENDING_LATEST"
+ln -sfn "$BACKUP_ROOT/new-session" "$LATEST_BACKUP"
+printf 'old-session\n' >"$ACTIVE_SESSION_FILE"
+rm -f "$tmp/applied" "$tmp/persisted"
+(
+  eval "$real_pending_guard"
+  parse_args apply-history --session old-session --no-backup --persist --yes
+  BACKUP_DIR="$BACKUP_ROOT/new-session"
+  init_session() { SESSION_ID=no-backup; SESSION_DIR="$SESSION_ROOT/$SESSION_ID"; mkdir -p "$SESSION_DIR"; }
+  create_backup() { fail 'no-backup created a backup'; }
+  schedule_rollback() { fail 'no-backup scheduled rollback'; }
+  apply_candidate() {
+    [[ ! -e "$PENDING_LATEST" && ! -e "$PENDING_DIR/previous/armed" ]] || fail 'previous timer still armed at application'
+    [[ ! -e "$ACTIVE_SESSION_FILE" ]] || fail 'previous active marker remains during application'
+    printf '%s %s\n' "$1" "$2" >"$tmp/applied"
+  }
+  apply_history_command
+  [[ -z "$BACKUP_DIR" ]] || fail 'no-backup reused an old backup'
+  [[ "$(active_session_id)" == no-backup ]] || fail 'no-backup active session missing'
+) >"$tmp/no-backup.log"
+[[ "$(cat "$tmp/applied")" == 'eth0 8' && -f "$tmp/persisted" ]] || fail 'no-backup did not apply and persist'
+[[ ! -e "$PENDING_LATEST" && ! -d "$BACKUP_ROOT/no-backup" ]] || fail 'no-backup created recovery state'
+[[ "$(readlink "$LATEST_BACKUP")" == "$BACKUP_ROOT/new-session" && -d "$BACKUP_ROOT/new-session" ]] || fail 'no-backup changed an existing backup'
+grep -Fq '本次备份：未备份' "$SESSION_ROOT/no-backup/history-application.txt" || fail 'missing no-backup record'
+grep -Fq '安全回滚：关闭' "$tmp/no-backup.log" || fail 'missing disabled rollback notice'
+if grep -Fq '验证业务后执行' "$tmp/no-backup.log"; then fail 'no-backup requests confirmation'; fi
+if (parse_args autotune --no-backup) >"$tmp/invalid-option.log" 2>&1; then fail 'other commands accept no-backup'; fi
+
+# An error without a backup must report the failure without restoring old state.
+set +e
+(
+  set -e
+  HISTORY_NO_BACKUP=1
+  init_session() { SESSION_ID=failed-apply; SESSION_DIR="$SESSION_ROOT/$SESSION_ID"; mkdir -p "$SESSION_DIR"; }
+  restore_backup() { fail 'failed no-backup restored an older backup'; }
+  apply_candidate() { return 23; }
+  apply_history_command
+) >"$tmp/failed-apply.log" 2>&1
+failed_rc=$?
+set -e
+[[ "$failed_rc" == 23 ]] || fail 'failed application did not preserve its exit status'
+grep -Fq '无法自动恢复应用前参数' "$tmp/failed-apply.log" || fail 'missing no-backup failure notice'
+[[ ! -e "$ACTIVE_SESSION_FILE" ]] || fail 'failed application retained stale active session'
+
+# Exercise the actual terminal choices, including default backup and cancellation.
+{
+  printf 'source %q\n' "$ROOT/bbr-tune.sh"
+  declare -f fail require_linux require_root have resolve_iface ip detect_memory_limits \
+    prepare_tcp_rules select_tuning_qdisc ensure_bbr pending_guard apply_candidate capture_state
+  cat <<'RUNNER'
+tmp="$1"; test_session="$2"
+STATE_DIR="$tmp/state"; SESSION_ROOT="$STATE_DIR/sessions"; BACKUP_ROOT="$STATE_DIR/backups"
+PENDING_DIR="$STATE_DIR/pending"; PENDING_LATEST="$STATE_DIR/pending-latest"
+LATEST_BACKUP="$STATE_DIR/latest"; ACTIVE_SESSION_FILE="$STATE_DIR/active-session"
+HISTORY_FILE="$STATE_DIR/history.tsv"
+init_session() { SESSION_ID="$test_session"; SESSION_DIR="$SESSION_ROOT/$SESSION_ID"; mkdir -p "$SESSION_DIR"; }
+create_backup() { mkdir -p "$BACKUP_ROOT/$test_session"; printf '%s\n' "$BACKUP_ROOT/$test_session"; }
+schedule_rollback() { mkdir -p "$PENDING_DIR/$test_session"; : >"$PENDING_DIR/$test_session/armed"; }
+parse_args apply-history --session old-session ${3:+"$3"}
+apply_history_command
+RUNNER
+} >"$tmp/terminal-apply.sh"
+python3 - "$tmp" <<'PY'
+import os, pty, select, subprocess, sys, time
+from pathlib import Path
+root = Path(sys.argv[1])
+cases = [
+    ('choose-no', b'n\ny\n', False, True, ''),
+    ('default-backup', b'\ny\n', True, True, ''),
+    ('cancel-no', b'n\nn\n', False, False, ''),
+    ('cancel-backup', b'y\nn\n', False, False, ''),
+    ('explicit-no', b'y\n', False, True, '--no-backup'),
+    ('retry-choice', b'invalid\nn\ny\n', False, True, ''),
+]
+for name, inputs, backup, applied, option in cases:
+    (root/'applied').unlink(missing_ok=True)
+    master, slave = pty.openpty()
+    child = subprocess.Popen(['bash', str(root/'terminal-apply.sh'), str(root), name, option],
+                             stdin=slave, stdout=slave, stderr=slave)
+    os.close(slave)
+    os.write(master, inputs)
+    output = bytearray()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        readable, _, _ = select.select([master], [], [], 0.1)
+        if readable:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            output.extend(chunk)
+        if child.poll() is not None and not readable:
+            break
+    child.wait(timeout=1)
+    os.close(master)
+    screen = output.decode('utf-8', errors='replace')
+    assert child.returncode == 0, (name, screen)
+    assert '确认应用历史参数？' in screen, (name, screen)
+    assert ('应用前备份当前参数' in screen) == (not option), (name, screen)
+    assert (root/'state/backups'/name).exists() == backup, (name, screen)
+    assert (root/'state/pending'/name/'armed').exists() == backup, (name, screen)
+    assert (root/'applied').exists() == applied, (name, screen)
+    assert (root/'state/sessions'/name).exists() == applied, (name, screen)
+    if applied and not backup:
+        assert (root/'state/active-session').read_text().strip() == name, (name, screen)
+        assert '安全回滚：关闭' in screen, (name, screen)
+PY
+
 test_cap=4
 if (apply_history_command) >"$tmp/oversize.log" 2>&1; then fail 'oversized historical buffer accepted'; fi
 grep -q '超过当前服务器上限' "$tmp/oversize.log" || fail 'missing memory limit explanation'
