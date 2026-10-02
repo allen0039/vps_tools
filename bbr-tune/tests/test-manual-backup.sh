@@ -104,6 +104,58 @@ for name, mode, remark, inputs, expected in cases:
     assert (state/'backups/sample/full-sysctl.tsv').stat().st_size > 0
 PY
 
+# A tuning run snapshots once before probing and names that same backup afterward.
+{
+  printf 'source %q\n' "$ROOT/bbr-tune.sh"
+  declare -f systemd_available sysctl_exists sysctl_get tc
+  cat <<'RUNNER'
+STATE_DIR="$1"; BACKUP_ROOT="$STATE_DIR/backups"; LATEST_BACKUP="$STATE_DIR/latest"
+mkdir -p "$STATE_DIR"
+SYSCTL_FILE="$STATE_DIR/sysctl.conf"; MODULES_FILE="$STATE_DIR/modules.conf"
+ENV_FILE="$STATE_DIR/env"; QDISC_HELPER="$STATE_DIR/helper"; SERVICE_FILE="$STATE_DIR/service"
+SESSION_ID=one-tuning-run
+BACKUP_DIR="$(create_backup eth0 1 "" 0)"
+printf 'PROBING_DONE\n'
+name_completed_tuning_backup "$BACKUP_DIR"
+RUNNER
+} >"$tmp/deferred-naming.sh"
+python3 - "$tmp" <<'PY'
+import os, pty, select, subprocess, sys, time
+from pathlib import Path
+root = Path(sys.argv[1])
+for suffix, typed, expected in [('default', b'\n', '初始备份'),
+                                ('custom', '全部测试完成\n'.encode(), '初始备份 - 全部测试完成')]:
+    state = root/('deferred-'+suffix)
+    master, slave = pty.openpty()
+    child = subprocess.Popen(['bash', str(root/'deferred-naming.sh'), str(state)],
+                             stdin=slave, stdout=slave, stderr=slave)
+    os.close(slave)
+    os.write(master, typed)
+    output = bytearray()
+    deadline = time.monotonic()+5
+    while time.monotonic() < deadline:
+        readable, _, _ = select.select([master], [], [], 0.1)
+        if readable:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            output.extend(chunk)
+        if child.poll() is not None and not readable:
+            break
+    child.wait(timeout=1)
+    os.close(master)
+    screen = output.decode(errors='replace')
+    assert child.returncode == 0, screen
+    assert screen.index('PROBING_DONE') < screen.index('备份备注（回车保留默认命名）'), screen
+    backups = list((state/'backups').iterdir())
+    assert len(backups) == 1, backups
+    assert (backups[0]/'remark.txt').read_text().strip() == expected
+    assert (state/'latest').resolve() == backups[0].resolve()
+PY
+
 ui_execute() { printf '%s\n' "$*" >>"$tmp/ui-calls"; }
 IFACE=auto
 printf '1\n\n' | ui_status >"$tmp/ui.out"

@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.20"
+VERSION="2.10.21"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -1508,8 +1508,8 @@ original_backup_path() {
 }
 
 read_backup_remark() {
-  local remark="${1:-$BACKUP_REMARK}"
-  if [[ -z "$remark" && -t 0 ]]; then
+  local remark="${1:-$BACKUP_REMARK}" ask="${2:-1}"
+  if [[ -z "$remark" && "$ask" == 1 && -t 0 ]]; then
     while true; do
       read -r -p '备份备注（回车保留默认命名）：' remark || return 1
       if [[ "$remark" != *$'\r'* && "$remark" != *$'\t'* && ${#remark} -le 100 ]]; then break; fi
@@ -1532,8 +1532,8 @@ backup_label() {
 }
 
 create_backup() {
-  local iface="$1" update_latest="${2:-1}" backup_remark="${3:-$BACKUP_REMARK}" backup original key value layout service_enabled="unknown" service_active="unknown"
-  backup_remark="$(read_backup_remark "$backup_remark")" || return 1
+  local iface="$1" update_latest="${2:-1}" backup_remark="${3:-$BACKUP_REMARK}" ask_remark="${4:-1}" backup original key value layout service_enabled="unknown" service_active="unknown"
+  backup_remark="$(read_backup_remark "$backup_remark" "$ask_remark")" || return 1
   # Pin a legacy original before adding a new directory to the sorted list.
   if original="$(original_backup_path_readonly)"; then
     original_backup_path >/dev/null || return 1
@@ -1598,6 +1598,26 @@ EOF_META
   info "备份名称：${backup_remark}；目录：$backup" >&2
   if [[ "$update_latest" == 1 ]]; then ln -sfn "$backup" "$LATEST_BACKUP" || return 1; fi
   printf '%s\n' "$backup"
+}
+
+name_completed_tuning_backup() {
+  local backup="$1" remark name original temporary
+  [[ -z "$BACKUP_REMARK" && -t 0 ]] || return 0
+  printf '\n  本次调优只在探测前备份了一次参数：%s\n' "$backup"
+  if ! remark="$(read_backup_remark "")"; then
+    warn "未读取到备份备注，保留默认名称：$(backup_label "$backup")"
+    return 0
+  fi
+  [[ -n "$remark" ]] || { info "备份名称保持为：$(backup_label "$backup")"; return 0; }
+  original="$(original_backup_path_readonly 2>/dev/null || true)"
+  name="$remark"
+  [[ "$backup" != "$original" ]] || name="初始备份 - $remark"
+  temporary="${backup}/remark.txt.tmp.$$"
+  if printf '%s\n' "$name" >"$temporary" && mv -f "$temporary" "${backup}/remark.txt"; then
+    info "备份已命名：${name}；目录：$backup"
+  else
+    warn "无法保存备份备注，备份仍可用于恢复：$backup"
+  fi
 }
 
 backup_current_command() {
@@ -3283,7 +3303,7 @@ autotune() {
     "$TCP_MEM_LOW_PAGES" "$TCP_MEM_PRESSURE_PAGES" "$TCP_MEM_HIGH_PAGES"
   printf '  搜索策略：倍增探索；检测到综合评分回落后，二分回退至 1 MiB 粒度\n\n'
 
-  BACKUP_DIR="$(create_backup "$iface")"
+  BACKUP_DIR="$(create_backup "$iface" 1 "$BACKUP_REMARK" 0)"
   TUNING_ACTIVE="1"
   trap cleanup_tuning_on_exit EXIT
   trap stop_tuning_on_signal INT TERM HUP
@@ -3395,6 +3415,7 @@ autotune() {
   fi
   TUNING_ACTIVE="0"
   trap - EXIT
+  name_completed_tuning_backup "$BACKUP_DIR"
   if [[ "$FINAL_PASS" != "yes" ]]; then
     warn "最终配置未同时达到全部绝对门槛；仍已按所选方案的单连接/多连接综合评分采用本次实测最优候选"
   fi
