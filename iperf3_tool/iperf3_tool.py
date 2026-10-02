@@ -31,7 +31,7 @@ if sys.version_info < (3, 8):
 
 from dataclasses import asdict, dataclass
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 SCRIPT = Path(__file__).resolve()
 DIRECTION_NAMES = {"download": "下载：VPS → 本地", "upload": "上传：本地 → VPS"}
 
@@ -427,12 +427,121 @@ def local_command(config, port, streams, direction):
     return " ".join(shlex.quote(item) for item in args)
 
 
+def result_base(output_dir=""):
+    return (Path(output_dir).expanduser() if output_dir else
+            Path.home() / ".local/state/iperf3-tool").resolve()
+
+
+def finished_result(directory, base):
+    """只认可本工具在父目录内创建、且已写入最终报告的普通会话目录。"""
+    if (directory.is_symlink() or not directory.is_dir() or directory.parent != base
+            or not re.fullmatch(r"\d{8}T\d{6}Z-[A-Za-z0-9_-]+", directory.name)):
+        return False
+    try:
+        session_path, report_path = directory / "session.json", directory / "report.json"
+        if session_path.is_symlink() or report_path.is_symlink():
+            return False
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        return (isinstance(session, dict) and isinstance(report, dict)
+                and session.get("started_utc") == directory.name.split("-", 1)[0]
+                and isinstance(session.get("config"), dict)
+                and isinstance(session.get("plan"), list)
+                and report.get("status") in ("complete", "partial", "failed", "interrupted"))
+    except (OSError, ValueError):
+        return False
+
+
+def result_size(directory):
+    total = 0
+
+    def unreadable(error):
+        raise error
+
+    for root, _directories, files in os.walk(directory, followlinks=False, onerror=unreadable):
+        for name in files:
+            total += (Path(root) / name).lstat().st_size
+    return total
+
+
+def human_size(size):
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024 or unit == "TiB":
+            return "{:.2f} {}".format(size, unit)
+        size /= 1024
+
+
+def delete_results(directories, base):
+    deleted = 0
+    for directory in directories:
+        if not finished_result(directory, base):
+            say("跳过：目录已变化、测试尚未结束或不是有效结果：" + str(directory))
+            continue
+        try:
+            # rmtree 不跟随目录内的符号链接；不递归删除结果父目录。
+            shutil.rmtree(directory)
+            deleted += 1
+            say("已删除：" + str(directory))
+        except OSError as exc:
+            say("清理失败：{}：{}".format(directory, exc))
+    say("已清理 {} 个测试结果目录。".format(deleted))
+
+
+def cleanup_history(output_dir=""):
+    base = result_base(output_dir)
+    say("\n历史测试结果目录：" + str(base))
+    if not base.exists():
+        say("没有可清理的历史测试数据。")
+        return
+    directories = sorted((path for path in base.iterdir() if finished_result(path, base)), reverse=True)
+    if not directories:
+        say("没有可清理的历史测试数据（仅列出已结束且报告有效的测试）。")
+        return
+    total = 0
+    for index, directory in enumerate(directories, 1):
+        size = result_size(directory)
+        total += size
+        say("{}）{}  {}".format(index, directory.name, human_size(size)))
+    say("共 {} 次测试，文件大小合计 {}。".format(len(directories), human_size(total)))
+    while True:
+        selection = ask("选择要删除的编号（逗号分隔，如 1,3）/ all 全部 / 0 返回", "0").lower()
+        if selection == "0":
+            return
+        if selection == "all":
+            selected = directories
+            break
+        try:
+            indices = sorted({integer(value.strip(), 1, len(directories), "编号")
+                              for value in selection.split(",")})
+            selected = [directories[index - 1] for index in indices]
+            break
+        except ProbeError as exc:
+            say(str(exc))
+    say("将永久删除以下测试的全部结果、原始数据和日志：")
+    for directory in selected:
+        say("  " + str(directory))
+    if choose("确认删除 {} 个目录？y 是 / n 否".format(len(selected)), {"y", "n"}, "n") == "y":
+        delete_results(selected, base)
+    else:
+        say("已取消清理，结果数据保留。")
+
+
+def cleanup_current(directory):
+    try:
+        if choose("是否清理本次结果数据（包括原始数据和日志）？y 是 / n 否", {"y", "n"}, "n") == "y":
+            delete_results([directory], directory.parent)
+        else:
+            say("本次结果数据已保留。")
+    except (Cancelled, KeyboardInterrupt):
+        say("\n已退出清理。")
+
+
 class Session:
     def __init__(self, config, interactive=False):
         self.config = config
         self.interactive = interactive
         self.port = config.port or random_port()
-        base = Path(config.output_dir).expanduser() if config.output_dir else Path.home() / ".local/state/iperf3-tool"
+        base = result_base(config.output_dir)
         base.mkdir(parents=True, exist_ok=True)
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ-")
         self.directory = Path(tempfile.mkdtemp(prefix=stamp, dir=str(base)))
@@ -640,6 +749,9 @@ class Session:
             self.save(status)
             self.summary()
             say("本次测速进程已退出，未保留常驻测速服务。")
+            if status != "interrupted" and (self.interactive or
+                                           (sys.stdin.isatty() and sys.stdout.isatty())):
+                cleanup_current(self.directory)
 
 
 def metric(value):
@@ -673,6 +785,13 @@ def ask_integer(label, default, low, high):
 def menu():
     say("\niperf3 VPS 测速工具 v" + VERSION)
     say("在 VPS 上配置，在本地运行屏幕给出的 iperf3 命令。")
+    while True:
+        action = choose("操作：1 开始测速 / 2 清理历史测试数据 / 0 退出", {"0", "1", "2"}, "1")
+        if action == "0":
+            raise Cancelled()
+        if action == "1":
+            break
+        cleanup_history()
     while True:
         try:
             host = validate_host(ask("本地能访问的 VPS IP/域名（核实 NAT 公网地址）", default_host()))
@@ -723,6 +842,7 @@ def parser():
     result.add_argument("--family", choices=("4", "6"), help="IP 版本，默认根据地址选择")
     result.add_argument("--bind", default="", help="仅在 VPS 指定本地监听 IP")
     result.add_argument("--output-dir", default="", help="结果父目录，默认 ~/.local/state/iperf3-tool")
+    result.add_argument("--cleanup", action="store_true", help="交互清理历史测试数据，不启动测速；可配合 --output-dir")
     return result
 
 
@@ -770,11 +890,14 @@ def main(argv=None):
         interactive = not argv
         if interactive and (not sys.stdin.isatty() or not sys.stdout.isatty()):
             raise ProbeError("菜单需要交互终端；脚本模式请使用 --host VPS地址")
-        config = None if interactive else cli_config(args)
-        ensure_iperf3()
         install_signal_handlers()
-        if interactive:
-            config = menu()
+        if args.cleanup:
+            if not sys.stdin.isatty() or not sys.stdout.isatty():
+                raise ProbeError("清理历史测试数据需要交互终端")
+            cleanup_history(args.output_dir)
+            return 0
+        config = menu() if interactive else cli_config(args)
+        ensure_iperf3()
         return Session(config, interactive).run()
     except (Cancelled, KeyboardInterrupt):
         say("已退出。")

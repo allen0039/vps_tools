@@ -169,7 +169,7 @@ class ParserTests(unittest.TestCase):
         self.assertIn("退出码 7", session.results[0]["error"])
 
     def test_menu_accepts_custom_port_and_streams(self):
-        answers = ["203.0.113.10", "2", "5201", "2", "8", "3", "10", "0", "2", "60", "y"]
+        answers = ["1", "203.0.113.10", "2", "5201", "2", "8", "3", "10", "0", "2", "60", "y"]
         with mock.patch("builtins.input", side_effect=answers), \
                 mock.patch.object(tool, "port_free", return_value=True), \
                 contextlib.redirect_stdout(io.StringIO()):
