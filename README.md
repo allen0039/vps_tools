@@ -1,6 +1,6 @@
 # VPS Tools
 
-面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、DNS、Swap、TCP / BBR 调优和妙妙屋 Agent 重启整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
+面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、DNS、Swap、TCP / BBR 调优、妙妙屋 Agent 重启和网址检测整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
 
 [GitHub 仓库](https://github.com/allen0039/vps_tools) · [Gitee 镜像](https://gitee.com/allen0039/vps_tools)
 
@@ -14,10 +14,11 @@
 | Swap 管理 | 创建或调整 `/swapfile`，支持 Btrfs、ext4/XFS，检查实际启用状态 | `swaptool` | [Swap 使用指南](swap_tool/README.md) |
 | TCP / BBR 调优 | 测试 TCP 参数、管理出口队列、应用历史参数与回滚 | `bbrtcp` / `bbr-tune` | [BBR 使用指南](bbr-tune/README.md) |
 | 妙妙屋 Agent 重启 | 重启并验证 `mmw-agent.service`，展示 PID、内存与 TCP 连接变化 | `restart-mmw-agent` | [Agent 使用指南](restart-mmw-agent/README.md) |
+| 网址与网络检测 | 解析域名 IP，检测 Ping 延迟、丢包、TCP 端口和 HTTP / HTTPS | `netcheck` | [检测使用指南](web_tool/README.md) |
 
 ## 快速安装
 
-在 **Linux VPS 终端**执行，任选一个下载渠道。需要 Bash、root 或 sudo 权限，以及 `flock`（通常由 `util-linux` 提供）；下列命令使用 `curl` 下载。
+在 **Linux VPS 终端**执行，任选一个下载渠道。需要 Bash、root 或 sudo 权限、Python 3.8+，以及 `flock`（通常由 `util-linux` 提供）；下列命令使用 `curl` 下载。网址检测的 Ping 功能需要系统 `ping`，`dig` 仅用于可选 CNAME 查询。
 
 **GitHub：**
 
@@ -39,7 +40,7 @@ vpstools
 
 已登录 root 的用户可以省略 `sudo`。建议先下载并检查安装器，再运行安装步骤。
 
-统一安装会部署全部 5 个工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或 DNS、创建 Swap、应用 TCP 调优参数或重启 Agent。BBR 安装器可能通过系统包管理器补齐基础依赖。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
+统一安装会部署全部 6 个独立工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或 DNS、创建 Swap、应用 TCP 调优参数或重启 Agent。BBR 安装器可能通过系统包管理器补齐基础依赖。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
 
 也可以克隆仓库后安装本地文件：
 
@@ -64,6 +65,7 @@ VPS Tools 工具箱
   6. 重启妙妙屋 Agent
   7. 查看工具安装状态
   8. 安装 / 更新全部工具
+  9. 网址与网络检测
   0. 退出
 ```
 
@@ -95,9 +97,13 @@ vpstools run bbr status
 
 # 查看 Agent 帮助，不执行重启
 vpstools run agent --help
+
+# 轻量检测，不需要 root
+vpstools run netcheck check example.com
+vpstools run netcheck dns example.com --json
 ```
 
-`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`firewall`、`dns`、`swap`、`bbr`、`agent`。直接执行 `vpstools run agent` 会重启服务；总菜单中的额外确认只适用于菜单操作。
+`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`。直接执行 `vpstools run agent` 会重启服务；总菜单中的额外确认只适用于菜单操作。
 
 也可使用独立命令，例如：
 
@@ -106,6 +112,7 @@ dnstool
 swaptool
 bbrtcp
 allentool
+netcheck
 ```
 
 需要管理员权限的操作请按提示使用 `sudo`；非交互运行时建议显式加上 `sudo`。只想安装某个工具时，使用上表对应文档中的独立安装命令。
@@ -122,7 +129,7 @@ vpstools update gitee
 
 也可以选择总菜单第 8 项，或重新执行快速安装命令。
 
-远程安装时，安装器先查询所选渠道 `main` 分支的最新提交，再从同一个固定提交下载全部脚本。所有文件通过非空、Bash 脚本头及语法检查后，才开始部署；下载失败时尚未执行各工具安装步骤。安装锁用于防止两个工具箱安装同时运行。
+远程安装时，安装器先查询所选渠道 `main` 分支的最新提交，再从同一个固定提交下载全部脚本。所有文件通过非空、对应 Bash / Python 脚本头及语法检查后，才开始部署；下载失败时尚未执行各工具安装步骤。安装锁用于防止两个工具箱安装同时运行。
 
 部署阶段如某个工具安装失败，安装器会停止，已经完成的安装会保留。修复错误后重新运行即可。更新覆盖确认和配置备份规则沿用各独立工具。
 
@@ -141,6 +148,7 @@ vpstools update gitee
 - **Swap：** 创建或调整需要足够磁盘空间。工具确认交换空间实际启用后才写入开机配置；现有 `/swapfile` 有使用量时会停止调整。特殊 Btrfs 存储布局仍可能不支持交换文件。
 - **TCP / BBR：** 测速会消耗时间与流量，结果取决于线路和测试环境。调整后按提示验证、确认或回滚；第三方内核安装需单独评估启动与驱动兼容性。
 - **Agent：** 重启会短暂中断现有代理连接。工具验证 Agent 状态并展示变化，不重启 Guard 服务。
+- **网址检测：** 按需运行，无第三方 Python 依赖或常驻服务；默认最多并行检测 3 个 IP，网站检测使用 HEAD、不下载正文。结果反映当前 VPS 到目标的网络情况；Ping 不通不代表网站不可用。
 
 在远程服务器修改网络或启动相关配置前，建议准备云控制台、VNC 或串口等救援入口。生产环境可使用固定提交的下载地址，并在测试环境验证后部署。
 
@@ -155,6 +163,7 @@ vps_tools/
 ├── swap_tool/            # Swap 管理
 ├── bbr-tune/             # TCP / BBR 调优
 ├── restart-mmw-agent/    # Agent 重启
+├── web_tool/             # SSH 终端网址与网络检测
 └── tests/                # 工具箱测试
 ```
 
@@ -164,6 +173,7 @@ vps_tools/
 bash -n install.sh
 bash -n vpstools.sh
 python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m unittest discover -s web_tool/tests -p 'test_*.py'
 ```
 
 工具箱测试使用临时目录和模拟命令，覆盖参数转发、退出码、菜单返回、安装器调用及下载校验等行为。各子目录还包含对应工具的测试；这些检查不能替代真实 Linux VPS 上的系统兼容性验证。

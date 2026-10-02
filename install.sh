@@ -6,7 +6,7 @@ STAGE=
 SOURCE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FILES=(vpstools.sh install.sh safe-ssh-port/safe-ssh-port.sh dns_tool/dns_tool.sh
        swap_tool/swap_tool.sh restart-mmw-agent/restart-mmw-agent
-       bbr-tune/install.sh bbr-tune/bbr-tune.sh bbr-tune/bbr-kernel.sh)
+       bbr-tune/install.sh bbr-tune/bbr-tune.sh bbr-tune/bbr-kernel.sh web_tool/netcheck.py)
 
 die() { printf '[vpstools] 错误：%s\n' "$*" >&2; exit 1; }
 usage() {
@@ -57,8 +57,13 @@ prepare_sources() {
             download "$base/$file" "$STAGE/$file" || die "下载失败：$file；尚未开始安装。"
         fi
         [[ -s $STAGE/$file ]] || die "文件为空：$file"
-        head -n 1 "$STAGE/$file" | grep -q '^#!/usr/bin/env bash' || die "文件不是 Bash 脚本：$file"
-        bash -n "$STAGE/$file" || die "语法检查失败：$file"
+        if [[ $file == *.py ]]; then
+            head -n 1 "$STAGE/$file" | grep -q '^#!/usr/bin/env python3' || die "文件不是 Python 脚本：$file"
+            python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' "$STAGE/$file" || die "语法检查失败：$file"
+        else
+            head -n 1 "$STAGE/$file" | grep -q '^#!/usr/bin/env bash' || die "文件不是 Bash 脚本：$file"
+            bash -n "$STAGE/$file" || die "语法检查失败：$file"
+        fi
     done
 }
 
@@ -68,6 +73,7 @@ install_tools() {
     bash "$STAGE/dns_tool/dns_tool.sh" install || die 'DNS 工具安装失败。此前已完成的安装保留，可修复后重试。'
     install -m 0755 "$STAGE/swap_tool/swap_tool.sh" /usr/local/bin/swaptool
     install -m 0755 "$STAGE/restart-mmw-agent/restart-mmw-agent" /usr/local/sbin/restart-mmw-agent
+    install -m 0755 "$STAGE/web_tool/netcheck.py" /usr/local/bin/netcheck
     bash "$STAGE/bbr-tune/install.sh" --install-only || die 'BBR 安装失败。此前已完成的安装保留，可修复后重试。'
     install -m 0755 "$STAGE/install.sh" /usr/local/lib/vpstools/install.sh
     install -m 0755 "$STAGE/vpstools.sh" /usr/local/bin/vpstools
@@ -86,6 +92,8 @@ main() {
     [[ $(uname -s) == Linux ]] || die '请在 Linux VPS 上安装。'
     (( EUID == 0 )) || die '请使用 sudo bash install.sh 或以 root 运行。'
     command -v flock >/dev/null || die '缺少 flock，请先安装 util-linux。'
+    command -v python3 >/dev/null || die '网址检测需要 Python 3.8 或更新版本，请先安装 python3。'
+    python3 -c 'import sys; sys.exit(sys.version_info < (3, 8))' || die '需要 Python 3.8 或更新版本。'
     mkdir -p /usr/local/bin /usr/local/sbin /usr/local/lib/vpstools
     exec 9>/usr/local/lib/vpstools/install.lock
     flock -n 9 || die '另一个工具箱安装正在运行。'

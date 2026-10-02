@@ -16,7 +16,7 @@ VPS Tools 中文工具箱
   vpstools update [github|gitee]  安装或更新全部工具
   vpstools --version
 
-工具：ssh、firewall、dns、swap、bbr、agent
+工具：ssh、firewall、dns、swap、bbr、agent、netcheck
 示例：vpstools run dns status
       vpstools run ssh interactive
       vpstools run bbr status
@@ -30,13 +30,14 @@ tool_path() {
         swap) printf '%s/swaptool\n' "$BIN_DIR" ;;
         bbr) printf '%s/bbr-tune\n' "$SBIN_DIR" ;;
         agent) printf '%s/restart-mmw-agent\n' "$SBIN_DIR" ;;
+        netcheck) printf '%s/netcheck\n' "$BIN_DIR" ;;
         *) printf '未知工具：%s\n' "$1" >&2; return 2 ;;
     esac
 }
 
 list_tools() {
     local id path state
-    for id in ssh firewall dns swap bbr agent; do
+    for id in ssh firewall dns swap bbr agent netcheck; do
         path=$(tool_path "$id")
         state=未安装
         [[ ! -x $path ]] || state=已安装
@@ -75,7 +76,7 @@ menu() {
     local choice channel
     while :; do
         printf '\nVPS Tools 工具箱 v%s\n' "$VERSION"
-        printf '%s\n' '  1. SSH 端口与备份恢复' '  2. 防火墙管理' '  3. DNS 切换与恢复' '  4. Swap 虚拟内存' '  5. TCP / BBR 调优' '  6. 重启妙妙屋 Agent' '  7. 查看工具安装状态' '  8. 安装 / 更新全部工具' '  0. 退出'
+        printf '%s\n' '  1. SSH 端口与备份恢复' '  2. 防火墙管理' '  3. DNS 切换与恢复' '  4. Swap 虚拟内存' '  5. TCP / BBR 调优' '  6. 重启妙妙屋 Agent' '  7. 查看工具安装状态' '  8. 安装 / 更新全部工具' '  9. 网址与网络检测' '  0. 退出'
         read -r -p '请选择：' choice || return 0
         case $choice in
             1) run_tool ssh || printf 'SSH 工具已取消或执行失败。\n' ;;
@@ -97,6 +98,7 @@ menu() {
                     *) printf '无效渠道。\n'; continue ;;
                 esac
                 update_tools "$channel" || printf '安装未完成，请查看上方错误。\n' ;;
+            9) run_tool netcheck || printf '检测已取消或有项目未通过。\n' ;;
             0) return 0 ;;
             *) printf '无效选项，请重新输入。\n' ;;
         esac

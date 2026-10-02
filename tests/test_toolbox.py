@@ -40,6 +40,12 @@ class ToolboxTests(unittest.TestCase):
         self.assertEqual(result.stdout, "firewall\n")
         self.assertEqual(result.returncode, 17)
 
+    def test_netcheck_dispatch_and_exit_status(self):
+        self.mock("netcheck", "printf '%s\\n' \"$@\"; exit 1")
+        result = self.run_cli("run", "netcheck", "check", "example.com", "--json")
+        self.assertEqual(result.stdout, "check\nexample.com\n--json\n")
+        self.assertEqual(result.returncode, 1)
+
     def test_missing_tool_and_unknown_command(self):
         self.assertEqual(self.run_cli("run", "dns").returncode, 1)
         self.assertEqual(self.run_cli("run", "unknown").returncode, 2)
