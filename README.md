@@ -1,6 +1,6 @@
 # VPS Tools
 
-面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、DNS、Swap、TCP / BBR 调优、妙妙屋 Agent 重启和网址检测整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
+面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、DNS、Swap、TCP / BBR 调优、妙妙屋 Agent 重启、网址检测和 iperf3 测速整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
 
 [GitHub 仓库](https://github.com/allen0039/vps_tools) · [Gitee 镜像](https://gitee.com/allen0039/vps_tools)
 
@@ -15,6 +15,7 @@
 | TCP / BBR 调优 | 测试 TCP 参数、管理出口队列、应用历史参数与回滚 | `bbrtcp` / `bbr-tune` | [BBR 使用指南](bbr-tune/README.md) |
 | 妙妙屋 Agent 重启 | 重启并验证 `mmw-agent.service`，展示 PID、内存与 TCP 连接变化 | `restart-mmw-agent` | [Agent 使用指南](restart-mmw-agent/README.md) |
 | 网址与网络检测 | 解析域名 IP，检测 Ping 延迟、丢包、TCP 端口和 HTTP / HTTPS | `netcheck` | [检测使用指南](web_tool/README.md) |
+| iperf3 测速 | 本地与 VPS 双向测速，1 / 4 / 8 连接、随机端口与自动清理 | `iperfprobe` | [测速使用指南](iperf3_tool/README.md) |
 
 ## 快速安装
 
@@ -40,7 +41,7 @@ vpstools
 
 已登录 root 的用户可以省略 `sudo`。建议先下载并检查安装器，再运行安装步骤。
 
-统一安装会部署全部 6 个独立工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或 DNS、创建 Swap、应用 TCP 调优参数或重启 Agent。BBR 安装器可能通过系统包管理器补齐基础依赖。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
+统一安装会部署全部 7 个独立工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或 DNS、创建 Swap、应用 TCP 调优参数或重启 Agent。BBR 安装器可能通过系统包管理器补齐基础依赖；iperf3 测速运行前需要安装 iperf3 客户端与服务端，安装时选择不启动常驻服务。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
 
 也可以克隆仓库后安装本地文件：
 
@@ -66,6 +67,7 @@ VPS Tools 工具箱
   7. 查看工具安装状态
   8. 安装 / 更新全部工具
   9. 网址与网络检测
+  10. iperf3 本地与 VPS 测速
   0. 退出
 ```
 
@@ -101,9 +103,12 @@ vpstools run agent --help
 # 轻量检测，不需要 root
 vpstools run netcheck check example.com
 vpstools run netcheck dns example.com --json
+
+# 配置测速，随后在本地执行屏幕显示的命令
+vpstools run iperf --host 203.0.113.10 --streams 1,4,8 --direction both
 ```
 
-`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`。直接执行 `vpstools run agent` 会重启服务；总菜单中的额外确认只适用于菜单操作。
+`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`、`iperf`。直接执行 `vpstools run agent` 会重启服务；总菜单中的额外确认只适用于菜单操作。
 
 也可使用独立命令，例如：
 
@@ -113,6 +118,7 @@ swaptool
 bbrtcp
 allentool
 netcheck
+iperfprobe
 ```
 
 需要管理员权限的操作请按提示使用 `sudo`；非交互运行时建议显式加上 `sudo`。只想安装某个工具时，使用上表对应文档中的独立安装命令。
@@ -149,6 +155,7 @@ vpstools update gitee
 - **TCP / BBR：** 测速会消耗时间与流量，结果取决于线路和测试环境。调整后按提示验证、确认或回滚；第三方内核安装需单独评估启动与驱动兼容性。
 - **Agent：** 重启会短暂中断现有代理连接。工具验证 Agent 状态并展示变化，不重启 Guard 服务。
 - **网址检测：** 按需运行，无第三方 Python 依赖或常驻服务；默认最多并行检测 3 个 IP，网站检测使用 HEAD、不下载正文。结果反映当前 VPS 到目标的网络情况；Ping 不通不代表网站不可用。
+- **iperf3 测速：** 本地也需要 iperf3，逐轮执行 VPS 显示的命令。测试会消耗流量，运行期间需要放行测速 TCP 端口；退出只清理本次测速进程，已有防火墙规则自行撤销。
 
 在远程服务器修改网络或启动相关配置前，建议准备云控制台、VNC 或串口等救援入口。生产环境可使用固定提交的下载地址，并在测试环境验证后部署。
 
@@ -164,6 +171,7 @@ vps_tools/
 ├── bbr-tune/             # TCP / BBR 调优
 ├── restart-mmw-agent/    # Agent 重启
 ├── web_tool/             # SSH 终端网址与网络检测
+├── iperf3_tool/          # 本地与 VPS 的逐轮 iperf3 测速
 └── tests/                # 工具箱测试
 ```
 
@@ -174,6 +182,7 @@ bash -n install.sh
 bash -n vpstools.sh
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 -m unittest discover -s web_tool/tests -p 'test_*.py'
+python3 -m unittest discover -s iperf3_tool/tests -p 'test_*.py'
 ```
 
 工具箱测试使用临时目录和模拟命令，覆盖参数转发、退出码、菜单返回、安装器调用及下载校验等行为。各子目录还包含对应工具的测试；这些检查不能替代真实 Linux VPS 上的系统兼容性验证。

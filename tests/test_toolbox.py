@@ -46,6 +46,12 @@ class ToolboxTests(unittest.TestCase):
         self.assertEqual(result.stdout, "check\nexample.com\n--json\n")
         self.assertEqual(result.returncode, 1)
 
+    def test_iperf_dispatch_preserves_arguments_and_status(self):
+        self.mock("iperfprobe", "printf '%s\\n' \"$@\"; exit 130")
+        result = self.run_cli("run", "iperf", "--host", "2001:db8::1", "--streams", "1,4,8")
+        self.assertEqual(result.stdout, "--host\n2001:db8::1\n--streams\n1,4,8\n")
+        self.assertEqual(result.returncode, 130)
+
     def test_missing_tool_and_unknown_command(self):
         self.assertEqual(self.run_cli("run", "dns").returncode, 1)
         self.assertEqual(self.run_cli("run", "unknown").returncode, 2)
@@ -157,6 +163,7 @@ install_tools
         self.assertIn("safe-ssh-port install", result.stdout)
         self.assertIn("dns_tool install", result.stdout)
         self.assertIn("/usr/local/bin/vpstools", result.stdout)
+        self.assertIn("/usr/local/bin/iperfprobe", result.stdout)
 
 
 if __name__ == "__main__":

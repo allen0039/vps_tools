@@ -1,9 +1,9 @@
 name: VPS Toolbox Checks
 on:
   push:
-    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", ".github/workflows/toolbox.yml"]
+    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", "iperf3_tool/**", ".github/workflows/toolbox.yml"]
   pull_request:
-    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", ".github/workflows/toolbox.yml"]
+    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", "iperf3_tool/**", ".github/workflows/toolbox.yml"]
 permissions:
   contents: read
 jobs:
@@ -12,8 +12,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate shell syntax
-        run: bash -n install.sh && bash -n vpstools.sh && bash -n web_tool/install.sh
+        run: bash -n install.sh && bash -n vpstools.sh && bash -n web_tool/install.sh && bash -n iperf3_tool/iperf3-tool.sh
       - name: Check toolbox routing and installation
         run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Check network probes against local services
         run: python3 -m unittest discover -s web_tool/tests -p 'test_*.py'
+      - name: Install iperf3 for bounded loopback tests
+        run: |
+          echo 'iperf3 iperf3/start_daemon boolean false' | sudo debconf-set-selections
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iperf3
+      - name: Check iperf3 results and process cleanup
+        run: python3 -m unittest discover -s iperf3_tool/tests -p 'test_*.py' -v
