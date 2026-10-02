@@ -32,17 +32,23 @@ class CleanupTests(unittest.TestCase):
         (session.directory / "test-01.json").write_text('{"sample": true}')
         return session
 
-    def test_current_defaults_to_keep_and_yes_removes_only_current(self):
+    def test_current_defaults_to_delete_only_current(self):
         session, other = self.session(), self.session()
         with mock.patch("builtins.input", return_value="") as prompt:
             tool.cleanup_current(session.directory)
-        self.assertIn("[n]", prompt.call_args.args[0])
+        self.assertIn("[y]", prompt.call_args.args[0])
+        self.assertFalse(session.directory.exists())
+        self.assertTrue(other.directory.exists())
+        self.assertTrue(self.base.exists())
+
+    def test_current_no_preserves_data_and_yes_deletes(self):
+        session = self.session()
+        with mock.patch("builtins.input", return_value="n"):
+            tool.cleanup_current(session.directory)
         self.assertTrue((session.directory / "test-01.json").exists())
         with mock.patch("builtins.input", return_value="y"):
             tool.cleanup_current(session.directory)
         self.assertFalse(session.directory.exists())
-        self.assertTrue(other.directory.exists())
-        self.assertTrue(self.base.exists())
 
     def test_current_eof_or_interrupt_preserves_data(self):
         session = self.session()
@@ -158,7 +164,7 @@ class CleanupTests(unittest.TestCase):
                     mock.patch("builtins.input", return_value="") as prompt:
                 self.assertEqual(session.run(), 130 if interrupted else 1)
             self.assertEqual(prompt.call_count, int(terminal and not interrupted))
-            self.assertTrue(session.directory.exists())
+            self.assertEqual(session.directory.exists(), not (terminal and not interrupted))
 
     def test_cleanup_cli_skips_dependencies_and_session_and_uses_custom_directory(self):
         with mock.patch.object(tool.sys, "platform", "linux"), \

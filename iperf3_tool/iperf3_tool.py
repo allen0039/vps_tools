@@ -31,7 +31,7 @@ if sys.version_info < (3, 8):
 
 from dataclasses import asdict, dataclass
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 SCRIPT = Path(__file__).resolve()
 DIRECTION_NAMES = {"download": "下载：VPS → 本地", "upload": "上传：本地 → VPS"}
 
@@ -528,7 +528,7 @@ def cleanup_history(output_dir=""):
 
 def cleanup_current(directory):
     try:
-        if choose("是否清理本次结果数据（包括原始数据和日志）？y 是 / n 否", {"y", "n"}, "n") == "y":
+        if choose("是否清理本次结果数据（包括原始数据和日志）？y 是 / n 否", {"y", "n"}, "y") == "y":
             delete_results([directory], directory.parent)
         else:
             say("本次结果数据已保留。")
