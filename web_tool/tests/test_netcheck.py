@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -12,8 +13,9 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("netcheck", ROOT / "netcheck.py")
@@ -63,6 +65,11 @@ class NetworkTests(unittest.TestCase):
         return subprocess.run([sys.executable, str(script or ROOT / "netcheck.py"), *args],
                               capture_output=True, text=True, cwd=cwd, timeout=10)
 
+    def test_version_matches_current_release(self):
+        proc = self.cli("--version")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "netcheck " + netcheck.VERSION)
+
     def test_head_and_relative_redirect_preserve_query_without_body(self):
         Handler.methods.clear()
         proc = self.cli("http", self.url + "/redirect", "--json")
@@ -105,7 +112,10 @@ class NetworkTests(unittest.TestCase):
     def test_literal_ipv6_and_system_resolver(self):
         proc = self.cli("dns", "::1", "--json")
         self.assertEqual(proc.returncode, 0)
-        self.assertEqual(json.loads(proc.stdout)["dns"]["addresses"], [{"ip": "::1", "family": "IPv6"}])
+        address = json.loads(proc.stdout)["dns"]["addresses"][0]
+        self.assertEqual(address["ip"], "::1")
+        self.assertEqual(address["family"], "IPv6")
+        self.assertTrue(address["geo"]["skipped"])
         result = netcheck.resolve("localhost", 2)
         self.assertTrue(result["ok"], result)
         self.assertIn("127.0.0.1", [item["ip"] for item in result["addresses"]])
@@ -250,6 +260,161 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, text)
         self.assertGreaterEqual(text.count("轻量网络检测"), 2)
         self.assertIn("IPv4 127.0.0.1", text)
+
+
+class GeolocationTests(unittest.TestCase):
+    def mock_response(self, data, status=200):
+        response = Mock(status=status)
+        response.read.return_value = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        connection = Mock()
+        connection.getresponse.return_value = response
+        return connection
+
+    def test_native_requests_chinese_location_over_https(self):
+        data = dict(success=True, country="日本", country_code="JP", region="东京都", city="东京",
+                    connection=dict(isp="Example ISP"))
+        for ip in ("8.8.8.8", "2606:4700:4700::1111"):
+            with self.subTest(ip=ip):
+                connection = self.mock_response(data)
+                with patch.object(netcheck.http.client, "HTTPSConnection", return_value=connection) as connect:
+                    result = netcheck.geo_native(dict(ip=ip, timeout=2))
+                connect.assert_called_once_with("ipwho.is", timeout=2)
+                request = connection.request.call_args
+                self.assertEqual(request[0][0], "GET")
+                self.assertTrue(request[0][1].startswith("/" + ip + "?"))
+                self.assertIn("lang=zh-CN", request[0][1])
+                connection.getresponse.return_value.read.assert_called_once_with(65537)
+                connection.close.assert_called_once()
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["country"], "日本")
+                self.assertEqual(result["city"], "东京")
+                self.assertEqual(result["isp"], "Example ISP")
+
+    def test_native_handles_partial_locations_and_org_fallback(self):
+        connection = self.mock_response(dict(success=True, country="美国", country_code="US",
+                                             connection=dict(org="Example Network")))
+        with patch.object(netcheck.http.client, "HTTPSConnection", return_value=connection):
+            result = netcheck.geo_native(dict(ip="8.8.8.8", timeout=2))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["city"], "")
+        self.assertEqual(netcheck.geo_suffix(dict(geo=result)), "（归属地：美国；ISP：Example Network）")
+
+    def test_native_rejects_service_errors_and_invalid_data(self):
+        for data, status in [(dict(message="限流"), 429), (dict(success=False, message="无数据"), 200),
+                             ([], 200), (dict(success=True), 200),
+                             (dict(success=True, country=123, city=[]), 200)]:
+            with self.subTest(data=data, status=status):
+                connection = self.mock_response(data, status)
+                with patch.object(netcheck.http.client, "HTTPSConnection", return_value=connection):
+                    result = netcheck.geo_native(dict(ip="8.8.8.8", timeout=2))
+                self.assertFalse(result["ok"])
+                self.assertIn("error", result)
+                connection.close.assert_called_once()
+
+    def test_native_limits_response_size(self):
+        connection = self.mock_response(dict(success=True, country="x" * 65536))
+        with patch.object(netcheck.http.client, "HTTPSConnection", return_value=connection):
+            result = netcheck.geo_native(dict(ip="8.8.8.8", timeout=2))
+        self.assertFalse(result["ok"])
+        self.assertIn("大小上限", result["error"])
+
+    def test_nonpublic_addresses_are_never_sent_to_service(self):
+        with patch.object(netcheck, "worker") as worker:
+            for ip in ("127.0.0.1", "10.1.2.3", "192.168.1.1", "169.254.1.2", "192.0.2.1",
+                       "100.64.0.1", "224.0.0.1", "::1", "::", "fe80::1", "fc00::1",
+                       "2001:db8::1", "ff02::1", "::ffff:192.168.1.1"):
+                with self.subTest(ip=ip):
+                    result = netcheck.geo_ip(ip, 2)
+                    self.assertTrue(result["skipped"])
+                    self.assertIn("内网或保留地址", result["error"])
+            worker.assert_not_called()
+
+    def test_geo_hard_timeout_kills_worker(self):
+        with tempfile.TemporaryDirectory() as folder:
+            script = Path(folder) / "blocked.py"
+            script.write_text("import time; time.sleep(30)\n")
+            start = time.monotonic()
+            with patch.object(netcheck, "SCRIPT", str(script)):
+                result = netcheck.geo_ip("8.8.8.8", 0.2)
+            self.assertFalse(result["ok"])
+            self.assertIn("超时", result["error"])
+            self.assertEqual(result["source"], "ipwho.is")
+            self.assertLess(time.monotonic() - start, 1.5)
+
+    def test_annotation_deduplicates_ips_and_limits_concurrency(self):
+        lock = threading.Lock()
+        state = dict(active=0, maximum=0, calls=[])
+        addresses = [dict(ip="8.8.8.%d" % index) for index in range(1, 9)]
+        report = dict(dns=dict(addresses=addresses),
+                      http=dict(hops=[dict(ip="8.8.8.1"), dict(ip="1.1.1.1"), dict(ip="1.1.1.1")]))
+        args = netcheck.parser().parse_args(["check", "example.com", "--geo-timeout", "0.5"])
+
+        def lookup(ip, timeout):
+            self.assertEqual(timeout, 0.5)
+            with lock:
+                state["active"] += 1
+                state["maximum"] = max(state["maximum"], state["active"])
+                state["calls"].append(ip)
+            time.sleep(0.02)
+            with lock:
+                state["active"] -= 1
+            return dict(ok=True, country="美国", region="加利福尼亚州", city="洛杉矶")
+
+        with patch.object(netcheck, "geo_ip", side_effect=lookup):
+            netcheck.annotate_locations(report, args)
+        self.assertEqual(len(state["calls"]), 9)
+        self.assertEqual(len(set(state["calls"])), 9)
+        self.assertLessEqual(state["maximum"], 3)
+        self.assertEqual([item["ip"] for item in addresses], ["8.8.8.%d" % index for index in range(1, 9)])
+        self.assertEqual(addresses[0]["geo"], report["http"]["hops"][0]["geo"])
+        self.assertEqual(report["http"]["hops"][1]["geo"]["city"], "洛杉矶")
+
+    def test_lookup_failure_does_not_fail_dns_or_change_exit_code(self):
+        output = io.StringIO()
+        with patch.object(netcheck, "geo_ip", return_value=netcheck.failure("查询超时")), redirect_stdout(output):
+            code = netcheck.run_command(["dns", "8.8.8.8", "--json"])
+        report = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertTrue(report["ok"])
+        self.assertTrue(report["dns"]["ok"])
+        self.assertFalse(report["dns"]["addresses"][0]["geo"]["ok"])
+
+    def test_no_geo_preserves_original_json_and_makes_no_lookup(self):
+        args = netcheck.parser().parse_args(["dns", "8.8.8.8", "--no-geo"])
+        with patch.object(netcheck, "geo_ip") as lookup:
+            report = netcheck.execute(args)
+        lookup.assert_not_called()
+        self.assertEqual(report["dns"]["addresses"], [dict(ip="8.8.8.8", family="IPv4")])
+
+    def test_http_only_displays_location_and_sanitizes_remote_text(self):
+        args = netcheck.parser().parse_args(["http", "https://example.com"])
+        hop = dict(ip="8.8.8.8", url="https://example.com/", status=200, dns_ms=1,
+                   tcp_ms=2, tls_ms=3, headers_ms=4)
+        location = dict(ok=True, country="日本", region="东京", city="东京", isp="Example\x1b[31m\nISP")
+        with patch.object(netcheck, "http_check", return_value=dict(ok=True, hops=[hop])), \
+                patch.object(netcheck, "geo_ip", return_value=location):
+            report = netcheck.execute(args)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            netcheck.display(report)
+        text = output.getvalue()
+        self.assertIn("归属地：日本 东京；ISP：", text)
+        self.assertNotIn("东京 东京", text)
+        self.assertNotIn("\x1b", text)
+        self.assertIn("CDN / Anycast", text)
+
+    def test_dns_text_includes_location_and_fallback_reason(self):
+        args = netcheck.parser().parse_args(["dns", "8.8.8.8"])
+        for location, expected in [(dict(ok=True, country="美国", region="加利福尼亚州", city="洛杉矶"),
+                                    "归属地：美国 加利福尼亚州 洛杉矶"),
+                                   (netcheck.failure("服务不可达"), "归属地：查询失败：服务不可达")]:
+            with self.subTest(location=location):
+                with patch.object(netcheck, "geo_ip", return_value=location):
+                    report = netcheck.execute(args)
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    netcheck.display(report)
+                self.assertIn(expected, output.getvalue())
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ import threading
 import time
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 SCRIPT = os.path.realpath(__file__)
 ACTIVE_PROCESSES = set()
 PROCESS_LOCK = threading.Lock()
@@ -167,6 +167,73 @@ def dns_check(host, timeout):
             except (OSError, subprocess.TimeoutExpired):
                 result["cname_note"] = "CNAME 查询失败或超时；A / AAAA 解析结果仍可用"
     return result
+
+
+def geo_native(config):
+    ip = str(ipaddress.ip_address(config["ip"]))
+    connection = http.client.HTTPSConnection("ipwho.is", timeout=config["timeout"])
+    try:
+        fields = "success,message,country,country_code,region,city,connection.isp,connection.org"
+        connection.request("GET", "/" + quote(ip, safe=":") + "?lang=zh-CN&fields=" + fields,
+                           headers={"User-Agent": "netcheck/" + VERSION,
+                                    "Accept": "application/json", "Connection": "close"})
+        response = connection.getresponse()
+        if response.status != 200:
+            return failure("归属地服务返回 HTTP %d" % response.status)
+        body = response.read(65537)
+        if len(body) > 65536:
+            return failure("归属地响应超过大小上限")
+        data = json.loads(body)
+        if not isinstance(data, dict):
+            return failure("归属地服务返回无效数据")
+        if data.get("success") is not True:
+            message = data.get("message")
+            return failure(message if isinstance(message, str) else "未查询到归属地")
+        location = {key: data[key].strip() if isinstance(data.get(key), str) else ""
+                    for key in ("country", "country_code", "region", "city")}
+        if not any(location[key] for key in ("country", "region", "city")):
+            return failure("归属地服务未返回国家、地区或城市")
+        network = data.get("connection")
+        isp = ""
+        if isinstance(network, dict):
+            isp = next((network[key].strip() for key in ("isp", "org")
+                        if isinstance(network.get(key), str) and network[key].strip()), "")
+        return dict(ok=True, source="ipwho.is", isp=isp, **location)
+    finally:
+        connection.close()
+
+
+def geo_ip(ip, timeout):
+    address = ipaddress.ip_address(ip)
+    public_address = (address.ipv4_mapped or address) if address.version == 6 else address
+    if not public_address.is_global or public_address.is_multicast or public_address.is_reserved:
+        return failure("内网或保留地址，无公网归属地", skipped=True)
+    result = worker("geo", dict(ip=str(address), timeout=timeout), timeout)
+    result.setdefault("source", "ipwho.is")
+    return result
+
+
+def annotate_locations(report, args):
+    if args.no_geo:
+        return
+    items = list(report.get("dns", {}).get("addresses", []))
+    items.extend(report.get("http", {}).get("hops", []))
+    if not items:
+        return
+    addresses = list(dict.fromkeys(item["ip"] for item in items))
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+    try:
+        locations = dict(zip(addresses, pool.map(lambda ip: geo_ip(ip, args.geo_timeout), addresses)))
+    except KeyboardInterrupt:
+        CANCELLED.set()
+        with PROCESS_LOCK:
+            for proc in ACTIVE_PROCESSES:
+                proc.kill()
+        raise
+    finally:
+        pool.shutdown(wait=True)
+    for item in items:
+        item["geo"] = locations[item["ip"]]
 
 
 def parse_ping(output):
@@ -336,6 +403,7 @@ def execute(args):
                 report["tcp"] = probe_addresses(dns, "tcp", args)
             if args.command == "check":
                 report["http"] = http_check(url_value(args.target), args)
+    annotate_locations(report, args)
     checks = []
     for key in ("dns", "http"):
         if key in report:
@@ -351,6 +419,18 @@ def safe_text(value):
     return "".join(char if char.isprintable() else " " for char in str(value))
 
 
+def geo_suffix(item):
+    geo = item.get("geo")
+    if not geo:
+        return ""
+    if not geo["ok"]:
+        return "（归属地：%s%s）" % ("" if geo.get("skipped") else "查询失败：", safe_text(geo["error"]))
+    parts = list(dict.fromkeys(geo[key] for key in ("country", "region", "city") if geo.get(key)))
+    location = safe_text(" ".join(parts))
+    isp = "；ISP：" + safe_text(geo["isp"]) if geo.get("isp") else ""
+    return "（归属地：%s%s）" % (location, isp)
+
+
 def display(report, as_json=False):
     if as_json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -361,7 +441,7 @@ def display(report, as_json=False):
         if dns["ok"]:
             print("解析：%g ms%s" % (dns["dns_ms"], "（输入为 IP，未查询 DNS）" if dns.get("literal_ip") else "（系统解析器）"))
             for item in dns["addresses"]:
-                print("  %-4s %s" % (item["family"], item["ip"]))
+                print("  %-4s %s%s" % (item["family"], item["ip"], geo_suffix(item)))
             for cname in dns.get("cnames", []):
                 print("  CNAME " + safe_text(cname))
             if dns.get("cname_note"):
@@ -383,7 +463,7 @@ def display(report, as_json=False):
     if "http" in report:
         result = report["http"]
         for hop in result.get("hops", []):
-            print("HTTP %d  %s（IP：%s）" % (hop["status"], safe_text(hop["url"]), hop["ip"]))
+            print("HTTP %d  %s（IP：%s）%s" % (hop["status"], safe_text(hop["url"]), hop["ip"], geo_suffix(hop)))
             print("  DNS %g ms / TCP %g ms / TLS %s / 响应头 %g ms" % (
                 hop["dns_ms"], hop["tcp_ms"],
                 "%g ms" % hop["tls_ms"] if hop["tls_ms"] is not None else "—", hop["headers_ms"]))
@@ -393,6 +473,9 @@ def display(report, as_json=False):
     print("总耗时：%g ms；%s" % (report["total_ms"], "检测完成" if report["ok"] else "存在未通过的项目"))
     if any(not item["ok"] for item in report.get("ping", [])):
         print("提示：Ping 不通不代表网站不可用，请结合 TCP 和 HTTP 结果判断。")
+    locations = list(report.get("dns", {}).get("addresses", [])) + report.get("http", {}).get("hops", [])
+    if any(item.get("geo") and not item["geo"].get("skipped") for item in locations):
+        print("提示：归属地为 IP 数据库估算；CDN / Anycast 地址不代表源站位置。")
 
 
 def bounded_number(low, high, convert):
@@ -419,6 +502,9 @@ def parser():
         item.add_argument("--timeout", type=bounded_number(0.1, 10, float), default=5,
                           help="超时秒数，默认 5；HTTP 为整项总上限")
         item.add_argument("--json", action="store_true", help="输出 JSON，方便脚本调用")
+        item.add_argument("--no-geo", action="store_true", help="不向第三方查询 IP 归属地")
+        item.add_argument("--geo-timeout", type=bounded_number(0.1, 10, float), default=3,
+                          help="每个 IP 的归属地查询总上限，默认 3 秒")
         item.set_defaults(count=5, port=443, max_addresses=3, max_redirects=3)
         if name in ("ping", "check"):
             item.add_argument("--count", type=bounded_number(1, 20, int), default=5, help="Ping 次数，默认 5")
@@ -486,6 +572,8 @@ def main():
                 result = resolve_native(payload)
             elif sys.argv[2] == "http":
                 result = http_native(payload)
+            elif sys.argv[2] == "geo":
+                result = geo_native(payload)
             else:
                 result = failure("未知检测类型")
         except (OSError, ValueError, http.client.HTTPException) as exc:
