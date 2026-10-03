@@ -3,7 +3,8 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
-ALLENTOOL_VERSION=0.1.13
+ALLENTOOL_VERSION=0.1.14
+INSTALL_ASSUME_YES=no
 INSTALL_PATH=${SAFE_SSH_PORT_INSTALL_PATH:-/usr/local/sbin/safe-ssh-port}
 ALLENTOOL_PATH=${ALLENTOOL_PATH:-/usr/local/bin/allentool}
 SSHD_CONFIG=${SAFE_SSH_PORT_CONFIG:-/etc/ssh/sshd_config}
@@ -84,7 +85,7 @@ usage() {
   $PROGRAM restore
   $PROGRAM firewall
   $PROGRAM firewall-save
-  $PROGRAM install
+  $PROGRAM install [--yes]
   $PROGRAM install-shortcut
   $PROGRAM --version
   sudo $PROGRAM switch <新端口> [--cloud-firewall-ready] [--skip-host-firewall]
@@ -132,6 +133,13 @@ confirm_install_target() {
         [[ -f $target && ! -L $target ]] ||
             die "目标已存在且不是普通文件，拒绝覆盖: $target"
         if [[ $source_file -ef $target ]] || cmp -s "$source_file" "$target"; then
+            return 0
+        fi
+        if [[ $INSTALL_ASSUME_YES == yes ]]; then
+            grep -Eq '^ALLENTOOL_VERSION=[0-9]+\.[0-9]+\.[0-9]+$' "$target" ||
+                die "目标不是可识别的 safe-ssh-port 文件，拒绝自动覆盖: $target"
+            grep -Fqx 'PROGRAM=${0##*/}' "$target" ||
+                die "目标不是可识别的 safe-ssh-port 文件，拒绝自动覆盖: $target"
             return 0
         fi
         [[ -t 0 ]] || die "目标已存在；请在交互终端中确认是否覆盖: $target"
@@ -940,7 +948,7 @@ save_static_iptables_rules() {
         if [[ $family == v4 ]]; then command_name=iptables-save; else command_name=ip6tables-save; fi
         if ! command -v "$command_name" >/dev/null 2>&1; then
             if [[ $family == v6 ]] && ! command -v ip6tables >/dev/null 2>&1; then continue; fi
-            warn "缺少 $command_name，无法保存静态防火墙规则。"
+            warn "缺少 ${command_name}，无法保存静态防火墙规则。"
             rm -f -- "${staged[@]}"
             return 1
         fi
@@ -1007,7 +1015,7 @@ iptables_port_rule_position() {
 sync_fail2ban_ports() {
     [[ -f $F2B_CONFIG ]] || return 0
     if [[ ! -x $F2B_TOOL ]]; then
-        warn "检测到 Fail2ban 工具配置，但未找到 $F2B_TOOL；请运行 sudo f2btool sync-ports。"
+        warn "检测到 Fail2ban 工具配置，但未找到 ${F2B_TOOL}；请运行 sudo f2btool sync-ports。"
     elif ! "$F2B_TOOL" sync-ports; then
         warn 'SSH 操作已完成，但 Fail2ban 端口同步失败；请运行 sudo f2btool sync-ports 查看错误。'
     fi
@@ -3160,7 +3168,10 @@ main() {
             ;;
         install)
             require_root
-            (($# == 0)) || die 'install 不接受额外参数。'
+            if (($#)); then
+                [[ $# == 1 && $1 == --yes ]] || die 'install 仅接受 --yes 参数。'
+                INSTALL_ASSUME_YES=yes
+            fi
             install_tool
             ;;
         install-shortcut)

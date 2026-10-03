@@ -20,7 +20,7 @@ import tempfile
 import time
 import uuid
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 CONFIG_NAME = "99-vpstools-sshd.local"
 MARKER = "# vpstools-fail2ban: "
 CHAIN = "f2b-vpstools-sshd"

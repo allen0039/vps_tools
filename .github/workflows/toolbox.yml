@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate shell syntax
-        run: bash -n install.sh && bash -n vpstools.sh && bash -n web_tool/install.sh && bash -n iperf3_tool/iperf3-tool.sh
+        run: bash -n install.sh && bash -n vpstools.sh && bash -n Fail2ban/install.sh && bash -n web_tool/install.sh && bash -n iperf3_tool/iperf3-tool.sh
       - name: Check toolbox routing and installation
         run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Check Fail2ban configuration and firewall compatibility

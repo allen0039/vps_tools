@@ -34,7 +34,33 @@
 
 ## 安装
 
-将本仓库这次修改后的文件放到 Linux VPS，在仓库根目录执行：
+### 一键部署
+
+在 Debian/Ubuntu VPS 的 SSH 终端执行一整行命令。安装器会从同一个固定提交下载并检查 `safe-ssh-port` 与 `f2btool`，安装或更新两个工具，再安装 Fail2ban 依赖、配置并启用 SSH 防护。默认沿用上表的阈值与当前 SSH 端口；再次运行会更新工具并重新应用配置，保留已有白名单。
+
+GitHub：
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/Fail2ban/install.sh' -o /tmp/f2b-install.sh && sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT bash /tmp/f2b-install.sh --channel github
+```
+
+Gitee：
+
+```bash
+curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/Fail2ban/install.sh' -o /tmp/f2b-install.sh && sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT bash /tmp/f2b-install.sh --channel gitee
+```
+
+若 sudo 策略不允许保留 SSH 环境变量，或管理地址会经代理/NAT 变化，可显式追加 `--ignore-ip <管理IP或CIDR>`。例如 `--ignore-ip 203.0.113.8`。还可传 `--scope all`、`--bantime`、`--findtime`、`--maxretry`；运行 `bash /tmp/f2b-install.sh --help` 查看选项。脚本不会切换 SSH 端口，也不会安装完整 VPS 工具箱。
+
+从本地仓库执行：
+
+```bash
+sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT bash Fail2ban/install.sh
+```
+
+### 通过工具箱安装
+
+在仓库根目录执行：
 
 ```bash
 sudo bash install.sh
@@ -42,7 +68,7 @@ vpstools
 # 选择 10. Fail2ban SSH 防暴力破解
 ```
 
-统一安装只部署工具文件，系统包和防护规则在子菜单“安装 / 配置 SSH 防护”中按需安装与启用。只部署这两个工具也可以：
+统一安装只部署工具文件，系统包和防护规则在子菜单“安装 / 配置 SSH 防护”中按需安装与启用。手动只部署这两个工具也可以：
 
 ```bash
 sudo bash safe-ssh-port/safe-ssh-port.sh install
@@ -94,6 +120,7 @@ sudo 策略可能清除 SSH 来源变量，配置时会显示是否检测到来�
 
 ```bash
 python3 -m unittest discover -s Fail2ban/tests -p 'test_*.py'
+bash -n Fail2ban/install.sh
 python3 -m unittest discover -s safe-ssh-port/tests -p 'test_*.py'
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
