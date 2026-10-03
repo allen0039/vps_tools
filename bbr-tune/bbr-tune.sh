@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.21"
+VERSION="2.10.22"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -876,9 +876,22 @@ def options(q):
     if kind=='fq':
         for k in ('limit','flow_limit','buckets','orphan_mask','quantum','initial_quantum'): number(k)
         for k in ('maxrate','defrate','low_rate_threshold'): number(k,'bit',8)
-        for k in ('refill_delay','ce_threshold','horizon'): number(k,'us')
+        for k in ('refill_delay','ce_threshold','horizon','offload_horizon'): number(k,'us')
         number('timer_slack','ns'); boolean('pacing','pacing','nopacing')
         if 'pacing' not in o: args.append('pacing')
+        known.update(('bands','priomap','weights'))
+        if 'bands' in o or 'priomap' in o:
+            if o.get('bands') != 3 or type(o.get('bands')) != int:
+                raise ValueError('unsupported fq bands')
+            priomap=o.get('priomap')
+            if not isinstance(priomap,list) or len(priomap)!=16 or any(type(v)!=int or not 0<=v<3 for v in priomap):
+                raise ValueError('invalid fq priomap')
+            args += ['bands','3','priomap'] + [str(v) for v in priomap]
+        if 'weights' in o:
+            weights=o['weights']
+            if not isinstance(weights,list) or len(weights)!=3 or any(type(v)!=int or not 1<=v<=2**31-1 for v in weights):
+                raise ValueError('invalid fq weights')
+            args += ['weights'] + [str(v) for v in weights]
         for k in ('horizon_cap','horizon_drop'):
             known.add(k)
             if k in o:

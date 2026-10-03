@@ -100,6 +100,19 @@ for val in ['atm','ptm','noatm']:
 i = 0
 while i < len(args):
     key = args[i]
+    if key == 'bands':
+        assert args[i+1:i+3] == ['3', 'priomap'], args
+        priomap = [int(v) for v in args[i+3:i+19]]
+        assert len(priomap) == 16, args
+        options.update(bands=3, priomap=priomap)
+        i += 19
+        continue
+    if key == 'weights':
+        weights = [int(v) for v in args[i+1:i+4]]
+        assert len(weights) == 3, args
+        options['weights'] = weights
+        i += 4
+        continue
     if key in flags:
         k,v = flags[key]; options[k] = v
         if k == 'bandwidth': options.pop('autorate',None)
@@ -113,7 +126,7 @@ while i < len(args):
             assert val.endswith('bit'), val
             options[key] = int(Decimal(val[:-3])/8)
         if key == 'bandwidth': options.pop('autorate',None)
-    elif key in ('rtt','refill_delay','ce_threshold','horizon','target','interval'):
+    elif key in ('rtt','refill_delay','ce_threshold','horizon','offload_horizon','target','interval'):
         assert val.endswith('us'), val
         options[key] = int(val[:-2])
     elif key == 'timer_slack':

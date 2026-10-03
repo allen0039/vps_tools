@@ -1,6 +1,6 @@
 # bbr-tune 使用指南
 
-**版本 2.10.21** · 在远程 Linux 服务器上运行的 TCP / BBR 调优工具。
+**版本 2.10.22** · 在远程 Linux 服务器上运行的 TCP / BBR 调优工具。
 
 本目录基于 [dingding229/bbr-tune](https://github.com/dingding229/bbr-tune) 修改。上游仓库目前未提供明确的开源许可证；本目录不适用 VPS Tools 根目录的 MIT 许可证。公开发布或分发修改版前，请先确认已获得相应授权。
 
@@ -419,6 +419,10 @@ sudo bbr-tune kernel fallback
 检测到现有 CAKE 队列时，工具会保留整个队列布局及其带宽、流量分类等设置，继续测试并选择 TCP/BBR 参数。报告会显示实际队列，不会把该次测试标记为 `fq`。若 CAKE 配置了整形带宽，测试仍受该带宽约束；增加 TCP 缓存不会取消该限制。
 
 使用默认保留策略时，已有队列配置保持原样，CAKE 的开机加载仍由原网络配置或服务负责。明确选择另一算法时，工具会先检查原参数能否恢复，再执行切换。
+
+### 切换队列时提示 `unrecognized options: bands,offload_horizon,priomap,weights`
+
+这是旧版无法重建较新 `fq` 参数时的预检拦截，尚未修改出口队列。更新到 2.10.22 或更高版本后重试。若 `tc -s -d qdisc show dev 出口网卡` 显示根队列已为 `fq`，或 `mq` 的所有子队列均为 `fq`，当前已经在使用 `fq`，无需替换。
 
 ### 出现 Failed to find specified qdisc 或队列恢复失败
 
