@@ -412,6 +412,9 @@ class ManagerTests(unittest.TestCase):
                 mock.patch("builtins.input", side_effect=answers):
             tool.menu(self.manager)
         self.assertIn("Ipv4和ipv6管理", output.getvalue())
+        self.assertIn("当前网络优先级设置：IPv6 优先（系统默认）", output.getvalue())
+        self.assertIn("当前网络优先级设置：IPv4 优先", output.getvalue())
+        self.assertIn("当前网络优先级设置：IPv6 优先\n", output.getvalue())
         self.assertIn("已临时禁用", output.getvalue())
         self.assertIn("关闭前的启动配置已恢复", output.getvalue())
         self.assertFalse(self.manager.gai.exists())
@@ -431,6 +434,23 @@ class ManagerTests(unittest.TestCase):
         self.assertIn("已取消", output.getvalue())
         self.assertFalse(self.manager.boot_file.exists())
         self.assertEqual(self.boot_command_count(), 0)
+
+    def test_menu_reads_existing_gai_priority_without_tool_state(self):
+        self.manager.gai.write_text("# configured elsewhere\nprecedence ::ffff:0:0/96 100\n")
+        self.assertEqual(self.manager.priority_description(),
+                         "IPv4 优先（gai.conf 自定义策略）")
+        output = io.StringIO()
+        output.isatty = lambda: True
+        with mock.patch.object(sys.stdin, "isatty", return_value=True), \
+                mock.patch.object(sys, "stdout", output), \
+                mock.patch("builtins.input", side_effect=["0"]):
+            tool.menu(self.manager)
+        self.assertIn("当前网络优先级设置：IPv4 优先", output.getvalue())
+
+    def test_menu_reports_external_priority_change(self):
+        self.manager.priority("ipv4")
+        self.manager.gai.write_text("# changed by another program\n")
+        self.assertIn("实际优先级待确认", self.manager.priority_description())
 
 
 class GuardTests(unittest.TestCase):

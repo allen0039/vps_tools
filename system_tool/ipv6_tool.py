@@ -22,7 +22,7 @@ import tempfile
 import uuid
 
 TOOL_ID = "vps-tools-ipv6tool"
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 MARKER = "# Managed by ipv6tool; restore with ipv6tool enable"
 BOOT_CONTENT = (MARKER + '\nGRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:+$GRUB_CMDLINE_LINUX }ipv6.disable=1"\n').encode()
 DEFAULT_PRECEDENCE = {"::1/128": 50, "::/0": 40, "2002::/16": 30,
@@ -520,17 +520,51 @@ class Manager:
             raise ToolError("内核禁用不是由本工具配置，缺少可恢复备份；请检查原引导配置。")
         return "没有本工具管理的禁用配置；未覆盖其他工具的 IPv6 设置。"
 
-    def status(self):
-        state = self.state()
+    def priority_description(self, state=None):
+        """显示 glibc 地址选择策略；无法归纳的自定义规则不猜测。"""
+        state = self.state() if state is None else state
         priority = state.get("priority")
-        description = "原系统策略（未由本工具管理）"
+        snapshot = file_snapshot(self.gai)
         if priority:
             description = ("IPv4" if priority["mode"] == "ipv4" else "IPv6") + " 优先"
             if priority.get("phase") != "applied":
                 description += "（操作未完成，可恢复原优先级）"
-            if not self.gai.exists() or digest(self.gai.read_bytes()) != priority["applied"]:
-                description += "（配置被外部修改）"
-        lines = ["Ipv4和ipv6管理 v" + VERSION, "系统地址选择策略：" + description]
+            if not snapshot["exists"] or snapshot["sha256"] != priority["applied"]:
+                description += "（配置被外部修改，实际优先级待确认）"
+            return description
+        if not snapshot["exists"]:
+            return "IPv6 优先（系统默认）"
+        lines = []
+        for line in unpack(snapshot["data"]).decode("utf-8").splitlines():
+            parts = line.split("#", 1)[0].split()
+            if parts and parts[0] == "precedence":
+                lines.append(parts)
+        if not lines:
+            return "IPv6 优先（系统默认）"
+        values = {}
+        for parts in lines:
+            try:
+                if len(parts) != 3:
+                    raise ValueError("invalid precedence")
+                prefix = str(ipaddress.IPv6Network(parts[1], strict=False))
+                value = int(parts[2])
+                if value < 0 or prefix in values:
+                    raise ValueError("invalid precedence")
+            except ValueError:
+                return "自定义策略（无法判断统一优先级）"
+            values[prefix] = value
+        ipv4 = values.get("::ffff:0:0/96", 0)
+        ipv6 = values.get("::/0", 0)
+        if ipv4 > ipv6:
+            return "IPv4 优先（gai.conf 自定义策略）"
+        if ipv6 > ipv4:
+            return "IPv6 优先（gai.conf 自定义策略）"
+        return "自定义策略（无法判断统一优先级）"
+
+    def status(self):
+        state = self.state()
+        lines = ["Ipv4和ipv6管理 v" + VERSION,
+                 "系统地址选择策略：" + self.priority_description(state)]
         lines.append("当前内核：" + ("IPv6 已从内核禁用" if self.kernel_disabled() else "没有 ipv6.disable=1 参数"))
         if "complete" in state:
             phase = state["complete"].get("phase")
@@ -629,6 +663,11 @@ def menu(manager):
         raise ToolError("菜单需要交互终端；请使用 --help 查看命令模式。")
     while True:
         print("\nIpv4和ipv6管理 v" + VERSION)
+        try:
+            print("当前网络优先级设置：" + manager.priority_description())
+        except (ToolError, OSError, ValueError, KeyError) as exc:
+            print("当前网络优先级设置：无法读取（%s）" % exc)
+        print()
         print("1. 查看 IPv6 状态\n2. IPv4 优先\n3. IPv6 优先\n4. 恢复原优先级")
         print("5. 临时禁用 IPv6\n6. 彻底关闭 IPv6（备份后配置，重启生效）\n7. 恢复禁用前的 IPv6 配置\n0. 退出")
         try:
