@@ -1,6 +1,6 @@
 # bbr-tune 使用指南
 
-**版本 2.10.23** · 在远程 Linux 服务器上运行的 TCP / BBR 调优工具。
+**版本 2.10.24** · 在远程 Linux 服务器上运行的 TCP / BBR 调优工具。
 
 本目录基于 [dingding229/bbr-tune](https://github.com/dingding229/bbr-tune) 修改。上游仓库目前未提供明确的开源许可证；本目录不适用 VPS Tools 根目录的 MIT 许可证。公开发布或分发修改版前，请先确认已获得相应授权。
 
@@ -257,6 +257,9 @@ sudo env NO_COLOR=1 bbr-tune
 # 切换为 fq，只对当前运行生效
 sudo bbr-tune qdisc --qdisc fq
 
+# 明确跳过本次备份与安全回滚
+sudo bbr-tune qdisc --qdisc fq --no-backup
+
 # 切换为 fq_codel，并设置该出口网卡的开机加载
 sudo bbr-tune qdisc --qdisc fq_codel --persist
 
@@ -270,9 +273,9 @@ sudo bbr-tune qdisc --qdisc cake --cake-bandwidth-mbps 190 --persist
 sudo bbr-tune qdisc --qdisc cake --cake-bandwidth-mbps 0
 ```
 
-可添加 `--iface eth0` 指定出口网卡。单独切换不修改 TCP 缓存、TCP 拥塞控制或系统默认队列。
+可添加 `--iface eth0` 指定出口网卡。单独切换不修改 TCP 缓存、TCP 拥塞控制或系统默认队列。菜单会分别询问是否备份（默认备份）和是否执行；命令行默认备份，添加 `--no-backup` 才跳过。无论是否备份，切换前都会验证原队列参数能否安全解析和重建。
 
-操作完成后，先通过备用 SSH 会话验证代理业务，再执行 `sudo bbr-tune confirm`。未在默认 `3600` 秒内确认时会尝试恢复备份；手动恢复使用 `sudo bbr-tune rollback`。本次报告位于会话目录下的 `queue-comparison.txt`。
+选择备份时，操作完成后先通过备用 SSH 会话验证代理业务，再执行 `sudo bbr-tune confirm`；未在默认 `3600` 秒内确认时会尝试恢复备份，手动恢复使用 `sudo bbr-tune rollback`。选择不备份时，本次不创建参数备份，也不启动安全回滚；若切换或开机配置写入失败，无法自动恢复本次操作前的状态，无需执行 `confirm`。已有备份保留。本次报告位于会话目录下的 `queue-comparison.txt`。
 
 ### 在 TCP 调优时选择队列
 

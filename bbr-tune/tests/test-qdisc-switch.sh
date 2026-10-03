@@ -16,6 +16,7 @@ chmod +x "$TMP/bin/"{tc,ip,flock}
 export PATH="$TMP/bin:$PATH"
 SESSION_DIR="$TMP/session"; STATE_DIR="$TMP/state"; SESSION_ROOT="$STATE_DIR/sessions"
 BACKUP_ROOT="$STATE_DIR/backups"; LATEST_BACKUP="$STATE_DIR/latest"; PENDING_DIR="$STATE_DIR/pending"
+PENDING_LATEST="$STATE_DIR/pending-latest"; ACTIVE_SESSION_FILE="$STATE_DIR/active-session"
 SYSCTL_FILE="$TMP/config/sysctl"; MODULES_FILE="$TMP/config/modules"
 ENV_FILE="$TMP/config/env"; QDISC_HELPER="$TMP/config/helper"; SERVICE_FILE="$TMP/config/service"
 QDISC_ONLY=1; session=0
@@ -73,6 +74,8 @@ for bw in -1 0.00000001 NaN inf '200;id' 100001; do
  if (REQUESTED_QDISC=cake; CAKE_BANDWIDTH_MBPS="$bw"; validate_qdisc_options) >/dev/null 2>&1; then fail 'invalid bandwidth accepted'; fi
 done
 if (REQUESTED_QDISC=fq; CAKE_BANDWIDTH_MBPS=100; validate_qdisc_options) >/dev/null 2>&1; then fail 'non-CAKE bandwidth accepted'; fi
+(parse_args qdisc --qdisc fq --no-backup; [[ "$QDISC_NO_BACKUP" == 1 && "$HISTORY_NO_BACKUP" == 0 ]]) || fail 'queue no-backup CLI option'
+if (parse_args autotune --no-backup) >"$TMP/invalid-no-backup.log" 2>&1; then fail 'autotune accepted no-backup'; fi
 [[ "$(printf '\n' | ui_select_qdisc 2>/dev/null)" == auto ]] || fail 'default queue choice'
 [[ "$(printf '2\n' | ui_select_qdisc 2>/dev/null)" == keep ]] || fail 'keep choice'
 [[ "$(printf '3\n' | ui_select_qdisc switch 2>/dev/null)" == cake ]] || fail 'CAKE switch choice'
@@ -236,6 +239,7 @@ no_namespace_leaks
 # run iperf3, change TCP sysctls or claim throughput improvement.
 (
  set_live shaped; REQUESTED_QDISC=fq; CAKE_BANDWIDTH_MBPS=""
+ QDISC_NO_BACKUP=0
  require_linux() { :; }; require_root() { :; }; install_python3_if_needed() { :; }; modprobe() { :; }
  init_session() { SESSION_DIR="$TMP/command"; mkdir -p "$SESSION_DIR"; }
  resolve_iface() { echo eth0; }; capture_state() { echo snapshot >"$2"; }
@@ -246,5 +250,50 @@ no_namespace_leaks
  grep -Fq 'TCP 缓存与拥塞控制：未修改' "$SESSION_DIR/queue-comparison.txt" || fail 'queue-only report misleading'
  grep -Fqx 'BBR_QDISC=fq' "$ENV_FILE" || fail 'queue-only persistence missing'
 ) || { cat "$TMP/command.log" >&2; fail 'queue-only command failed'; }
+# Explicit no-backup must neither create a backup nor arm a timer. It may
+# still persist the chosen queue and must record that recovery is unavailable.
+(
+ set_live shaped; REQUESTED_QDISC=fq; CAKE_BANDWIDTH_MBPS=""; QDISC_NO_BACKUP=1; PERSIST_FINAL=1
+ require_linux() { :; }; require_root() { :; }; install_python3_if_needed() { :; }; modprobe() { :; }
+ init_session() { SESSION_ID=no-backup-qdisc; SESSION_DIR="$SESSION_ROOT/$SESSION_ID"; mkdir -p "$SESSION_DIR"; }
+ resolve_iface() { echo eth0; }; capture_state() { echo snapshot >"$2"; }
+ create_backup() { fail 'queue no-backup created a backup'; }
+ schedule_rollback() { fail 'queue no-backup scheduled rollback'; }
+ mkdir -p "$PENDING_DIR/previous"
+ printf '%s\n' "$BACKUP_ROOT/previous" >"$PENDING_DIR/previous/backup"
+ : >"$PENDING_DIR/previous/armed"
+ ln -sfn "$PENDING_DIR/previous" "$PENDING_LATEST"
+ qdisc_command >"$TMP/no-backup-command.log" 2>&1 || fail 'queue no-backup lifecycle failed'
+ [[ -z "$BACKUP_DIR" && ! -e "$PENDING_LATEST" && ! -d "$BACKUP_ROOT/no-backup-qdisc" ]] || fail 'queue no-backup left recovery state'
+ [[ "$(cat "$ACTIVE_SESSION_FILE")" == no-backup-qdisc ]] || fail 'queue no-backup active session missing'
+ qdisc_json matches "$TMP/live.json" fq '' || fail 'queue no-backup did not switch'
+ grep -Fq '本次备份：未备份' "$SESSION_DIR/queue-comparison.txt" || fail 'queue no-backup report missing'
+ grep -Fq '安全回滚：关闭' "$SESSION_DIR/queue-comparison.txt" || fail 'queue no-backup rollback report missing'
+ grep -Fqx 'BBR_QDISC=fq' "$ENV_FILE" || fail 'queue no-backup persistence missing'
+ if grep -Fq '验证代理业务后执行 bbr-tune confirm' "$TMP/no-backup-command.log"; then fail 'queue no-backup requests confirmation'; fi
+) || { cat "$TMP/no-backup-command.log" >&2; fail 'queue no-backup command failed'; }
+(
+ set_live shaped; REQUESTED_QDISC=fq; CAKE_BANDWIDTH_MBPS=""; QDISC_NO_BACKUP=1; PERSIST_FINAL=0
+ require_linux() { :; }; require_root() { :; }; install_python3_if_needed() { :; }; modprobe() { :; }
+ init_session() { SESSION_ID=failed-no-backup-qdisc; SESSION_DIR="$SESSION_ROOT/$SESSION_ID"; mkdir -p "$SESSION_DIR"; }
+ resolve_iface() { echo eth0; }; capture_state() { echo snapshot >"$2"; }
+ create_backup() { fail 'failed queue no-backup created a backup'; }
+ schedule_rollback() { fail 'failed queue no-backup scheduled rollback'; }
+ restore_backup() { fail 'failed queue no-backup restored an older backup'; }
+ apply_tuning_qdisc() { return 23; }
+ qdisc_command
+) >"$TMP/failed-no-backup-command.log" 2>&1 && fail 'failed queue no-backup accepted'
+grep -Fq '无法自动恢复原队列' "$TMP/failed-no-backup-command.log" || fail 'failed queue no-backup warning missing'
+(
+ ui_select_qdisc() { echo fq; }
+ ui_read_text() { echo auto; }
+ ui_execute() { printf '%s\n' "$*" >"$TMP/ui-qdisc-args"; }
+ printf 'n\nn\ny\n' | ui_qdisc >"$TMP/ui-qdisc-no-backup.log"
+ grep -Fq -- '--no-backup' "$TMP/ui-qdisc-args" || fail 'queue menu did not forward no-backup choice'
+ grep -Fq '安全回滚：关闭' "$TMP/ui-qdisc-no-backup.log" || fail 'queue menu hid no-backup consequence'
+ printf 'n\n\ny\n' | ui_qdisc >"$TMP/ui-qdisc-backup.log"
+ if grep -Fq -- '--no-backup' "$TMP/ui-qdisc-args"; then fail 'queue menu default skipped backup'; fi
+ grep -Fq '安全回滚：' "$TMP/ui-qdisc-backup.log" || fail 'queue menu hid backup timer'
+) || fail 'queue menu backup selection failed'
 no_namespace_leaks
 printf 'All explicit queue selection, CAKE shaping, exact recovery and UI tests passed.\n'

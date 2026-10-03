@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.23"
+VERSION="2.10.24"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -70,6 +70,7 @@ RESTORE_ORIGINAL="0"
 HISTORY_SESSION=""
 HISTORY_PARAMS_AFTER="0"
 HISTORY_NO_BACKUP="0"
+QDISC_NO_BACKUP="0"
 UPDATE_CHANNEL="github"
 QUIET="0"
 UI_BLUE=""; UI_GREEN=""; UI_YELLOW=""; UI_RED=""; UI_RESET=""
@@ -300,7 +301,8 @@ usage() {
   sudo ./bbr-tune.sh autotune [参数]         自动测试并选择最优参数
   sudo ./bbr-tune.sh network-test [--mode both|route|speed]
                                            三网回程与单线程速度检测
-  sudo ./bbr-tune.sh qdisc --qdisc ALGO      单独更改出口队列，不改 TCP 参数
+  sudo ./bbr-tune.sh qdisc --qdisc ALGO [--no-backup]
+                                           单独更改出口队列，可选择不备份
   ./bbr-tune.sh status [--iface DEV]         查看当前 TCP/BBR 状态
   sudo ./bbr-tune.sh backup-current [--iface DEV] [--remark TEXT]
                                            手动备份当前参数（首次备份作为原始参数）
@@ -334,7 +336,7 @@ usage() {
   --max-retrans-percent N  最大估算重传比例，默认 1
   --persist                最优参数复测后写入开机配置
   --force                  旧自动模式的自定义队列覆盖；显式切换仍须通过恢复预检
-  --no-backup              仅 apply-history：不备份当前参数，并关闭本次安全回滚
+  --no-backup              qdisc 或 apply-history：不备份当前参数，并关闭本次安全回滚
   --remark TEXT            备份备注；交互备份未指定时询问，回车保留默认命名
 
 自动测试规则：
@@ -398,7 +400,13 @@ parse_args() {
       --remark) need_value "$@"; BACKUP_REMARK="$2"; shift 2 ;;
       --session) need_value "$@"; HISTORY_SESSION="$2"; shift 2 ;;
       --after) HISTORY_PARAMS_AFTER="1"; shift ;;
-      --no-backup) HISTORY_NO_BACKUP="1"; shift ;;
+      --no-backup)
+        case "$COMMAND" in
+          qdisc) QDISC_NO_BACKUP="1" ;;
+          apply-history) HISTORY_NO_BACKUP="1" ;;
+          *) die "--no-backup 仅支持 qdisc 或 apply-history" ;;
+        esac
+        shift ;;
       --channel) need_value "$@"; UPDATE_CHANNEL="$2"; shift 2 ;;
       --mode) need_value "$@"; NETWORK_TEST_MODE="$2"; shift 2 ;;
       --persist) PERSIST_FINAL="1"; shift ;;
@@ -409,9 +417,6 @@ parse_args() {
       *) die "未知参数：$1" ;;
     esac
   done
-  if (( HISTORY_NO_BACKUP )) && [[ "$COMMAND" != apply-history ]]; then
-    die "--no-backup 仅支持 apply-history"
-  fi
   if (( RESTORE_ORIGINAL )); then
     [[ "$COMMAND" == rollback && -z "$BACKUP_PATH" ]] || die "--original 仅用于 rollback，不能与 --backup 同时使用"
   fi
@@ -3549,7 +3554,7 @@ qdisc_command() {
   for cmd in ip tc sysctl modprobe awk mktemp tee; do have "$cmd" || die "服务器缺少命令：$cmd"; done
   init_session
   install_python3_if_needed
-  local iface before
+  local iface before skip_backup="$QDISC_NO_BACKUP"
   iface="$(resolve_iface)"
   [[ -n "$iface" ]] && ip link show dev "$iface" >/dev/null 2>&1 || die "无法识别出口网卡"
   select_tuning_qdisc "$iface" || die "队列切换预检失败，未修改服务器参数"
@@ -3559,13 +3564,23 @@ qdisc_command() {
   printf '  网卡：%s\n  原根队列：%s\n  目标：%s\n' "$iface" "$before" "$(qdisc_policy_summary)"
   printf '  本操作不修改 TCP 缓存、拥塞控制或系统默认队列。\n'
   QDISC_ONLY=1
-  BACKUP_DIR="$(create_backup "$iface")"
+  BACKUP_DIR=""
+  if (( ! skip_backup )); then BACKUP_DIR="$(create_backup "$iface")"; fi
+  pending_guard
   TUNING_ACTIVE=1
   trap cleanup_tuning_on_exit EXIT
   trap stop_tuning_on_signal INT TERM HUP
-  pending_guard
-  schedule_rollback "$BACKUP_DIR"
-  apply_tuning_qdisc "$iface" || die "队列切换失败，正在恢复备份"
+  if (( skip_backup )); then
+    clear_active_session
+  else
+    schedule_rollback "$BACKUP_DIR"
+  fi
+  if ! apply_tuning_qdisc "$iface"; then
+    if (( skip_backup )); then
+      die "队列切换失败；本次未备份，无法自动恢复原队列"
+    fi
+    die "队列切换失败，正在恢复备份"
+  fi
   if (( PERSIST_FINAL )); then write_qdisc_persistence "$iface"; fi
   capture_state "$iface" "${SESSION_DIR}/system-after.txt"
   {
@@ -3573,14 +3588,30 @@ qdisc_command() {
     printf '时间：%s\n网卡：%s\n原根队列：%s\n当前根队列：%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$iface" "$before" "$(root_qdisc_kind "$iface")"
     printf '队列策略：%s\n' "$(qdisc_policy_summary)"
     printf 'TCP 缓存与拥塞控制：未修改\n开机加载：%s\n' "$([[ "$PERSIST_FINAL" == 1 ]] && echo 已配置 || echo 未修改)"
-    printf '原队列完整参数：%s/qdisc-original.json\n' "$BACKUP_DIR"
+    if (( skip_backup )); then
+      printf '本次备份：未备份\n原队列预检快照：%s\n' "$QDISC_ORIGINAL_JSON"
+    else
+      printf '本次备份：%s\n原队列完整参数：%s/qdisc-original.json\n' "$BACKUP_DIR" "$BACKUP_DIR"
+    fi
     printf '原配置与切换后状态：%s\n' "$SESSION_DIR"
-    printf '安全回滚：%s 秒；验证业务后执行 bbr-tune confirm\n' "$AUTO_ROLLBACK_SECONDS"
+    if (( skip_backup )); then
+      printf '安全回滚：关闭；本次无需执行 bbr-tune confirm\n'
+    else
+      printf '安全回滚：%s 秒；验证业务后执行 bbr-tune confirm\n' "$AUTO_ROLLBACK_SECONDS"
+    fi
   } >"${SESSION_DIR}/queue-comparison.txt"
-  rm -f "$(pending_path "$BACKUP_DIR")/owner"
+  if (( skip_backup )); then
+    set_active_session "$SESSION_ID" || warn "无法记录当前使用会话：$SESSION_ID"
+  else
+    rm -f "$(pending_path "$BACKUP_DIR")/owner"
+  fi
   TUNING_ACTIVE=0
   trap - EXIT INT TERM HUP
-  info "队列已切换；请在 ${AUTO_ROLLBACK_SECONDS} 秒内验证代理业务后执行 bbr-tune confirm"
+  if (( skip_backup )); then
+    info "队列已切换；本次未备份且无安全回滚，请从独立 SSH 会话验证业务"
+  else
+    info "队列已切换；请在 ${AUTO_ROLLBACK_SECONDS} 秒内验证代理业务后执行 bbr-tune confirm"
+  fi
   info "操作报告：${SESSION_DIR}/queue-comparison.txt"
 }
 
@@ -4234,16 +4265,28 @@ ui_read_cake_bandwidth() {
 }
 
 ui_qdisc() {
-  local selected rate="" iface
+  local selected rate="" iface backup_choice skip_backup=0
   local args=()
   selected="$(ui_select_qdisc switch)" || return
   if [[ "$selected" == cake ]]; then rate="$(ui_read_cake_bandwidth)" || return; fi
   iface="$(ui_read_text '出口网卡（auto 为自动识别）' "$IFACE")" || return
   [[ -z "$rate" ]] || args+=(--cake-bandwidth-mbps "$rate")
   if ui_yes_no '将所选队列写入开机配置' n; then args+=(--persist); fi
-  printf '\n  目标队列：%s\n  安全回滚：%s 秒\n' "$selected" "$AUTO_ROLLBACK_SECONDS"
+  while true; do
+    read -r -p '切换前备份当前参数 [Y/n]：' backup_choice || return
+    case "${backup_choice:-y}" in
+      y|Y|yes|YES) break ;;
+      n|N|no|NO) skip_backup=1; args+=(--no-backup); break ;;
+    esac
+  done
+  printf '\n  目标队列：%s\n' "$selected"
+  if (( skip_backup )); then
+    printf '  本次备份：不备份；安全回滚：关闭（无法自动恢复原队列）\n'
+  else
+    printf '  本次备份：备份当前参数；安全回滚：%s 秒\n' "$AUTO_ROLLBACK_SECONDS"
+  fi
   printf '  本操作可能短暂影响代理连接；建议保留备用 SSH 或云控制台。\n'
-  ui_yes_no '备份并切换队列' n || return
+  ui_yes_no '确认切换队列' n || return
   ui_execute 1 qdisc --iface "$iface" --qdisc "$selected" ${args[@]+"${args[@]}"}
 }
 
