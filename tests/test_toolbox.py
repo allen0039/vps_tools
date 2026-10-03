@@ -64,6 +64,18 @@ class ToolboxTests(unittest.TestCase):
         self.assertEqual(self.run_cli("bogus").returncode, 2)
         self.assertEqual(self.run_cli("update", "bogus").returncode, 2)
 
+    def test_ipv6_dispatch_preserves_arguments_environment_and_status(self):
+        self.mock("ipv6tool", 'printf "%s\\n" "$@" "$SSH_CONNECTION"; exit 17')
+        self.env["SSH_CONNECTION"] = "2001:db8::1 12345 2001:db8::2 22"
+        result = self.run_cli("run", "ipv6", "priority", "ipv4")
+        self.assertEqual(result.stdout, "priority\nipv4\n2001:db8::1 12345 2001:db8::2 22\n")
+        self.assertEqual(result.returncode, 17)
+
+    def test_ipv6_installation_status(self):
+        self.assertIn("ipv6       未安装", self.run_cli("list").stdout)
+        self.mock("ipv6tool", "exit 99")
+        self.assertIn("ipv6       已安装", self.run_cli("list").stdout)
+
     def test_list_does_not_launch_tools(self):
         self.mock("dnstool", "exit 99")
         result = self.run_cli("list")
@@ -96,13 +108,14 @@ class ToolboxTests(unittest.TestCase):
     def test_menu_returns_after_child_failure_and_agent_requires_confirmation(self):
         self.mock("dnstool", "echo DNS_CHILD_FAILED; exit 7")
         self.mock("restart-mmw-agent", "echo AGENT_MUST_NOT_RUN")
+        self.mock("ipv6tool", "echo IPV6_CHILD; exit 7")
         master, slave = pty.openpty()
         proc = subprocess.Popen(["bash", str(ROOT / "vpstools.sh")], env=self.env,
                                 stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         output = b""
         try:
-            os.write(master, b"3\n6\nn\n7\n0\n")
+            os.write(master, b"3\n6\nn\n7\n11\n0\n")
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 ready, _, _ = select.select([master], [], [], 0.1)
@@ -122,6 +135,8 @@ class ToolboxTests(unittest.TestCase):
         text = output.decode()
         self.assertEqual(proc.returncode, 0, text)
         self.assertIn("DNS_CHILD_FAILED", text)
+        self.assertIn("IPV6_CHILD", text)
+        self.assertIn("12. 安装 / 更新全部工具", text)
         self.assertGreaterEqual(text.count("VPS Tools 工具箱"), 4)
         self.assertNotIn("AGENT_MUST_NOT_RUN", text)
 
@@ -153,7 +168,8 @@ printf INSTALL_MUST_NOT_START
 
     def test_install_only_uses_bbr_installer_and_never_runs_swap_or_agent(self):
         for folder, file in [("safe-ssh-port", "safe-ssh-port.sh"),
-                             ("dns_tool", "dns_tool.sh"), ("bbr-tune", "install.sh")]:
+                             ("dns_tool", "dns_tool.sh"), ("bbr-tune", "install.sh"),
+                             ("system_tool", "install.sh")]:
             path = self.base / folder / file
             path.parent.mkdir()
             path.write_text('#!/usr/bin/env bash\nprintf "%s %s\\n" "' + folder + '" "$*"\n')
@@ -171,6 +187,7 @@ install_tools
         self.assertIn("/usr/local/bin/vpstools", result.stdout)
         self.assertIn("/usr/local/bin/iperfprobe", result.stdout)
         self.assertIn("/usr/local/sbin/f2btool", result.stdout)
+        self.assertIn("system_tool ", result.stdout)
 
 
 if __name__ == "__main__":

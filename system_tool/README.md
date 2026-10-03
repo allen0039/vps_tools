@@ -17,7 +17,7 @@ sudo ipv6tool
 sudo python3 system_tool/ipv6_tool.py
 ```
 
-需要 Python 3.8+；临时禁用及地址恢复需要 iproute2 的 `ip` 命令。安装只部署程序，不修改系统网络或启动配置。当前为独立工具，尚未接入 `vpstools` 总菜单和统一安装器。
+需要 Python 3.8+；临时禁用及地址恢复需要 iproute2 的 `ip` 命令。安装只部署程序，不修改系统网络或启动配置。已接入 `vpstools` 总菜单和统一安装器：运行 `vpstools` 选择第 11 项，或运行 `sudo vpstools run ipv6 status` 查看状态。独立安装方式仍可使用。
 
 ```text
 IPv6 管理工具

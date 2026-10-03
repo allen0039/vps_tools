@@ -1,6 +1,6 @@
 # VPS Tools
 
-面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、Fail2ban、DNS、Swap、TCP / BBR 调优、妙妙屋 Agent 重启、网址检测和 iperf3 测速整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
+面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、Fail2ban、DNS、Swap、TCP / BBR 调优、妙妙屋 Agent 重启、网址检测、iperf3 测速和 IPv6 管理整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
 
 [GitHub 仓库](https://github.com/allen0039/vps_tools) · [Gitee 镜像](https://gitee.com/allen0039/vps_tools)
 
@@ -17,8 +17,9 @@
 | 妙妙屋 Agent 重启 | 重启并验证 `mmw-agent.service`，展示 PID、内存与 TCP 连接变化 | `restart-mmw-agent` | [Agent 使用指南](restart-mmw-agent/README.md) |
 | 网址与网络检测 | 解析域名 IP，检测 Ping 延迟、丢包、TCP 端口和 HTTP / HTTPS | `netcheck` | [检测使用指南](web_tool/README.md) |
 | iperf3 测速 | 本地与 VPS 双向测速，1 / 4 / 8 连接、随机端口与自动清理 | `iperfprobe` | [测速使用指南](iperf3_tool/README.md) |
+| IPv6 管理 | 设置 IPv4/IPv6 优先级、临时禁用或备份后彻底关闭 IPv6、恢复配置 | `ipv6tool` | [IPv6 管理指南](system_tool/README.md) |
 
-IPv6 优先级与禁用工具 `ipv6tool` 目前独立安装：在仓库根目录执行 `sudo bash system_tool/install.sh`，然后运行 `sudo ipv6tool`。支持 IPv4/IPv6 连接优先级、临时禁用 IPv6、备份后配置内核彻底关闭 IPv6，以及恢复。详见 [IPv6 管理指南](system_tool/README.md)。统一安装器暂不部署此工具。
+IPv6 工具已接入统一安装器和菜单；安装仅部署程序，网络与引导配置在子工具中按需修改。
 
 ## 快速安装
 
@@ -46,7 +47,7 @@ vpstools
 
 只需 SSH 的 Fail2ban 防护时，可以使用 [Fail2ban 一键部署脚本](Fail2ban/README.md#一键部署)，安装并配置 Fail2ban 与配套防火墙工具，无需安装整个工具箱。
 
-统一安装会部署全部 8 个独立工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或 DNS、创建 Swap、应用 TCP 调优参数或重启 Agent。BBR 安装器可能通过系统包管理器补齐基础依赖；iperf3 测速启动时会自动检测并安装缺失的 iperf3，Debian/Ubuntu 会选择不启动常驻服务。Fail2ban 系统包和防护规则在子菜单中按需安装与启用。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
+统一安装会部署全部 9 个独立工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或 DNS、创建 Swap、应用 TCP 调优参数、重启 Agent 或修改 IPv6 / GRUB 配置。BBR 安装器可能通过系统包管理器补齐基础依赖；iperf3 测速启动时会自动检测并安装缺失的 iperf3，Debian/Ubuntu 会选择不启动常驻服务。Fail2ban 系统包和防护规则在子菜单中按需安装与启用。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
 
 也可以克隆仓库后安装本地文件：
 
@@ -73,7 +74,8 @@ VPS Tools 工具箱
   8. 网址与网络检测
   9. iperf3 本地与 VPS 测速
   10. Fail2ban SSH 防暴力破解
-  11. 安装 / 更新全部工具
+  11. IPv6 优先级、禁用与恢复
+  12. 安装 / 更新全部工具
   0. 退出
 ```
 
@@ -101,6 +103,9 @@ vpstools run firewall
 # SSH 防暴力破解菜单
 vpstools run fail2ban
 
+# 查看 IPv6 状态（修改配置需在子工具中确认）
+sudo vpstools run ipv6 status
+
 # 查看 DNS、Swap 和 BBR 状态
 sudo vpstools run dns status
 vpstools run swap status
@@ -117,7 +122,7 @@ vpstools run netcheck dns example.com --json
 vpstools run iperf --host 203.0.113.10 --streams 1,4,8 --direction both
 ```
 
-`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`、`iperf`、`fail2ban`。直接执行 `vpstools run agent` 会重启服务；总菜单中的额外确认只适用于菜单操作。
+`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`、`iperf`、`fail2ban`、`ipv6`。直接执行 `vpstools run agent` 会重启服务；总菜单中的额外确认只适用于菜单操作。
 
 也可使用独立命令，例如：
 
@@ -142,7 +147,7 @@ vpstools update github
 vpstools update gitee
 ```
 
-也可以选择总菜单最后的第 11 项，或重新执行快速安装命令。菜单更新成功后会自动重新打开已安装的新版本。旧版本菜单若在更新后仍显示旧版本号，请选择 `0` 退出，再运行 `vpstools --version` 检查版本并用 `vpstools` 重新打开。
+也可以选择总菜单最后的第 12 项，或重新执行快速安装命令。菜单更新成功后会自动重新打开已安装的新版本。旧版本菜单若在更新后仍显示旧版本号，请选择 `0` 退出，再运行 `vpstools --version` 检查版本并用 `vpstools` 重新打开。
 
 远程安装时，安装器先查询所选渠道 `main` 分支的最新提交，再从同一个固定提交下载全部脚本。所有文件通过非空、对应 Bash / Python 脚本头及语法检查后，才开始部署；下载失败时尚未执行各工具安装步骤。安装锁用于防止两个工具箱安装同时运行。
 
@@ -165,6 +170,7 @@ vpstools update gitee
 - **TCP / BBR：** 测速会消耗时间与流量，结果取决于线路和测试环境。调整后按提示验证、确认或回滚；第三方内核安装需单独评估启动与驱动兼容性。
 - **Agent：** 重启会短暂中断现有代理连接。工具验证 Agent 状态并展示变化，不重启 Guard 服务。
 - **网址检测：** 按需运行，无第三方 Python 依赖或常驻服务；默认最多并行检测 3 个 IP，网站检测使用 HEAD、不下载正文。结果反映当前 VPS 到目标的网络情况；Ping 不通不代表网站不可用。
+- **IPv6：** 修改前保存备份；当前 SSH 使用 IPv6 或无法确认连接协议时拒绝禁用。彻底关闭仅支持工具识别的 Debian/Ubuntu GRUB 配置，需手动重启；关闭 `::1` 可能影响服务。详见子工具文档。
 - **iperf3 测速：** 本地也需要 iperf3，逐轮执行 VPS 显示的命令。测试会消耗流量，运行期间需要放行测速 TCP 端口；退出只清理本次测速进程，已有防火墙规则自行撤销。
 
 在远程服务器修改网络或启动相关配置前，建议准备云控制台、VNC 或串口等救援入口。生产环境可使用固定提交的下载地址，并在测试环境验证后部署。
@@ -183,6 +189,7 @@ vps_tools/
 ├── restart-mmw-agent/    # Agent 重启
 ├── web_tool/             # SSH 终端网址与网络检测
 ├── iperf3_tool/          # 本地与 VPS 的逐轮 iperf3 测速
+├── system_tool/          # IPv6 优先级、禁用与恢复
 └── tests/                # 工具箱测试
 ```
 
@@ -192,6 +199,7 @@ vps_tools/
 bash -n install.sh
 bash -n vpstools.sh
 python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m unittest discover -s system_tool/tests -p 'test_*.py'
 python3 -m unittest discover -s Fail2ban/tests -p 'test_*.py'
 python3 -m unittest discover -s web_tool/tests -p 'test_*.py'
 python3 -m unittest discover -s iperf3_tool/tests -p 'test_*.py'
