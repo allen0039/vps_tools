@@ -411,7 +411,7 @@ class ManagerTests(unittest.TestCase):
                 mock.patch.object(sys, "stdout", output), \
                 mock.patch("builtins.input", side_effect=answers):
             tool.menu(self.manager)
-        self.assertIn("IPv6 管理工具", output.getvalue())
+        self.assertIn("Ipv4/ipv6管理工具", output.getvalue())
         self.assertIn("已临时禁用", output.getvalue())
         self.assertIn("关闭前的启动配置已恢复", output.getvalue())
         self.assertFalse(self.manager.gai.exists())
