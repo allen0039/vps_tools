@@ -18,6 +18,8 @@
 | 网址与网络检测 | 解析域名 IP，检测 Ping 延迟、丢包、TCP 端口和 HTTP / HTTPS | `netcheck` | [检测使用指南](web_tool/README.md) |
 | iperf3 测速 | 本地与 VPS 双向测速，1 / 4 / 8 连接、随机端口与自动清理 | `iperfprobe` | [测速使用指南](iperf3_tool/README.md) |
 
+IPv6 优先级与禁用工具 `ipv6tool` 目前独立安装：在仓库根目录执行 `sudo bash system_tool/install.sh`，然后运行 `sudo ipv6tool`。支持 IPv4/IPv6 连接优先级、临时禁用 IPv6、备份后配置内核彻底关闭 IPv6，以及恢复。详见 [IPv6 管理指南](system_tool/README.md)。统一安装器暂不部署此工具。
+
 ## 快速安装
 
 在 **Linux VPS 终端**执行，任选一个下载渠道。需要 Bash、root 或 sudo 权限、Python 3.8+，以及 `flock`（通常由 `util-linux` 提供）；下列命令使用 `curl` 下载。网址检测的 Ping 功能需要系统 `ping`，`dig` 仅用于可选 CNAME 查询。
