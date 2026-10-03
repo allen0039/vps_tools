@@ -22,7 +22,7 @@ import tempfile
 import uuid
 
 TOOL_ID = "vps-tools-ipv6tool"
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 MARKER = "# Managed by ipv6tool; restore with ipv6tool enable"
 BOOT_CONTENT = (MARKER + '\nGRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:+$GRUB_CMDLINE_LINUX }ipv6.disable=1"\n').encode()
 DEFAULT_PRECEDENCE = {"::1/128": 50, "::/0": 40, "2002::/16": 30,
