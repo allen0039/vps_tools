@@ -23,7 +23,7 @@ import tempfile
 import uuid
 
 TOOL_ID = "vps-tools-ipv6tool"
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 MARKER = "# Managed by ipv6tool; restore with ipv6tool enable"
 BOOT_CONTENT = (MARKER + '\nGRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:+$GRUB_CMDLINE_LINUX }ipv6.disable=1"\n').encode()
 DEFAULT_PRECEDENCE = {"::1/128": 50, "::/0": 40, "2002::/16": 30,
@@ -808,12 +808,13 @@ def require_glibc():
         raise ToolError("优先级设置需要 glibc；musl/Alpine 不支持 gai.conf。")
 
 
-def confirm(message, yes=False):
+def confirm(message, yes=False, default_yes=False):
     if yes:
         return
     if not sys.stdin.isatty():
         raise ToolError("修改需要交互确认；命令行自动化请显式添加 --yes。")
-    if input(message + " [y/N] ").strip().lower() not in ("y", "yes"):
+    answer = input(message + (" [Y/n] " if default_yes else " [y/N] ")).strip().lower()
+    if answer not in (("", "y", "yes") if default_yes else ("y", "yes")):
         raise ToolError("已取消，未修改配置。")
 
 
@@ -900,7 +901,8 @@ def operate(manager, command, mode=None, yes=False, backup=False):
         if command == "priority":
             if mode != "restore":
                 require_glibc()
-            confirm("恢复原优先级配置？" if mode == "restore" else "设置 %s 优先？" % mode, yes)
+            confirm("恢复原优先级配置？" if mode == "restore" else "设置 %s 优先？" % mode,
+                    yes, default_yes=mode in ("ipv4", "ipv6"))
             selected = ask_backup(backup, yes) if mode != "restore" or "priority" in manager.state() else False
             return manager.priority(mode, backup=selected)
         if command == "disable":

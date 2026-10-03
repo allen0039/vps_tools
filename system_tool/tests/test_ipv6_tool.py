@@ -444,6 +444,38 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(self.manager.flags()["eth0"], "0")
         self.assertEqual(self.manager.list_backups(), [])
 
+    def test_priority_confirmation_defaults_to_yes_but_backup_defaults_to_no(self):
+        prompts = []
+        def answer(prompt):
+            prompts.append(prompt)
+            return ""
+        with mock.patch.object(tool, "require_glibc"), \
+                mock.patch.object(sys.stdin, "isatty", return_value=True), \
+                mock.patch("builtins.input", side_effect=answer):
+            tool.operate(self.manager, "priority", "ipv4")
+            tool.operate(self.manager, "priority", "ipv6")
+        self.assertEqual([prompt for prompt in prompts if "设置" in prompt],
+                         ["设置 ipv4 优先？ [Y/n] ", "设置 ipv6 优先？ [Y/n] "])
+        self.assertEqual(prompts.count("是否备份当前配置？ [y/N] "), 2)
+        self.assertEqual(self.manager.state()["priority"]["mode"], "ipv6")
+        self.assertEqual(self.manager.list_backups(), [])
+
+    def test_priority_explicit_no_cancels_and_restore_still_defaults_to_no(self):
+        with mock.patch.object(tool, "require_glibc"), \
+                mock.patch.object(sys.stdin, "isatty", return_value=True), \
+                mock.patch("builtins.input", return_value="n") as answer:
+            with self.assertRaisesRegex(tool.ToolError, "已取消"):
+                tool.operate(self.manager, "priority", "ipv4")
+        self.assertEqual(answer.call_count, 1)
+        self.assertEqual(self.manager.list_backups(), [])
+        self.assertFalse(self.manager.gai.exists())
+
+        with mock.patch.object(sys.stdin, "isatty", return_value=True), \
+                mock.patch("builtins.input", return_value="") as answer:
+            with self.assertRaisesRegex(tool.ToolError, "已取消"):
+                tool.operate(self.manager, "priority", "restore")
+        self.assertEqual(answer.call_args.args[0], "恢复原优先级配置？ [y/N] ")
+
     def test_optional_backup_yes_creates_file(self):
         with mock.patch.object(tool, "require_glibc"), \
                 mock.patch.object(sys.stdin, "isatty", return_value=True), \
