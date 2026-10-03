@@ -52,6 +52,12 @@ class ToolboxTests(unittest.TestCase):
         self.assertEqual(result.stdout, "--host\n2001:db8::1\n--streams\n1,4,8\n")
         self.assertEqual(result.returncode, 130)
 
+    def test_fail2ban_dispatch_preserves_ip_and_exit_status(self):
+        self.mock("f2btool", "printf '%s\\n' \"$@\"; exit 17")
+        result = self.run_cli("run", "fail2ban", "unban", "2001:db8::1")
+        self.assertEqual(result.stdout, "unban\n2001:db8::1\n")
+        self.assertEqual(result.returncode, 17)
+
     def test_missing_tool_and_unknown_command(self):
         self.assertEqual(self.run_cli("run", "dns").returncode, 1)
         self.assertEqual(self.run_cli("run", "unknown").returncode, 2)
@@ -164,6 +170,7 @@ install_tools
         self.assertIn("dns_tool install", result.stdout)
         self.assertIn("/usr/local/bin/vpstools", result.stdout)
         self.assertIn("/usr/local/bin/iperfprobe", result.stdout)
+        self.assertIn("/usr/local/sbin/f2btool", result.stdout)
 
 
 if __name__ == "__main__":

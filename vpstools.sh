@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # VPS Tools 的统一入口；具体操作交给独立工具。
 set -Eeuo pipefail
-VERSION=0.2.2
+VERSION=0.2.4
 BIN_DIR=${VPS_TOOLS_BIN_DIR:-/usr/local/bin}
 SBIN_DIR=${VPS_TOOLS_SBIN_DIR:-/usr/local/sbin}
 LIB_DIR=${VPS_TOOLS_LIB_DIR:-/usr/local/lib/vpstools}
@@ -16,7 +16,7 @@ VPS Tools 中文工具箱
   vpstools update [github|gitee]  安装或更新全部工具
   vpstools --version
 
-工具：ssh、firewall、dns、swap、bbr、agent、netcheck、iperf
+工具：ssh、firewall、dns、swap、bbr、agent、netcheck、iperf、fail2ban
 示例：vpstools run dns status
       vpstools run ssh interactive
       vpstools run bbr status
@@ -32,13 +32,14 @@ tool_path() {
         agent) printf '%s/restart-mmw-agent\n' "$SBIN_DIR" ;;
         netcheck) printf '%s/netcheck\n' "$BIN_DIR" ;;
         iperf) printf '%s/iperfprobe\n' "$BIN_DIR" ;;
+        fail2ban) printf '%s/f2btool\n' "$SBIN_DIR" ;;
         *) printf '未知工具：%s\n' "$1" >&2; return 2 ;;
     esac
 }
 
 list_tools() {
     local id path state
-    for id in ssh firewall dns swap bbr agent netcheck iperf; do
+    for id in ssh firewall dns swap bbr agent netcheck iperf fail2ban; do
         path=$(tool_path "$id")
         state=未安装
         [[ ! -x $path ]] || state=已安装
@@ -79,7 +80,7 @@ menu() {
         printf '\nVPS Tools 工具箱 v%s\n' "$VERSION"
         printf '%s\n' '  1. SSH 端口与备份恢复' '  2. 防火墙管理' '  3. DNS 切换与恢复' '  4. Swap 虚拟内存' '  5. TCP / BBR 调优' '  6. 重启妙妙屋 Agent' '  7. 查看工具安装状态' '  8. 网址与网络检测' '  9. iperf3 本地与 VPS 测速'
         # 安装 / 更新始终放在所有其他功能下方、退出上方；新增功能项应放在上方。
-        printf '%s\n' '  10. 安装 / 更新全部工具' '  0. 退出'
+        printf '%s\n' '  10. Fail2ban SSH 防暴力破解' '  11. 安装 / 更新全部工具' '  0. 退出'
         read -r -p '请选择：' choice || return 0
         case $choice in
             1) run_tool ssh || printf 'SSH 工具已取消或执行失败。\n' ;;
@@ -95,14 +96,24 @@ menu() {
             7) list_tools ;;
             8) run_tool netcheck || printf '检测已取消或有项目未通过。\n' ;;
             9) run_tool iperf || printf '测速已取消或有项目未完成。\n' ;;
-            10)
+            10) run_tool fail2ban || printf 'Fail2ban 工具已取消或执行失败。\n' ;;
+            11)
                 read -r -p '下载渠道：1. GitHub（默认）  2. Gitee：' channel || return 0
                 case $channel in
                     1|'') channel=github ;;
                     2) channel=gitee ;;
                     *) printf '无效渠道。\n'; continue ;;
                 esac
-                update_tools "$channel" || printf '安装未完成，请查看上方错误。\n' ;;
+                if update_tools "$channel"; then
+                    if [[ -x $BIN_DIR/vpstools ]]; then
+                        printf '更新完成，正在重新打开工具箱……\n'
+                        exec bash "$BIN_DIR/vpstools" menu
+                    else
+                        printf '更新完成，但未找到新入口：%s/vpstools。请退出后重新打开工具箱。\n' "$BIN_DIR"
+                    fi
+                else
+                    printf '安装未完成，请查看上方错误。\n'
+                fi ;;
             0) return 0 ;;
             *) printf '无效选项，请重新输入。\n' ;;
         esac

@@ -1,9 +1,9 @@
 name: VPS Toolbox Checks
 on:
   push:
-    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", "iperf3_tool/**", ".github/workflows/toolbox.yml"]
+    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", "iperf3_tool/**", "Fail2ban/**", ".github/workflows/toolbox.yml"]
   pull_request:
-    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", "iperf3_tool/**", ".github/workflows/toolbox.yml"]
+    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", "iperf3_tool/**", "Fail2ban/**", ".github/workflows/toolbox.yml"]
 permissions:
   contents: read
 jobs:
@@ -15,6 +15,12 @@ jobs:
         run: bash -n install.sh && bash -n vpstools.sh && bash -n web_tool/install.sh && bash -n iperf3_tool/iperf3-tool.sh
       - name: Check toolbox routing and installation
         run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Check Fail2ban configuration and firewall compatibility
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban python3-systemd
+          python3 -m unittest discover -s Fail2ban/tests -p 'test_*.py'
+          python3 -m unittest discover -s safe-ssh-port/tests -p 'test_*.py'
       - name: Check network probes against local services
         run: python3 -m unittest discover -s web_tool/tests -p 'test_*.py'
       - name: Install iperf3 for bounded loopback tests

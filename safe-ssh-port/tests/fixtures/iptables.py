@@ -9,6 +9,10 @@ from pathlib import Path
 state_path = Path(sys.argv[1])
 operation, chain, *arguments = sys.argv[2:]
 state = json.loads(state_path.read_text())
+if operation == "-N" and chain not in state:
+    state[chain] = []
+    state_path.write_text(json.dumps(state))
+    sys.exit(0)
 if chain not in state:
     sys.exit(1)
 rules = state[chain]
@@ -24,10 +28,21 @@ elif operation == "-D":
         sys.exit(1)
     rules.remove(arguments)
 elif operation == "-I":
-    position, *rule = arguments
+    if arguments and arguments[0].isdigit():
+        position, *rule = arguments
+    else:
+        position, rule = "1", arguments
     rules.insert(int(position) - 1, rule)
+elif operation == "-A":
+    rules.append(arguments)
+elif operation == "-F":
+    rules.clear()
+elif operation == "-X":
+    if rules:
+        sys.exit(1)
+    del state[chain]
 else:
     sys.exit(2)
 
-if operation in ("-D", "-I"):
+if operation in ("-D", "-I", "-A", "-F", "-X"):
     state_path.write_text(json.dumps(state))

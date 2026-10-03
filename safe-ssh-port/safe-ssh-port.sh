@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
-ALLENTOOL_VERSION=0.1.12
+ALLENTOOL_VERSION=0.1.13
 INSTALL_PATH=${SAFE_SSH_PORT_INSTALL_PATH:-/usr/local/sbin/safe-ssh-port}
 ALLENTOOL_PATH=${ALLENTOOL_PATH:-/usr/local/bin/allentool}
 SSHD_CONFIG=${SAFE_SSH_PORT_CONFIG:-/etc/ssh/sshd_config}
@@ -27,6 +27,9 @@ IPDENY_V6_BASE=https://www.ipdeny.com/ipv6/ipaddresses/aggregated
 ISO_ALPHA2_CODES='ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi bj bl bm bn bo bq br bs bt bv bw by bz ca cc cd cf cg ch ci ck cl cm cn co cr cu cv cw cx cy cz de dj dk dm do dz ec ee eg eh er es et fi fj fk fm fo fr ga gb gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu gw gy hk hm hn hr ht hu id ie il im in io iq ir is it je jm jo jp ke kg kh ki km kn kp kr kw ky kz la lb lc li lk lr ls lt lu lv ly ma mc md me mf mg mh mk ml mm mn mo mp mq mr ms mt mu mv mw mx my mz na nc ne nf ng ni nl no np nr nu nz om pa pe pf pg ph pk pl pm pn pr ps pt pw py qa re ro rs ru rw sa sb sc sd se sg sh si sj sk sl sm sn so sr ss st sv sx sy sz tc td tf tg th tj tk tl tm tn to tr tt tv tw tz ua ug um us uy uz va vc ve vg vi vn vu wf ws ye yt za zm zw'
 SSHD_BIN=${SAFE_SSH_PORT_SSHD_BIN:-sshd}
 SS_BIN=${SAFE_SSH_PORT_SS_BIN:-ss}
+F2B_TOOL=${SAFE_SSH_PORT_F2B_TOOL:-/usr/local/sbin/f2btool}
+F2B_CONFIG=${SAFE_SSH_PORT_F2B_CONFIG:-/etc/fail2ban/jail.d/99-vpstools-sshd.local}
+IPTABLES_RULES_DIR=${SAFE_SSH_PORT_RULES_DIR:-/etc/iptables}
 
 STATE_STATUS=
 STATE_NEW_PORT=
@@ -80,6 +83,7 @@ usage() {
   $PROGRAM interactive
   $PROGRAM restore
   $PROGRAM firewall
+  $PROGRAM firewall-save
   $PROGRAM install
   $PROGRAM install-shortcut
   $PROGRAM --version
@@ -742,6 +746,7 @@ restore_backup_interactive() {
 
     rm -f "$STATE_FILE"
     log "恢复成功：SSH 当前端口为 ${expected_display}。"
+    sync_fail2ban_ports
     printf '当前实际生效认证设置：\n'
     "$SSHD_BIN" -T 2>/dev/null | grep -E '^(passwordauthentication|permitrootlogin|kbdinteractiveauthentication|pubkeyauthentication|usepam) '
     log "恢复前配置的紧急备份保留在：$emergency_backup"
@@ -835,6 +840,11 @@ install_netfilter_persistence() {
     if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq; then
         warn 'apt-get update 失败，将尝试使用现有软件包索引继续安装。'
     fi
+    # 软件包安装时也不能把 Fail2ban 的临时封禁保存成静态规则。
+    if command -v debconf-set-selections >/dev/null 2>&1; then
+        printf '%s\n' 'iptables-persistent iptables-persistent/autosave_v4 boolean false' \
+            'iptables-persistent iptables-persistent/autosave_v6 boolean false' | debconf-set-selections || return 1
+    fi
     if ! DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent; then
         warn 'iptables-persistent 自动安装失败。'
         return 1
@@ -890,6 +900,75 @@ prepare_iptables_for_firewall_menu() {
         warn 'iptables 未能正常安装，将继续使用当前防火墙后端。'
 }
 
+filter_fail2ban_rules() {
+    local source=$1 target=$2
+    if ! grep -q '^:f2b-' "$source"; then
+        cp "$source" "$target"
+        return
+    fi
+    command -v python3 >/dev/null 2>&1 || {
+        warn '保存包含 Fail2ban 的规则需要 Python 3；拒绝持久化临时封禁。'
+        return 1
+    }
+    python3 - "$source" "$target" <<'PY'
+import shlex
+import sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text().splitlines(keepends=True)
+kept = []
+for line in lines:
+    if line.startswith(':f2b-'):
+        continue
+    if line.startswith('-A '):
+        words = shlex.split(line)
+        if words[1].startswith('f2b-'):
+            continue
+        if any(word in ('-j', '--jump', '-g', '--goto') and words[i + 1].startswith('f2b-')
+               for i, word in enumerate(words[:-1])):
+            continue
+    kept.append(line)
+Path(sys.argv[2]).write_text(''.join(kept))
+PY
+}
+
+save_static_iptables_rules() {
+    local command_name family target raw filtered
+    local -a staged=() targets=()
+    mkdir -p "$IPTABLES_RULES_DIR" || return 1
+    for family in v4 v6; do
+        if [[ $family == v4 ]]; then command_name=iptables-save; else command_name=ip6tables-save; fi
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+            if [[ $family == v6 ]] && ! command -v ip6tables >/dev/null 2>&1; then continue; fi
+            warn "缺少 $command_name，无法保存静态防火墙规则。"
+            rm -f -- "${staged[@]}"
+            return 1
+        fi
+        target=$IPTABLES_RULES_DIR/rules.$family
+        if [[ -L $target || ( -e $target && ! -f $target ) ]]; then
+            warn "规则文件不是普通文件：$target"
+            rm -f -- "${staged[@]}"
+            return 1
+        fi
+        raw=$(mktemp "$IPTABLES_RULES_DIR/.rules.raw.XXXXXX") || return 1
+        filtered=$(mktemp "$IPTABLES_RULES_DIR/.rules.static.XXXXXX") || { rm -f "$raw"; return 1; }
+        if ! "$command_name" > "$raw" || ! filter_fail2ban_rules "$raw" "$filtered" ||
+           ! chmod 600 "$filtered"; then
+            rm -f -- "$raw" "$filtered" "${staged[@]}"
+            return 1
+        fi
+        rm -f "$raw"
+        staged+=("$filtered")
+        targets+=("$target")
+    done
+    for family in "${!staged[@]}"; do
+        mv -f -- "${staged[$family]}" "${targets[$family]}" || {
+            rm -f -- "${staged[@]}"
+            return 1
+        }
+    done
+}
+
 persist_iptables_rules() {
     local warn_if_missing=${1:-yes}
     if ! command -v netfilter-persistent >/dev/null 2>&1; then
@@ -901,10 +980,36 @@ persist_iptables_rules() {
             return 0
         fi
     fi
-    if netfilter-persistent save >/dev/null 2>&1; then
-        log 'iptables/ip6tables 规则已通过 netfilter-persistent 保存。'
+    if save_static_iptables_rules; then
+        log 'iptables/ip6tables 静态规则已保存；Fail2ban 封禁由其自身维护，不写入 rules.v4/v6。'
     else
         warn '端口已在当前防火墙放行，但 netfilter-persistent 保存失败；重启后规则可能失效。'
+    fi
+}
+
+# Fail2ban 在 INPUT 中有独立的 f2b-* 跳转。新放行规则和入站保护链
+# 必须在这些跳转之后，避免 ACCEPT 让已封禁来源绕过 Fail2ban。
+iptables_port_rule_position() {
+    local command_name=$1 rules
+    rules=$("$command_name" -S INPUT) || return 1
+    awk -v access="$ACCESS_CHAIN" '
+        $1 == "-A" && $2 == "INPUT" {
+            position++
+            for (i=3; i<NF; i++) {
+                if (($i == "-j" || $i == "-g") &&
+                    ($(i+1) ~ /^f2b-/ || $(i+1) == access)) last=position
+            }
+        }
+        END { print last+1 }
+    ' <<< "$rules"
+}
+
+sync_fail2ban_ports() {
+    [[ -f $F2B_CONFIG ]] || return 0
+    if [[ ! -x $F2B_TOOL ]]; then
+        warn "检测到 Fail2ban 工具配置，但未找到 $F2B_TOOL；请运行 sudo f2btool sync-ports。"
+    elif ! "$F2B_TOOL" sync-ports; then
+        warn 'SSH 操作已完成，但 Fail2ban 端口同步失败；请运行 sudo f2btool sync-ports 查看错误。'
     fi
 }
 
@@ -1688,7 +1793,7 @@ ensure_access_framework() {
     "$command_name" -A "$ACCESS_CHAIN" -j "$IP_DENY_CHAIN" || return 1
     "$command_name" -A "$ACCESS_CHAIN" -j "$COUNTRY_CHAIN" || return 1
     "$command_name" -A "$ACCESS_CHAIN" -j RETURN || return 1
-    "$command_name" -I INPUT 1 -j "$ACCESS_CHAIN"
+    "$command_name" -I INPUT "$(iptables_port_rule_position "$command_name")" -j "$ACCESS_CHAIN"
 }
 
 managed_country_set_names() {
@@ -2316,7 +2421,7 @@ iptables_apply_tagged_port() {
                 iptables_remove_lockdown_allow_rule "$command_name" "$chain" "$protocol" "$port" || return 1
                 "$command_name" -I INPUT 1 -p "$protocol" --dport "$port" -m comment --comment allentool-managed -j DROP || return 1
             else
-                "$command_name" -I "$chain" 1 -p "$protocol" --dport "$port" -m comment --comment allentool-managed -j ACCEPT || return 1
+                "$command_name" -I "$chain" "$(if [[ $chain == INPUT ]]; then iptables_port_rule_position "$command_name"; else printf '1\n'; fi)" -p "$protocol" --dport "$port" -m comment --comment allentool-managed -j ACCEPT || return 1
             fi
         done
     done
@@ -2413,7 +2518,7 @@ iptables_apply_allow_all() {
             done
         done
         target_chain=$(iptables_target_chain "$command_name")
-        "$command_name" -I "$target_chain" 1 -m comment --comment allentool-managed-allow-all -j ACCEPT || return 1
+        "$command_name" -I "$target_chain" "$(if [[ $target_chain == INPUT ]]; then iptables_port_rule_position "$command_name"; else printf '1\n'; fi)" -m comment --comment allentool-managed-allow-all -j ACCEPT || return 1
     done
     persist_iptables_rules yes
 }
@@ -2544,7 +2649,7 @@ repair_firewall_persistence() {
             return 1
         }
     fi
-    netfilter-persistent save >/dev/null 2>&1 || return 1
+    save_static_iptables_rules || return 1
     if command -v systemctl >/dev/null 2>&1; then
         systemctl enable netfilter-persistent.service >/dev/null 2>&1 || warn '无法自动启用 netfilter-persistent.service。'
     fi
@@ -2612,9 +2717,7 @@ build_lockdown_chain() {
         "$command_name" -D INPUT -j "$FIREWALL_CHAIN" || return 1
     done
     "$command_name" -F "$FIREWALL_CHAIN" || return 1
-    if "$command_name" -C INPUT -j "$ACCESS_CHAIN" >/dev/null 2>&1; then
-        insert_position=2
-    fi
+    insert_position=$(iptables_port_rule_position "$command_name") || return 1
     "$command_name" -I INPUT "$insert_position" -j "$FIREWALL_CHAIN" || return 1
     "$command_name" -A "$FIREWALL_CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || return 1
     "$command_name" -A "$FIREWALL_CHAIN" -i lo -j ACCEPT || return 1
@@ -2723,6 +2826,7 @@ rollback_after_failure() {
         warn '恢复后的 SSH 配置校验失败。'
     fi
     close_staged_firewall_rule || warn '新端口防火墙规则清理失败。'
+    sync_fail2ban_ports
     rm -f "$STATE_FILE"
     die "${reason}；备份保留在 $STATE_BACKUP_DIR"
 }
@@ -2800,6 +2904,7 @@ switch_port() {
     STATE_STATUS=finalized
     write_state
     log "切换完成：SSH 现在仅监听端口 ${STATE_NEW_PORT}。"
+    sync_fail2ban_ports
 }
 
 interactive_resume() {
@@ -2914,6 +3019,7 @@ finalize_port() {
     STATE_STATUS=finalized
     write_state
     log "完成：SSH 现在仅监听端口 ${STATE_NEW_PORT}。"
+    sync_fail2ban_ports
     [[ $suppress_followup == yes ]] && return 0
     log "备份和 rollback 状态仍保留；确认稳定后可保留，或自行归档 ${STATE_BACKUP_DIR}。"
     log "再次确认稳定后运行：sudo $PROGRAM interactive"
@@ -2943,6 +3049,7 @@ rollback_port() {
     close_staged_firewall_rule || warn '无法删除脚本添加的新端口防火墙规则。'
     rm -f "$STATE_FILE"
     log "已恢复原 SSH 配置和端口：$STATE_OLD_PORTS"
+    sync_fail2ban_ports
     log "备份仍保留在：$STATE_BACKUP_DIR"
 }
 
@@ -3005,6 +3112,11 @@ main() {
     (($# == 0)) || shift
 
     case $action in
+        --fail2ban-integration-version)
+            (($# == 0)) || die '此命令不接受额外参数。'
+            printf '1\n'
+            return 0
+            ;;
         -h|--help|help)
             usage
             return 0
@@ -3037,6 +3149,14 @@ main() {
             require_commands
             (($# == 0)) || die 'firewall 不接受额外参数。'
             firewall_menu
+            ;;
+        firewall-save)
+            require_root
+            (($# == 0)) || die 'firewall-save 不接受额外参数。'
+            [[ $(detect_firewall_backend) == iptables ]] || die '此命令仅保存 iptables 静态规则。'
+            command -v netfilter-persistent >/dev/null 2>&1 || die '请先通过防火墙菜单安装持久化工具。'
+            save_static_iptables_rules || die '保存静态防火墙规则失败。'
+            log '静态规则已刷新，未保存 Fail2ban 临时封禁。'
             ;;
         install)
             require_root

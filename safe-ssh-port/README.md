@@ -156,8 +156,7 @@ sudo safe-ssh-port switch 21919 --cloud-firewall-ready --enable-main-password
 
 如果系统已安装 `netfilter-persistent`，新增的 iptables/ip6tables 规则会立即
 保存，重启后仍然生效。在 Debian/Ubuntu 上若未检测到该命令，脚本会通过
-`apt-get` 非交互安装 `iptables-persistent`，然后保存完整的当前 IPv4/IPv6
-规则集。
+`apt-get` 非交互安装 `iptables-persistent`，然后保存当前 IPv4/IPv6 静态规则，排除 Fail2ban 的临时 `f2b-*` 链和跳转。
 
 如果更新软件包索引、安装或保存失败，当前运行中的防火墙规则仍然保留，SSH
 端口切换会继续执行，同时明确警告重启后规则可能失效。脚本不会在其他发行版上
@@ -285,7 +284,7 @@ IPv4 后从 IPv6 绕过。
 功能。第二种模式只保留绑定到非回环地址的 TCP/UDP 监听端口，不会把
 `127.0.0.1` 或 `::1` 上的数据库等服务公开。应用前会展示完整保留列表并要求
 `y/n` 确认。界面把这一状态称为“入站保护模式”。内部使用独立的
-`ALLENTOOL_INPUT` 子链，让 `INPUT` 流量经过 allentool 来源控制后再进入端口保留
+`ALLENTOOL_INPUT` 子链，让 `INPUT` 流量先经过已有 Fail2ban 封禁检查，再经过 allentool 来源控制和端口保留
 清单，不会执行
 `iptables -F INPUT` 或删除 Docker、Fail2ban、云厂商及用户已有规则；子链中会
 保留已建立连接、回环流量和 ICMP/ICMPv6，然后拒绝其他宿主机 `INPUT` 流量。
@@ -359,3 +358,9 @@ SSH 端口，输入编号后再确认云厂商安全组已放行对应端口，�
 - SELinux enforcing 系统需要提前配置 `ssh_port_t`。
 - 使用 systemd `ssh.socket` 监听的系统需要先人工处理 socket 端口。
 - 修改 SSH 端口不能代替公钥认证、强密码和登录防护。
+
+## 与 Fail2ban 配合
+
+配套 [Fail2ban 工具](../Fail2ban/README.md) 使用系统内置 iptables 封禁动作。开放端口、放行全部端口、重建入站保护或来源访问链时，新放行规则位于已有 `f2b-*` 跳转之后，避免绕过封禁。防火墙自身的 IP 白名单不自动豁免 Fail2ban，管理 IP 可在 Fail2ban 白名单中单独配置。
+
+持久化保存静态 IPv4/IPv6 规则，排除 `f2b-*` 链及其跳转，运行中的封禁保留并由 Fail2ban 自身维护计时。SSH 切换、恢复或回滚成功后，会自动同步本工具管理的 Fail2ban 端口；同步失败会提示执行 `sudo f2btool sync-ports`。手动执行 `netfilter-persistent save` 仍可能保存临时封禁，应使用本工具的持久化菜单。

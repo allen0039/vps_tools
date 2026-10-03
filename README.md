@@ -1,6 +1,6 @@
 # VPS Tools
 
-面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、DNS、Swap、TCP / BBR 调优、妙妙屋 Agent 重启、网址检测和 iperf3 测速整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
+面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、Fail2ban、DNS、Swap、TCP / BBR 调优、妙妙屋 Agent 重启、网址检测和 iperf3 测速整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
 
 [GitHub 仓库](https://github.com/allen0039/vps_tools) · [Gitee 镜像](https://gitee.com/allen0039/vps_tools)
 
@@ -10,6 +10,7 @@
 | --- | --- | --- | --- |
 | SSH 管理 | 切换 SSH 单端口、查看状态、从历史备份恢复配置 | `allentool` / `safe-ssh-port` | [SSH 使用指南](safe-ssh-port/README.md) |
 | 防火墙管理 | 管理 TCP/UDP 端口、保护 SSH、配置 IP 与国家黑白名单 | `allentool` 内的防火墙菜单 | [防火墙说明](safe-ssh-port/README.md#交互式防火墙管理) |
+| Fail2ban 防护 | 配置 SSH 防暴力破解、白名单和解封，与 iptables 防火墙联动 | `f2btool` | [Fail2ban 使用指南](Fail2ban/README.md) |
 | DNS 切换 | 切换公共或自定义 IPv4/IPv6 DNS，恢复首次安装前的配置 | `dnstool` | [DNS 使用指南](dns_tool/README.md) |
 | Swap 管理 | 创建或调整 `/swapfile`，支持 Btrfs、ext4/XFS，检查实际启用状态 | `swaptool` | [Swap 使用指南](swap_tool/README.md) |
 | TCP / BBR 调优 | 测试 TCP 参数、管理出口队列、应用历史参数与回滚 | `bbrtcp` / `bbr-tune` | [BBR 使用指南](bbr-tune/README.md) |
@@ -41,7 +42,7 @@ vpstools
 
 已登录 root 的用户可以省略 `sudo`。建议先下载并检查安装器，再运行安装步骤。
 
-统一安装会部署全部 7 个独立工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或 DNS、创建 Swap、应用 TCP 调优参数或重启 Agent。BBR 安装器可能通过系统包管理器补齐基础依赖；iperf3 测速启动时会自动检测并安装缺失的 iperf3，Debian/Ubuntu 会选择不启动常驻服务。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
+统一安装会部署全部 8 个独立工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或 DNS、创建 Swap、应用 TCP 调优参数或重启 Agent。BBR 安装器可能通过系统包管理器补齐基础依赖；iperf3 测速启动时会自动检测并安装缺失的 iperf3，Debian/Ubuntu 会选择不启动常驻服务。Fail2ban 系统包和防护规则在子菜单中按需安装与启用。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
 
 也可以克隆仓库后安装本地文件：
 
@@ -67,7 +68,8 @@ VPS Tools 工具箱
   7. 查看工具安装状态
   8. 网址与网络检测
   9. iperf3 本地与 VPS 测速
-  10. 安装 / 更新全部工具
+  10. Fail2ban SSH 防暴力破解
+  11. 安装 / 更新全部工具
   0. 退出
 ```
 
@@ -92,6 +94,9 @@ vpstools --help
 vpstools run ssh interactive
 vpstools run firewall
 
+# SSH 防暴力破解菜单
+vpstools run fail2ban
+
 # 查看 DNS、Swap 和 BBR 状态
 sudo vpstools run dns status
 vpstools run swap status
@@ -108,7 +113,7 @@ vpstools run netcheck dns example.com --json
 vpstools run iperf --host 203.0.113.10 --streams 1,4,8 --direction both
 ```
 
-`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`、`iperf`。直接执行 `vpstools run agent` 会重启服务；总菜单中的额外确认只适用于菜单操作。
+`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`、`iperf`、`fail2ban`。直接执行 `vpstools run agent` 会重启服务；总菜单中的额外确认只适用于菜单操作。
 
 也可使用独立命令，例如：
 
@@ -133,7 +138,7 @@ vpstools update github
 vpstools update gitee
 ```
 
-也可以选择总菜单最后的第 10 项，或重新执行快速安装命令。
+也可以选择总菜单最后的第 11 项，或重新执行快速安装命令。菜单更新成功后会自动重新打开已安装的新版本。旧版本菜单若在更新后仍显示旧版本号，请选择 `0` 退出，再运行 `vpstools --version` 检查版本并用 `vpstools` 重新打开。
 
 远程安装时，安装器先查询所选渠道 `main` 分支的最新提交，再从同一个固定提交下载全部脚本。所有文件通过非空、对应 Bash / Python 脚本头及语法检查后，才开始部署；下载失败时尚未执行各工具安装步骤。安装锁用于防止两个工具箱安装同时运行。
 
@@ -150,6 +155,7 @@ vpstools update gitee
 主要面向 Linux VPS；SSH 工具以使用 `ssh.service` 或 `sshd.service` 的 Debian/Ubuntu 为主要适用环境。其他发行版及特殊配置请先阅读对应工具文档。Agent 重启功能需要 systemd 和已配置的 `mmw-agent.service`。
 
 - **SSH 与防火墙：** 修改端口前先放行云厂商安全组，保留当前 SSH 会话，完成后另开终端验证新端口。主机防火墙功能不代替云安全组；Docker 发布端口通常经过转发链，不在宿主机 `INPUT` 管理范围内。原生自定义 nftables、`ssh.socket` 和 SELinux 等特殊配置需按工具文档处理。
+- **Fail2ban：** 第一版支持 Debian/Ubuntu + systemd + iptables/ip6tables，需要配套新版 SSH 工具。配置会保留已有白名单，并默认加入检测到的当前管理 IP；可设置仅封禁 SSH 或全部宿主机入站端口。
 - **DNS：** 首次安装保存的配置可用于恢复。切换成功表示配置写入成功，实际解析仍取决于 DNS 的网络可达性。可用 `getent hosts example.com` 验证，必要时运行 `sudo dnstool restore`。
 - **Swap：** 创建或调整需要足够磁盘空间。工具确认交换空间实际启用后才写入开机配置；现有 `/swapfile` 有使用量时会停止调整。特殊 Btrfs 存储布局仍可能不支持交换文件。
 - **TCP / BBR：** 测速会消耗时间与流量，结果取决于线路和测试环境。调整后按提示验证、确认或回滚；第三方内核安装需单独评估启动与驱动兼容性。
@@ -166,6 +172,7 @@ vps_tools/
 ├── vpstools.sh           # 统一菜单与命令分发
 ├── install.sh            # 全量安装与更新
 ├── safe-ssh-port/        # SSH 与防火墙
+├── Fail2ban/             # SSH 防暴力破解与 iptables 联动
 ├── dns_tool/             # DNS 切换与恢复
 ├── swap_tool/            # Swap 管理
 ├── bbr-tune/             # TCP / BBR 调优
@@ -181,6 +188,7 @@ vps_tools/
 bash -n install.sh
 bash -n vpstools.sh
 python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m unittest discover -s Fail2ban/tests -p 'test_*.py'
 python3 -m unittest discover -s web_tool/tests -p 'test_*.py'
 python3 -m unittest discover -s iperf3_tool/tests -p 'test_*.py'
 ```
