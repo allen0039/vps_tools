@@ -20,7 +20,7 @@ import tempfile
 import time
 import uuid
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 CONFIG_NAME = "99-vpstools-sshd.local"
 MARKER = "# vpstools-fail2ban: "
 CHAIN = "f2b-vpstools-sshd"
@@ -559,7 +559,8 @@ class App:
             self.apply(settings)
             print("已恢复工具配置；SSH 端口使用当前 sshd 配置。")
 
-    def status(self):
+    def status(self, raw=False):
+        print("\n── SSH 防护状态 ──────────────────")
         settings = self.load()
         if settings:
             show_settings(settings)
@@ -570,14 +571,34 @@ class App:
                 print(exc)
         else:
             print("尚未由本工具配置 SSH 防护。")
+        print("\n运行统计")
         if shutil.which("fail2ban-client"):
-            print(self.client("status", "sshd", check=False).stdout.strip())
+            result = self.client("status", "sshd", check=False)
+            if result.returncode:
+                print("  SSH 监控：未运行或无法连接")
+                print("  封禁列表：无法读取")
+                detail = (result.stdout + "\n" + result.stderr).strip()
+                if detail:
+                    print("  原因：" + detail)
+            else:
+                show_jail_status(result.stdout)
+            if raw:
+                print("\n原始 jail 状态")
+                print((result.stdout + "\n" + result.stderr).strip())
         else:
-            print("Fail2ban 尚未安装。")
-        for command in ("iptables", "ip6tables"):
+            print("  Fail2ban 尚未安装。")
+        print("\n防火墙检查")
+        for command, family in (("iptables", "IPv4"), ("ip6tables", "IPv6")):
             if not shutil.which(command):
+                print(f"  {family}：无法检查（未安装 {command}）")
                 continue
             rules = run([command, "-w", "-S", "INPUT"], check=False)
+            if rules.returncode:
+                print(f"  {family}：无法读取防火墙规则")
+                detail = (rules.stdout + "\n" + rules.stderr).strip()
+                if detail:
+                    print("  原因：" + detail)
+                continue
             before = []
             found = False
             for line in rules.stdout.splitlines():
@@ -587,15 +608,16 @@ class App:
                 target = words[words.index("-j") + 1]
                 if target == CHAIN:
                     found = True
-                    print(f"{command}：发现 Fail2ban 跳转" + ("，但前面有放行/管理链，请检查顺序" if before else "，位于放行规则之前"))
+                    print(f"  {family}：" + ("需检查顺序（封禁检查前有放行/管理链）" if before else "规则顺序正常（封禁检查在放行之前）"))
                     break
                 if target == "ACCEPT" or target.startswith("ALLENTOOL_"):
                     before.append(line)
             if not found:
-                print(f"{command}：尚无 {CHAIN} 跳转；请结合 jail 状态和日志检查，不能仅凭服务 active 判断封禁有效。")
+                print(f"  {family}：未发现封禁入口（防护启用时请检查日志）")
+        print("─────────────────────────────────")
 
     def diagnose(self):
-        self.status()
+        self.status(raw=True)
         if shutil.which("fail2ban-client"):
             result = self.client("-t", check=False)
             print(result.stdout + result.stderr)
@@ -649,11 +671,43 @@ class App:
                 print(f"[f2btool] 错误：{exc}", file=sys.stderr)
 
 
+def format_duration(seconds):
+    parts = []
+    for unit, label in ((86400, "天"), (3600, "小时"), (60, "分钟"), (1, "秒")):
+        value, seconds = divmod(seconds, unit)
+        if value:
+            parts.append(f"{value} {label}")
+    return " ".join(parts) or "0 秒"
+
+
 def show_settings(settings):
-    print(f"SSH 防护：{'启用' if settings['enabled'] else '停用'}；端口：{','.join(map(str, settings['ports']))}")
-    print(f"{settings['findtime']} 秒内失败 {settings['maxretry']} 次，封禁 {settings['bantime']} 秒；"
-          f"范围：{'SSH TCP端口' if settings['scope'] == 'ssh' else '来源IP全部端口'}")
-    print("白名单：" + " ".join(settings["ignoreip"]))
+    print(f"  防护配置：{'已启用' if settings['enabled'] else '已停用'}")
+    print(f"  SSH 端口：{', '.join(map(str, settings['ports']))}")
+    print(f"  封禁规则：{format_duration(settings['findtime'])}内失败 {settings['maxretry']} 次 → "
+          f"封禁 {format_duration(settings['bantime'])}")
+    print(f"  封禁范围：{'SSH TCP 端口' if settings['scope'] == 'ssh' else '来源 IP 的全部端口'}")
+    print("  白名单：" + ("  ".join(settings["ignoreip"]) or "无"))
+
+
+def show_jail_status(output):
+    counters = {}
+    for label in ("Currently failed", "Total failed", "Currently banned", "Total banned"):
+        match = re.search(rf"{label}:\s*([0-9]+)\s*$", output, re.M)
+        counters[label] = match.group(1) if match else "未知"
+    print("  SSH 监控：运行中")
+    print(f"  登录失败：当前 {counters['Currently failed']} 次 / 累计 {counters['Total failed']} 次")
+    print(f"  IP 封禁：当前 {counters['Currently banned']} 个 / 累计 {counters['Total banned']} 个")
+    print("  （累计统计从本次 SSH 监控启动起计算）")
+    print("\n封禁 IP 列表")
+    match = re.search(r"Banned IP list:[ \t]*(.*)$", output, re.M)
+    addresses = match.group(1).split() if match else []
+    if addresses:
+        for index, address in enumerate(addresses, 1):
+            print(f"  {index}. {address}")
+    elif match and counters["Currently banned"] == "0":
+        print("  暂无封禁 IP")
+    else:
+        print("  无法读取完整列表，请运行 sudo f2btool diagnose 查看原始状态。")
 
 
 def ask_number(label, default, minimum, maximum):

@@ -255,6 +255,57 @@ class ConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(f2b.ToolError, "port"):
                 self.app.verify_runtime(self.settings)
 
+    def test_status_summarizes_fail2ban_and_banned_addresses(self):
+        jail = ("Status for the jail: sshd\n"
+                "|- Filter\n|  |- Currently failed: 1\n|  `- Total failed: 12\n"
+                "`- Actions\n   |- Currently banned: 2\n   |- Total banned: 4\n"
+                "   `- Banned IP list: 203.0.113.8 2001:db8::8\n")
+        rules = f"-A INPUT -p tcp --dports 22022 -j {f2b.CHAIN}\n-A INPUT -j ACCEPT\n"
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(self.app, "load", return_value=self.settings))
+            stack.enter_context(patch.object(self.app, "ports", return_value=[22022]))
+            stack.enter_context(patch.object(self.app, "client", return_value=result([], output=jail)))
+            stack.enter_context(patch.object(f2b.shutil, "which", return_value="/usr/bin/tool"))
+            stack.enter_context(patch.object(f2b, "run", return_value=result([], output=rules)))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.app.status()
+        text = output.getvalue()
+        self.assertIn("封禁规则：10 分钟内失败 5 次 → 封禁 7 天", text)
+        self.assertIn("登录失败：当前 1 次 / 累计 12 次", text)
+        self.assertIn("IP 封禁：当前 2 个 / 累计 4 个", text)
+        self.assertIn("1. 203.0.113.8\n  2. 2001:db8::8", text)
+        self.assertIn("IPv4：规则顺序正常", text)
+        self.assertNotIn("Journal matches", text)
+
+    def test_status_distinguishes_empty_list_from_client_failure(self):
+        jail = ("Status for the jail: sshd\n|- Filter\n"
+                "|  |- Currently failed: 0\n|  `- Total failed: 0\n"
+                "`- Actions\n   |- Currently banned: 0\n   |- Total banned: 0\n"
+                "   `- Banned IP list:\n")
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(self.app, "load", return_value=self.settings))
+            stack.enter_context(patch.object(self.app, "ports", return_value=[22022]))
+            stack.enter_context(patch.object(self.app, "client", return_value=result([], output=jail)))
+            stack.enter_context(patch.object(f2b.shutil, "which", side_effect=lambda command: "/usr/bin/tool" if command == "fail2ban-client" else None))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.app.status()
+            self.assertIn("暂无封禁 IP", output.getvalue())
+
+        failure = subprocess.CompletedProcess([], 1, "", "Connection refused")
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(self.app, "load", return_value=self.settings))
+            stack.enter_context(patch.object(self.app, "ports", return_value=[22022]))
+            stack.enter_context(patch.object(self.app, "client", return_value=failure))
+            stack.enter_context(patch.object(f2b.shutil, "which", side_effect=lambda command: "/usr/bin/tool" if command == "fail2ban-client" else None))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.app.status()
+            self.assertIn("封禁列表：无法读取", output.getvalue())
+            self.assertIn("Connection refused", output.getvalue())
+            self.assertNotIn("暂无封禁 IP", output.getvalue())
+
 
 @unittest.skipUnless(shutil.which("fail2ban-client") and Path("/etc/fail2ban/jail.conf").exists(),
                      "requires installed Fail2ban configuration")
