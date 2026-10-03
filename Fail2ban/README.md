@@ -14,7 +14,7 @@
 | 封禁范围 | 当前 SSH TCP 端口 |
 | 白名单 | 回环地址、继承的已有 SSH 白名单、检测到的当前 SSH 来源 IP |
 
-阈值参考[文章的 Fail2ban 配置](https://blog.szsn.me/archives/vps-csh)，菜单可修改。选择“全部端口”改用 `iptables-allports` 和 `protocol=all`，同时限制来源 IP 的其他宿主机入站流量。
+阈值可在菜单中修改。选择“全部端口”改用 `iptables-allports` 和 `protocol=all`，同时限制来源 IP 的其他宿主机入站流量。
 
 管理标准 `sshd` jail，动作名称为 `vpstools-sshd`，封禁链为 `f2b-vpstools-sshd`。配置文件 `/etc/fail2ban/jail.d/99-vpstools-sshd.local` 覆盖原 `sshd` 的对应参数，原 `jail.local` 和其他 jail 文件保留，不创建第二个 SSH jail。其他自定义参数继续继承。
 

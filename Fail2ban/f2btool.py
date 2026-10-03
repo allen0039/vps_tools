@@ -460,7 +460,7 @@ class App:
                 validate(settings)
             else:
                 print("读取当前 SSH 端口：" + ",".join(map(str, settings["ports"])))
-                print("默认值来自文章：10 分钟内失败 5 次，封禁 100 小时。")
+                print("默认值：10 分钟内失败 5 次，封禁 100 小时。")
                 settings["bantime"] = ask_number("封禁秒数（3600=1小时，86400=1天，360000=100小时）", settings["bantime"], 1, 31536000)
                 settings["findtime"] = ask_number("检测窗口秒数", settings["findtime"], 1, 604800)
                 settings["maxretry"] = ask_number("窗口内达到多少次失败触发封禁", settings["maxretry"], 1, 1000)
