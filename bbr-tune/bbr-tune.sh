@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.22"
+VERSION="2.10.23"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -834,7 +834,16 @@ def load(path):
             raise ValueError('shared blocks or offloaded qdisc cannot be switched')
         parent='root' if q.get('root') else ident(q.get('parent'))
         if parent in result: raise ValueError('duplicate attachment')
-        result[parent]={'kind':kind,'handle':ident(q['handle']),'options':q.get('options',{})}
+        opts=q.get('options',{})
+        if kind=='fq' and isinstance(opts,dict):
+            opts=dict(opts)
+            # iproute2 q_fq.c passes display labels with a trailing space as
+            # JSON array names. Accept only these two known spellings.
+            for key in ('priomap','weights'):
+                if key+' ' in opts:
+                    if key in opts: raise ValueError('duplicate fq option: '+key)
+                    opts[key]=opts.pop(key+' ')
+        result[parent]={'kind':kind,'handle':ident(q['handle']),'options':opts}
         options(result[parent])
     if 'root' not in result: raise ValueError('missing root')
     root=result['root']

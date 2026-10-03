@@ -1,6 +1,6 @@
 # bbr-tune 使用指南
 
-**版本 2.10.22** · 在远程 Linux 服务器上运行的 TCP / BBR 调优工具。
+**版本 2.10.23** · 在远程 Linux 服务器上运行的 TCP / BBR 调优工具。
 
 本目录基于 [dingding229/bbr-tune](https://github.com/dingding229/bbr-tune) 修改。上游仓库目前未提供明确的开源许可证；本目录不适用 VPS Tools 根目录的 MIT 许可证。公开发布或分发修改版前，请先确认已获得相应授权。
 
@@ -422,7 +422,7 @@ sudo bbr-tune kernel fallback
 
 ### 切换队列时提示 `unrecognized options: bands,offload_horizon,priomap,weights`
 
-这是旧版无法重建较新 `fq` 参数时的预检拦截，尚未修改出口队列。更新到 2.10.22 或更高版本后重试。若 `tc -s -d qdisc show dev 出口网卡` 显示根队列已为 `fq`，或 `mq` 的所有子队列均为 `fq`，当前已经在使用 `fq`，无需替换。
+这是旧版无法重建较新 `fq` 参数时的预检拦截，尚未修改出口队列。2.10.22 在部分 `tc` JSON 输出上还会提示 `invalid fq priomap`；更新到 2.10.23 或更高版本后重试。若 `tc -s -d qdisc show dev 出口网卡` 显示根队列已为 `fq`，或 `mq` 的所有子队列均为 `fq`，当前已经在使用 `fq`，无需替换。
 
 ### 出现 Failed to find specified qdisc 或队列恢复失败
 

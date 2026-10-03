@@ -38,6 +38,10 @@ for kind,opts in defaults.items():
 fq_new=dict(defaults['fq'])
 fq_new.update(bands=3, priomap=[2,2,2,2,1,1,0,0,0,0,0,0,0,0,0,0], weights=[589,35,1], offload_horizon=200000)
 (p/'fq_new.json').write_text(json.dumps([{'kind':'fq','handle':'1:','root':True,'options':fq_new}]))
+fq_new_tc=dict(fq_new)
+fq_new_tc['priomap ']=fq_new_tc.pop('priomap')
+fq_new_tc['weights ']=fq_new_tc.pop('weights')
+(p/'fq_new_tc.json').write_text(json.dumps([{'kind':'fq','handle':'1:','root':True,'options':fq_new_tc}]))
 cake=dict(defaults['cake']); cake.update(bandwidth=25000000, diffserv='diffserv4', nat=True, overhead=44, fwmark='0xff', **{'ack-filter':'enabled'})
 (p/'shaped.json').write_text(json.dumps([{'kind':'cake','handle':'1:','root':True,'options':cake}]))
 raw=dict(defaults['cake']); raw.update(raw=True, autorate='autorate-ingress'); raw.pop('atm')
@@ -47,6 +51,8 @@ raw=dict(defaults['cake']); raw.update(raw=True, autorate='autorate-ingress'); r
  {'kind':'fq_codel','handle':f'{i}0:','parent':f'1:{i}','options':defaults['fq_codel']} for i in (1,2)]))
 (p/'mq_fq_new.json').write_text(json.dumps([{'kind':'mq','handle':'0:','root':True,'options':{}}]+[
  {'kind':'fq','handle':f'{i}0:','parent':f'0:{i}','options':fq_new} for i in (1,2)]))
+(p/'mq_fq_new_tc.json').write_text(json.dumps([{'kind':'mq','handle':'0:','root':True,'options':{}}]+[
+ {'kind':'fq','handle':f'{i}0:','parent':f'0:{i}','options':fq_new_tc} for i in (1,2)]))
 PY
 set_live() {
   session=$((session+1)); SESSION_ID="switch-$session"; BACKUP_DIR=""
@@ -76,7 +82,7 @@ if (REQUESTED_QDISC=fq; CAKE_BANDWIDTH_MBPS=100; validate_qdisc_options) >/dev/n
 if printf '0\n' | ui_select_qdisc switch >/dev/null 2>&1; then fail 'queue menu cannot return'; fi
 
 # Full preflight, apply and original-option restoration for each direction.
-for route in 'fq cake' 'fq_new cake' 'fq_codel fq' 'cake fq_codel' 'shaped fq' 'raw fq' 'shaped cake' 'noqueue cake' 'mq cake'; do
+for route in 'fq cake' 'fq_new cake' 'fq_new_tc cake' 'fq_codel fq' 'cake fq_codel' 'shaped fq' 'raw fq' 'shaped cake' 'noqueue cake' 'mq cake'; do
  read -r original target <<<"$route"
  set_live "$original"; REQUESTED_QDISC="$target"; CAKE_BANDWIDTH_MBPS=""
  [[ "$original $target" != 'shaped cake' ]] || CAKE_BANDWIDTH_MBPS=190
@@ -134,11 +140,23 @@ BACKUP_DIR="$(create_backup eth0)"
 apply_tuning_qdisc eth0 || fail 'existing fq with newer options apply failed'
 qdisc_json equal "$TMP/fq_new.json" "$TMP/live.json" || fail 'existing fq options changed'
 no_live_writes
+set_live fq_new_tc; REQUESTED_QDISC=fq; CAKE_BANDWIDTH_MBPS=""
+select_tuning_qdisc eth0 || fail 'tc JSON array labels with trailing spaces rejected'
+BACKUP_DIR="$(create_backup eth0)"
+apply_tuning_qdisc eth0 || fail 'tc JSON array labels with trailing spaces apply failed'
+qdisc_json equal "$TMP/fq_new.json" "$TMP/live.json" || fail 'tc JSON array labels changed fq options'
+no_live_writes
 set_live mq_fq_new; REQUESTED_QDISC=fq; CAKE_BANDWIDTH_MBPS=""
 select_tuning_qdisc eth0 || fail 'existing mq with newer fq leaves cannot remain unchanged'
 BACKUP_DIR="$(create_backup eth0)"
 apply_tuning_qdisc eth0 || fail 'existing mq fq apply failed'
 qdisc_json equal "$TMP/mq_fq_new.json" "$TMP/live.json" || fail 'existing mq fq options changed'
+no_live_writes
+set_live mq_fq_new_tc; REQUESTED_QDISC=fq; CAKE_BANDWIDTH_MBPS=""
+select_tuning_qdisc eth0 || fail 'existing mq with tc JSON array labels rejected'
+BACKUP_DIR="$(create_backup eth0)"
+apply_tuning_qdisc eth0 || fail 'existing mq with tc JSON array labels apply failed'
+qdisc_json equal "$TMP/mq_fq_new.json" "$TMP/live.json" || fail 'existing mq tc JSON array labels changed fq options'
 no_live_writes
 set_live fq_new; REQUESTED_QDISC=cake
 python3 - "$TMP/live.json" <<'PY'
@@ -146,6 +164,13 @@ import json,sys
 p=sys.argv[1]; d=json.load(open(p)); d[0]['options']['priomap']=[0]*15; json.dump(d,open(p,'w'))
 PY
 if select_tuning_qdisc eth0 2>/dev/null; then fail 'invalid fq priomap accepted'; fi
+no_live_writes
+set_live fq_new_tc; REQUESTED_QDISC=cake
+python3 - "$TMP/live.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p)); d[0]['options']['priomap']=[0]*16; json.dump(d,open(p,'w'))
+PY
+if select_tuning_qdisc eth0 2>/dev/null; then fail 'duplicate fq priomap spellings accepted'; fi
 no_live_writes
 set_live mq
 sed -e 's/1:/0:/g' "$TMP/live.json" >"$TMP/anonymous.json"; mv "$TMP/anonymous.json" "$TMP/live.json"
