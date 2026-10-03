@@ -16,13 +16,14 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import uuid
 
 TOOL_ID = "vps-tools-ipv6tool"
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 MARKER = "# Managed by ipv6tool; restore with ipv6tool enable"
 BOOT_CONTENT = (MARKER + '\nGRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:+$GRUB_CMDLINE_LINUX }ipv6.disable=1"\n').encode()
 DEFAULT_PRECEDENCE = {"::1/128": 50, "::/0": 40, "2002::/16": 30,
@@ -214,21 +215,23 @@ class Manager:
     def save_state(self, state):
         atomic_write(self.state_file, canonical(dict(state, schema=1)))
 
-    def backup(self, kind, payload):
+    def backup(self, kind, payload, note="原始数据（修改前）", role="original"):
         directory = self.state_dir / "backups"
         if directory.is_symlink():
             raise ToolError("备份目录不能是符号链接。")
         directory.mkdir(mode=0o700, exist_ok=True)
+        directory.chmod(0o700)
         name = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         name += "-" + uuid.uuid4().hex + ".json"
-        record = {"tool": TOOL_ID, "schema": 1, "kind": kind, "payload": payload}
+        record = {"tool": TOOL_ID, "schema": 1, "kind": kind, "payload": payload,
+                  "note": note, "role": role, "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
         envelope = {"record": record, "sha256": digest(canonical(record))}
         atomic_write(directory / name, canonical(envelope))
         if self.read_backup(name, kind) != payload:
             raise ToolError("备份写入验证失败，停止配置。")
         return name
 
-    def read_backup(self, name, kind):
+    def read_backup_record(self, name):
         if not isinstance(name, str) or not re.fullmatch(r"[0-9TZ]+-[0-9a-f]{32}\.json", name):
             raise ToolError("备份名称无效。")
         path = self.state_dir / "backups" / name
@@ -238,11 +241,131 @@ class Manager:
             envelope = json.loads(path.read_text())
             record = envelope["record"]
             if (digest(canonical(record)) != envelope["sha256"] or
-                    record["tool"] != TOOL_ID or record["schema"] != 1 or record["kind"] != kind):
+                    record["tool"] != TOOL_ID or record["schema"] != 1 or
+                    record["kind"] not in ("priority", "temporary", "complete", "manual") or
+                    not isinstance(record["payload"], dict)):
                 raise ValueError("checksum/schema")
-            return record["payload"]
+            return record
         except (ValueError, KeyError, TypeError) as exc:
             raise ToolError("备份完整性校验失败；未执行恢复。") from exc
+
+    def read_backup(self, name, kind):
+        record = self.read_backup_record(name)
+        if record["kind"] != kind:
+            raise ToolError("备份类型不匹配；未执行恢复。")
+        return record["payload"]
+
+    def active_backup_names(self):
+        state = self.state()
+        return {entry["backup"] for key in ("priority", "temporary", "complete")
+                for entry in (state.get(key),) if isinstance(entry, dict) and "backup" in entry}
+
+    def list_backups(self):
+        directory = self.state_dir / "backups"
+        if directory.is_symlink():
+            raise ToolError("备份目录不能是符号链接。")
+        if not directory.exists():
+            return []
+        active = self.active_backup_names()
+        items = []
+        labels = {"priority": "优先级", "temporary": "临时禁用 IPv6",
+                  "complete": "彻底关闭 IPv6", "manual": "手动快照"}
+        for path in sorted(directory.glob("*.json"), reverse=True):
+            try:
+                record = self.read_backup_record(path.name)
+                role = record.get("role", "original" if path.name in active else "legacy")
+                origin = role == "original" or path.name in active
+                note = record.get("note") or ("原始数据（修改前）" if origin else "旧版历史备份")
+                items.append({"name": path.name, "path": path, "kind": labels[record["kind"]],
+                              "note": note, "origin": origin, "active": path.name in active,
+                              "error": None})
+            except ToolError as exc:
+                items.append({"name": path.name, "path": path, "kind": "无法读取",
+                              "note": "损坏或未知格式", "origin": path.name in active,
+                              "active": path.name in active, "error": str(exc)})
+        return items
+
+    def create_manual_backup(self, note):
+        note = note.strip()
+        if len(note) > 120 or any(ord(char) < 32 or ord(char) == 127 for char in note):
+            raise ToolError("备注不能超过 120 字，且不能包含控制字符。")
+        if not note:
+            note = "手动备份"
+        payload = {"gai": file_snapshot(self.gai), "boot_sources": self.boot_sources(),
+                   "runtime": self.runtime_snapshot() if self.ipv6_conf.is_dir() and not self.kernel_disabled() else None}
+        return self.backup("manual", payload, note=note, role="manual")
+
+    def backup_details(self, name):
+        record = self.read_backup_record(name)
+        payload = record["payload"]
+        active = name in self.active_backup_names()
+        role = record.get("role", "original" if active else "legacy")
+        lines = ["备份文件：" + str(self.state_dir / "backups" / name),
+                 "类别：" + {"priority": "优先级", "temporary": "临时禁用 IPv6",
+                           "complete": "彻底关闭 IPv6", "manual": "手动快照"}[record["kind"]],
+                 "创建时间：" + record.get("created_at", "旧版备份，详见文件名"),
+                 "标记：" + ("原始备份" if role == "original" or active else "手动备份" if role == "manual" else "历史备份"),
+                 "备注：" + (record.get("note") or "原始数据（修改前）" if active else record.get("note") or "旧版备份"),
+                 "恢复依赖：" + ("正在使用，不能删除" if active else "当前未被自动恢复流程引用")]
+        def describe(path, snapshot):
+            if not snapshot["exists"]:
+                lines.append("原文件：%s（备份时不存在）" % path)
+            else:
+                data = unpack(snapshot["data"])
+                if digest(data) != snapshot["sha256"]:
+                    raise ToolError("备份中的文件校验失败：" + path)
+                lines.append("原文件：%s（%d 字节；SHA-256 %s）" % (path, len(data), snapshot["sha256"]))
+        if "gai" in payload:
+            describe("/etc/gai.conf", payload["gai"])
+        sources = payload.get("sources", payload.get("boot_sources", {}))
+        for path, snapshot in sorted(sources.items()):
+            describe("/" + path, snapshot)
+        runtime = payload if record["kind"] == "temporary" else payload.get("runtime")
+        if runtime:
+            lines.append("运行快照：接口开关、地址和路由；启动 ID %s" % runtime["boot_id"])
+            lines.append("接口开关：" + "，".join("%s=%s" % item for item in runtime["flags"].items()))
+        if record["kind"] == "manual":
+            lines.append("手动快照供查看和人工恢复；菜单中的自动恢复使用标为原始的备份。")
+        return "\n".join(lines)
+
+    def backup_contents(self, name):
+        """只预览文本配置；二进制地址/路由快照保留在备份 JSON 中。"""
+        record = self.read_backup_record(name)
+        payload = record["payload"]
+        sources = []
+        if "gai" in payload:
+            sources.append(("/etc/gai.conf", payload["gai"]))
+        for path, snapshot in sorted(payload.get("sources", payload.get("boot_sources", {})).items()):
+            sources.append(("/" + path, snapshot))
+        if not sources:
+            return "此备份只有 IPv6 运行状态；地址和路由以二进制格式保存在备份文件中。"
+        lines = []
+        for path, snapshot in sources:
+            if not snapshot["exists"]:
+                lines.append("\n--- %s：备份时不存在 ---" % path)
+                continue
+            data = unpack(snapshot["data"])
+            if digest(data) != snapshot["sha256"]:
+                raise ToolError("备份中的文件校验失败：" + path)
+            if b"\x00" in data[:8192]:
+                lines.append("\n--- %s：二进制内容，不显示 ---" % path)
+                continue
+            preview = data[:8192].decode("utf-8", errors="replace")
+            lines.append("\n--- %s ---\n%s%s" %
+                         (path, preview.rstrip("\n"),
+                          "\n[仅显示前 8192 字节]" if len(data) > 8192 else ""))
+        return "\n".join(lines)
+
+    def delete_backup(self, name):
+        if name in self.active_backup_names():
+            raise ToolError("这是当前自动恢复依赖的原始备份，不能删除。")
+        if not isinstance(name, str) or not re.fullmatch(r"[0-9TZ]+-[0-9a-f]{32}\.json", name):
+            raise ToolError("备份名称无效。")
+        path = self.state_dir / "backups" / name
+        if path.is_symlink() or not path.is_file():
+            raise ToolError("备份文件缺失或不是普通文件。")
+        path.unlink()
+        sync_dir(path.parent)
 
     def check_gai_owned(self, state):
         entry = state.get("priority")
@@ -281,10 +404,11 @@ class Manager:
         source = unpack(original["data"]) if original["exists"] else b""
         desired = priority_config(source, mode)
         previous = file_snapshot(self.gai)
-        backup = self.backup("priority", {"gai": original})
+        backup = state["priority"]["backup"] if "priority" in state else self.backup(
+            "priority", {"gai": original}, note="原始数据：首次设置优先级前")
         old_state = dict(state)
         # 第一次原始备份始终保留，切换不会覆盖为“已修改”状态。
-        state["priority"] = {"backup": state.get("priority", {}).get("backup", backup),
+        state["priority"] = {"backup": backup,
                              "mode": mode, "applied": digest(desired), "phase": "preparing",
                              "previous": previous}
         self.save_state(state)
@@ -373,7 +497,7 @@ class Manager:
             del state["temporary"]
             self.save_state(state)
         saved = self.runtime_snapshot()
-        backup = self.backup("temporary", saved)
+        backup = self.backup("temporary", saved, note="原始数据：临时禁用 IPv6 前")
         # 在改变接口之前登记恢复点，异常退出后仍可 enable。
         state["temporary"] = {"backup": backup}
         self.save_state(state)
@@ -463,7 +587,7 @@ class Manager:
                for item in sources.values() if item["exists"]):
             raise ToolError("原启动配置已有 ipv6.disable 参数；请先人工处理，未修改配置。")
         payload = {"boot_file": original, "sources": sources, "boot_id": self.boot_id()}
-        backup = self.backup("complete", payload)
+        backup = self.backup("complete", payload, note="原始数据：彻底关闭 IPv6 前")
         state["complete"] = {"backup": backup, "phase": "preparing"}
         self.save_state(state)
         try:
@@ -561,10 +685,34 @@ class Manager:
             return "IPv6 优先（gai.conf 自定义策略）"
         return "自定义策略（无法判断统一优先级）"
 
+    def ip_status_description(self, state=None):
+        state = self.state() if state is None else state
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM):
+                ipv4 = "IPv4 已启用"
+        except OSError:
+            ipv4 = "IPv4 状态未知"
+        if self.kernel_disabled() or not self.ipv6_conf.is_dir():
+            ipv6 = "IPv6 已禁用"
+        else:
+            flags = self.flags()
+            enabled = [name for name, value in flags.items()
+                       if name not in ("all", "default") and value == "0"]
+            if not enabled:
+                ipv6 = "IPv6 已禁用"
+            elif enabled == ["lo"]:
+                ipv6 = "IPv6 已启用（仅回环）"
+            else:
+                ipv6 = "IPv6 已启用"
+            if enabled and state.get("complete", {}).get("phase") == "disabled":
+                ipv6 += "（重启后禁用）"
+        return ipv4 + "  " + ipv6
+
     def status(self):
         state = self.state()
         lines = ["Ipv4和ipv6管理 v" + VERSION,
-                 "系统地址选择策略：" + self.priority_description(state)]
+                 "系统地址选择策略：" + self.priority_description(state),
+                 "IP 状态：" + self.ip_status_description(state)]
         lines.append("当前内核：" + ("IPv6 已从内核禁用" if self.kernel_disabled() else "没有 ipv6.disable=1 参数"))
         if "complete" in state:
             phase = state["complete"].get("phase")
@@ -642,6 +790,74 @@ def confirm(message, yes=False):
         raise ToolError("已取消，未修改配置。")
 
 
+def highlighted_priority(description):
+    if sys.stdout.isatty() and "NO_COLOR" not in os.environ:
+        return re.sub(r"^(IPv[46])", "\033[1;33m\\1\033[0m", description, count=1)
+    return description
+
+
+def backup_menu(manager):
+    def entries():
+        with manager.locked():
+            items = manager.list_backups()
+        if not items:
+            print("尚无备份。")
+        for index, item in enumerate(items, 1):
+            marker = "原始" if item["origin"] else "手动" if item["kind"] == "手动快照" else "历史"
+            active = "、恢复中" if item["active"] else ""
+            print("%d. [%s%s] %s  %s  %s" %
+                  (index, marker, active, item["name"], item["kind"], item["note"]))
+        return items
+
+    def choose(items):
+        if not items:
+            return None
+        value = input("输入备份序号（0 返回）：").strip()
+        if value == "0":
+            return None
+        if not value.isdecimal() or not 1 <= int(value) <= len(items):
+            raise ToolError("备份序号无效。")
+        return items[int(value) - 1]
+
+    while True:
+        print("\n备份数据管理")
+        print("1. 列出备份文件\n2. 查看备份详情\n3. 预览备份配置内容\n4. 手动增加备份\n5. 删除备份\n0. 返回")
+        try:
+            choice = input("请选择：").strip()
+            if choice == "0":
+                return
+            if choice == "1":
+                entries()
+            elif choice == "2":
+                item = choose(entries())
+                if item:
+                    with manager.locked():
+                        print(manager.backup_details(item["name"]))
+            elif choice == "3":
+                item = choose(entries())
+                if item:
+                    with manager.locked():
+                        print(manager.backup_contents(item["name"]))
+            elif choice == "4":
+                note = input("输入备份备注（可留空）：")
+                with manager.locked():
+                    name = manager.create_manual_backup(note)
+                print("已创建手动备份：" + str(manager.state_dir / "backups" / name))
+            elif choice == "5":
+                item = choose(entries())
+                if item:
+                    confirm("删除备份 %s？删除后无法从此文件恢复" % item["name"])
+                    with manager.locked():
+                        manager.delete_backup(item["name"])
+                    print("已删除备份：" + item["name"])
+            else:
+                print("无效选项。")
+        except (ToolError, OSError, ValueError, KeyError) as exc:
+            print("错误：" + str(exc), file=sys.stderr)
+        except EOFError:
+            return
+
+
 def operate(manager, command, mode=None, yes=False):
     with manager.locked():
         if command == "priority":
@@ -664,12 +880,16 @@ def menu(manager):
     while True:
         print("\nIpv4和ipv6管理 v" + VERSION)
         try:
-            print("当前网络优先级设置：" + manager.priority_description())
+            print("当前网络优先级设置：" + highlighted_priority(manager.priority_description()))
         except (ToolError, OSError, ValueError, KeyError) as exc:
             print("当前网络优先级设置：无法读取（%s）" % exc)
+        try:
+            print("当前 IP 状态：" + manager.ip_status_description())
+        except (ToolError, OSError, ValueError, KeyError) as exc:
+            print("当前 IP 状态：无法读取（%s）" % exc)
         print()
         print("1. 查看 IPv6 状态\n2. IPv4 优先\n3. IPv6 优先\n4. 恢复原优先级")
-        print("5. 临时禁用 IPv6\n6. 彻底关闭 IPv6（备份后配置，重启生效）\n7. 恢复禁用前的 IPv6 配置\n0. 退出")
+        print("5. 临时禁用 IPv6\n6. 彻底关闭 IPv6（备份后配置，重启生效）\n7. 恢复禁用前的 IPv6 配置\n8. 备份数据管理\n0. 退出")
         try:
             choice = input("请选择：").strip()
             if choice == "0":
@@ -682,6 +902,8 @@ def menu(manager):
                 print(operate(manager, "disable", "temporary" if choice == "5" else "complete"))
             elif choice == "7":
                 print(operate(manager, "enable"))
+            elif choice == "8":
+                backup_menu(manager)
             else:
                 print("无效选项。")
         except (ToolError, OSError, ValueError) as exc:

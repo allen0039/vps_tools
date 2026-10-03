@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -411,12 +412,15 @@ class ManagerTests(unittest.TestCase):
                 mock.patch.object(sys, "stdout", output), \
                 mock.patch("builtins.input", side_effect=answers):
             tool.menu(self.manager)
-        self.assertIn("Ipv4和ipv6管理", output.getvalue())
-        self.assertIn("当前网络优先级设置：IPv6 优先（系统默认）", output.getvalue())
-        self.assertIn("当前网络优先级设置：IPv4 优先", output.getvalue())
-        self.assertIn("当前网络优先级设置：IPv6 优先\n", output.getvalue())
-        self.assertIn("已临时禁用", output.getvalue())
-        self.assertIn("关闭前的启动配置已恢复", output.getvalue())
+        shown = re.sub(r"\x1b\[[0-9;]*m", "", output.getvalue())
+        self.assertIn("Ipv4和ipv6管理", shown)
+        self.assertIn("当前网络优先级设置：IPv6 优先（系统默认）", shown)
+        self.assertIn("当前网络优先级设置：IPv4 优先", shown)
+        self.assertIn("当前网络优先级设置：IPv6 优先\n", shown)
+        self.assertIn("当前 IP 状态：IPv4 已启用  IPv6 已禁用", shown)
+        self.assertIn("当前 IP 状态：IPv4 已启用  IPv6 已启用", shown)
+        self.assertIn("已临时禁用", shown)
+        self.assertIn("关闭前的启动配置已恢复", shown)
         self.assertFalse(self.manager.gai.exists())
         self.assertFalse(self.manager.boot_file.exists())
         self.assertEqual(self.manager.flags()["eth0"], "0")
@@ -445,12 +449,110 @@ class ManagerTests(unittest.TestCase):
                 mock.patch.object(sys, "stdout", output), \
                 mock.patch("builtins.input", side_effect=["0"]):
             tool.menu(self.manager)
-        self.assertIn("当前网络优先级设置：IPv4 优先", output.getvalue())
+        shown = re.sub(r"\x1b\[[0-9;]*m", "", output.getvalue())
+        self.assertIn("当前网络优先级设置：IPv4 优先", shown)
 
     def test_menu_reports_external_priority_change(self):
         self.manager.priority("ipv4")
         self.manager.gai.write_text("# changed by another program\n")
         self.assertIn("实际优先级待确认", self.manager.priority_description())
+
+    def test_priority_color_only_in_interactive_terminal(self):
+        output = io.StringIO()
+        output.isatty = lambda: True
+        with mock.patch.object(sys, "stdout", output), mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(tool.highlighted_priority("IPv4 优先"),
+                             "\x1b[1;33mIPv4\x1b[0m 优先")
+        with mock.patch.object(sys, "stdout", output), mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
+            self.assertEqual(tool.highlighted_priority("IPv4 优先"), "IPv4 优先")
+        self.assertEqual(tool.highlighted_priority("IPv4 优先"), "IPv4 优先")
+
+    def test_original_backup_is_labeled_and_protected(self):
+        self.manager.priority("ipv4")
+        original = self.manager.state()["priority"]["backup"]
+        self.manager.priority("ipv6")
+        items = self.manager.list_backups()
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0]["origin"])
+        self.assertTrue(items[0]["active"])
+        self.assertIn("原始", items[0]["note"])
+        details = self.manager.backup_details(original)
+        self.assertIn("原始备份", details)
+        self.assertIn("/etc/gai.conf", details)
+        with self.assertRaisesRegex(tool.ToolError, "不能删除"):
+            self.manager.delete_backup(original)
+        self.manager.priority("restore")
+        self.manager.delete_backup(original)
+        self.assertEqual(self.manager.list_backups(), [])
+
+    def test_manual_backup_has_note_and_source_files(self):
+        self.manager.gai.write_text("# my priority baseline\n")
+        name = self.manager.create_manual_backup("升级前")
+        details = self.manager.backup_details(name)
+        self.assertIn("备注：升级前", details)
+        self.assertIn("手动备份", details)
+        self.assertIn("原文件：/etc/gai.conf", details)
+        self.assertIn("原文件：/etc/default/grub", details)
+        self.assertIn("运行快照：接口开关、地址和路由", details)
+        self.assertEqual(self.manager.read_backup_record(name)["role"], "manual")
+        self.manager.delete_backup(name)
+        self.assertFalse((self.manager.state_dir / "backups" / name).exists())
+
+    def test_backup_submenu_add_view_and_delete(self):
+        output = io.StringIO()
+        output.isatty = lambda: True
+        answers = ["4", "升级前手动备份", "1", "2", "1", "3", "1", "5", "1", "y", "0"]
+        with mock.patch.object(sys.stdin, "isatty", return_value=True), \
+                mock.patch.object(sys, "stdout", output), \
+                mock.patch("builtins.input", side_effect=answers):
+            tool.backup_menu(self.manager)
+        self.assertIn("升级前手动备份", output.getvalue())
+        self.assertIn("备份文件：", output.getvalue())
+        self.assertIn("--- /etc/default/grub ---", output.getvalue())
+        self.assertIn("已删除备份", output.getvalue())
+        self.assertEqual(self.manager.list_backups(), [])
+
+    def test_corrupt_unused_backup_can_be_removed(self):
+        name = self.manager.create_manual_backup("待删")
+        path = self.manager.state_dir / "backups" / name
+        path.write_text("invalid json")
+        self.assertIsNotNone(self.manager.list_backups()[0]["error"])
+        self.manager.delete_backup(name)
+        self.assertFalse(path.exists())
+
+    def test_legacy_active_backup_gets_original_label(self):
+        self.manager.priority("ipv4")
+        name = self.manager.state()["priority"]["backup"]
+        path = self.manager.state_dir / "backups" / name
+        envelope = json.loads(path.read_text())
+        for key in ("note", "role", "created_at"):
+            del envelope["record"][key]
+        envelope["sha256"] = tool.digest(tool.canonical(envelope["record"]))
+        path.write_bytes(tool.canonical(envelope))
+        item = self.manager.list_backups()[0]
+        self.assertTrue(item["origin"])
+        self.assertIn("原始", item["note"])
+        self.assertIn("原始备份", self.manager.backup_details(name))
+        self.manager.priority("restore")
+
+    def test_main_menu_opens_backup_submenu(self):
+        output = io.StringIO()
+        output.isatty = lambda: True
+        with mock.patch.object(sys.stdin, "isatty", return_value=True), \
+                mock.patch.object(sys, "stdout", output), \
+                mock.patch("builtins.input", side_effect=["8", "0", "0"]):
+            tool.menu(self.manager)
+        self.assertIn("备份数据管理", output.getvalue())
+
+    def test_ip_status_distinguishes_disabled_and_loopback(self):
+        self.assertEqual(self.manager.ip_status_description(), "IPv4 已启用  IPv6 已启用")
+        self.add_interface("eth0", "1")
+        self.assertEqual(self.manager.ip_status_description(), "IPv4 已启用  IPv6 已启用（仅回环）")
+        self.add_interface("lo", "1")
+        self.assertEqual(self.manager.ip_status_description(), "IPv4 已启用  IPv6 已禁用")
+        self.add_interface("lo", "0")
+        (self.root / "proc/cmdline").write_text("ipv6.disable=1")
+        self.assertEqual(self.manager.ip_status_description(), "IPv4 已启用  IPv6 已禁用")
 
 
 class GuardTests(unittest.TestCase):
