@@ -243,7 +243,7 @@ class ConfigTest(unittest.TestCase):
                 self.app.verify_firewall(self.settings)
 
     def test_effective_settings_include_ipv6_whitelist_and_named_action(self):
-        values = {"bantime": "360000", "findtime": "600", "maxretry": "5", "ignoreip": "|- 127.0.0.0/8\n`- ::1\n",
+        values = {"bantime": "604800", "findtime": "600", "maxretry": "5", "ignoreip": "|- 127.0.0.0/8\n`- ::1\n",
                   "name": "vpstools-sshd", "chain": "INPUT", "port": "22022", "protocol": "tcp"}
         def runner(args, **kwargs):
             if "get" in args:

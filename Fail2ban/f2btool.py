@@ -20,11 +20,11 @@ import tempfile
 import time
 import uuid
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 CONFIG_NAME = "99-vpstools-sshd.local"
 MARKER = "# vpstools-fail2ban: "
 CHAIN = "f2b-vpstools-sshd"
-DEFAULTS = dict(enabled=True, ports=[22], bantime=360000, findtime=600,
+DEFAULTS = dict(enabled=True, ports=[22], bantime=604800, findtime=600,
                 maxretry=5, scope="ssh", ignoreip=["127.0.0.1/8", "::1"])
 
 
@@ -460,8 +460,8 @@ class App:
                 validate(settings)
             else:
                 print("读取当前 SSH 端口：" + ",".join(map(str, settings["ports"])))
-                print("默认值：10 分钟内失败 5 次，封禁 100 小时。")
-                settings["bantime"] = ask_number("封禁秒数（3600=1小时，86400=1天，360000=100小时）", settings["bantime"], 1, 31536000)
+                print("默认值：10 分钟内失败 5 次，封禁 7 天。")
+                settings["bantime"] = ask_number("封禁秒数（3600=1小时，86400=1天，604800=7天）", settings["bantime"], 1, 31536000)
                 settings["findtime"] = ask_number("检测窗口秒数", settings["findtime"], 1, 604800)
                 settings["maxretry"] = ask_number("窗口内达到多少次失败触发封禁", settings["maxretry"], 1, 1000)
                 scope = input(f"封禁范围：1. SSH端口  2. 全部端口 [{'1' if settings['scope'] == 'ssh' else '2'}]：").strip()

@@ -18,7 +18,7 @@ usage() {
 
   --channel github|gitee   远程下载渠道；本地仓库运行时使用本地文件
   --scope ssh|all          仅封禁 SSH 端口（默认）或宿主机全部入站端口
-  --bantime 秒数           封禁时长，默认 360000
+  --bantime 秒数           封禁时长，默认 604800（7 天）
   --findtime 秒数          检测窗口，默认 600
   --maxretry 次数          失败阈值，默认 5
   --ignore-ip IP/CIDR      额外管理白名单，可重复指定
