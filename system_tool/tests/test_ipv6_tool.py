@@ -111,7 +111,7 @@ class ManagerTests(unittest.TestCase):
         original = b"# custom\nlabel fc00::/7 6\nprecedence fc00::/7 25\nprecedence ::ffff:0:0/96 5\n"
         self.manager.gai.write_bytes(original)
         self.manager.gai.chmod(0o640)
-        self.manager.priority("ipv4")
+        self.manager.priority("ipv4", backup=True)
         baseline = self.manager.state()["priority"]["backup"]
         applied = self.manager.gai.read_text()
         self.assertIn("label fc00::/7 6", applied)
@@ -150,7 +150,7 @@ class ManagerTests(unittest.TestCase):
     def test_priority_backup_failure_does_not_write(self):
         with mock.patch.object(self.manager, "backup", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
-                self.manager.priority("ipv4")
+                self.manager.priority("ipv4", backup=True)
         self.assertFalse(self.manager.gai.exists())
 
     def test_priority_journal_recovers_interrupted_first_write(self):
@@ -186,7 +186,7 @@ class ManagerTests(unittest.TestCase):
         self.assertTrue(any(args == ["ip", "-6", "route", "restore"] for args, _, _ in self.fake.calls))
 
     def test_repeated_temporary_keeps_first_backup(self):
-        self.manager.temporary()
+        self.manager.temporary(backup=True)
         name = self.manager.state()["temporary"]["backup"]
         self.manager.temporary()
         self.assertEqual(self.manager.state()["temporary"]["backup"], name)
@@ -378,7 +378,7 @@ class ManagerTests(unittest.TestCase):
 
     def test_backup_permissions_and_operation_lock(self):
         with self.manager.locked():
-            self.manager.priority("ipv4")
+            self.manager.priority("ipv4", backup=True)
             with self.assertRaisesRegex(tool.ToolError, "正在运行"):
                 with self.manager.locked():
                     pass
@@ -404,8 +404,8 @@ class ManagerTests(unittest.TestCase):
     def test_interactive_menu_full_lifecycle(self):
         output = io.StringIO()
         output.isatty = lambda: True
-        answers = ["1", "2", "y", "3", "y", "4", "y", "5", "y", "7", "y",
-                   "6", "y", "7", "y", "0"]
+        answers = ["1", "2", "y", "", "3", "y", "", "4", "y", "", "5", "y", "",
+                   "7", "y", "", "6", "y", "7", "y", "", "0"]
         with mock.patch.dict(os.environ, {}, clear=True), \
                 mock.patch.object(tool, "require_glibc"), \
                 mock.patch.object(sys.stdin, "isatty", return_value=True), \
@@ -425,6 +425,65 @@ class ManagerTests(unittest.TestCase):
         self.assertFalse(self.manager.boot_file.exists())
         self.assertEqual(self.manager.flags()["eth0"], "0")
         self.assertFalse(any(key in self.manager.state() for key in ("priority", "temporary", "complete")))
+        self.assertEqual(len(self.manager.list_backups()), 1)  # 仅彻底关闭强制备份
+
+    def test_optional_backups_default_to_no_and_restore_still_works(self):
+        with mock.patch.object(tool, "require_glibc"), \
+                mock.patch.object(sys.stdin, "isatty", return_value=True), \
+                mock.patch("builtins.input", side_effect=["y", "", "y", "n", "y", ""]):
+            tool.operate(self.manager, "priority", "ipv4")
+            tool.operate(self.manager, "priority", "ipv6")
+            tool.operate(self.manager, "priority", "restore")
+        self.assertFalse(self.manager.gai.exists())
+        self.assertEqual(self.manager.list_backups(), [])
+
+        with mock.patch.object(sys.stdin, "isatty", return_value=True), \
+                mock.patch("builtins.input", side_effect=["y", "", "y", ""]):
+            tool.operate(self.manager, "disable", "temporary")
+            tool.operate(self.manager, "enable")
+        self.assertEqual(self.manager.flags()["eth0"], "0")
+        self.assertEqual(self.manager.list_backups(), [])
+
+    def test_optional_backup_yes_creates_file(self):
+        with mock.patch.object(tool, "require_glibc"), \
+                mock.patch.object(sys.stdin, "isatty", return_value=True), \
+                mock.patch("builtins.input", side_effect=["y", "y"]):
+            tool.operate(self.manager, "priority", "ipv4")
+        self.assertEqual(len(self.manager.list_backups()), 1)
+
+    def test_noninteractive_yes_defaults_to_no_backup(self):
+        with mock.patch.object(tool, "require_glibc"), \
+                mock.patch.object(sys.stdin, "isatty", return_value=False):
+            tool.operate(self.manager, "priority", "ipv4", yes=True)
+        self.assertEqual(self.manager.list_backups(), [])
+        self.assertIn("recovery", self.manager.state()["priority"])
+
+    def test_explicit_backup_with_yes_creates_file(self):
+        with mock.patch.object(tool, "require_glibc"), \
+                mock.patch.object(sys.stdin, "isatty", return_value=False):
+            tool.operate(self.manager, "priority", "ipv4", yes=True, backup=True)
+        self.assertEqual(len(self.manager.list_backups()), 1)
+
+    def test_later_backup_opt_in_uses_original_recovery_data(self):
+        original = b"# original\n"
+        self.manager.gai.write_bytes(original)
+        self.manager.priority("ipv4")
+        self.assertEqual(self.manager.list_backups(), [])
+        self.manager.priority("ipv6", backup=True)
+        name = self.manager.state()["priority"]["backup"]
+        self.assertEqual(tool.unpack(self.manager.read_backup(name, "priority")["gai"]["data"]), original)
+        self.manager.priority("restore")
+        self.assertEqual(self.manager.gai.read_bytes(), original)
+
+    def test_later_temporary_backup_opt_in_uses_original_recovery_data(self):
+        original = self.manager.flags()
+        self.manager.temporary()
+        self.assertEqual(self.manager.list_backups(), [])
+        self.manager.temporary(backup=True)
+        name = self.manager.state()["temporary"]["backup"]
+        self.assertEqual(self.manager.read_backup(name, "temporary")["flags"], original)
+        self.manager.enable()
+        self.assertEqual(self.manager.flags(), original)
 
     def test_interactive_cancel_does_not_modify_configuration(self):
         output = io.StringIO()
@@ -468,7 +527,7 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(tool.highlighted_priority("IPv4 优先"), "IPv4 优先")
 
     def test_original_backup_is_labeled_and_protected(self):
-        self.manager.priority("ipv4")
+        self.manager.priority("ipv4", backup=True)
         original = self.manager.state()["priority"]["backup"]
         self.manager.priority("ipv6")
         items = self.manager.list_backups()
@@ -521,7 +580,7 @@ class ManagerTests(unittest.TestCase):
         self.assertFalse(path.exists())
 
     def test_legacy_active_backup_gets_original_label(self):
-        self.manager.priority("ipv4")
+        self.manager.priority("ipv4", backup=True)
         name = self.manager.state()["priority"]["backup"]
         path = self.manager.state_dir / "backups" / name
         envelope = json.loads(path.read_text())

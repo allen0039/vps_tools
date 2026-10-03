@@ -23,7 +23,7 @@ import tempfile
 import uuid
 
 TOOL_ID = "vps-tools-ipv6tool"
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 MARKER = "# Managed by ipv6tool; restore with ipv6tool enable"
 BOOT_CONTENT = (MARKER + '\nGRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:+$GRUB_CMDLINE_LINUX }ipv6.disable=1"\n').encode()
 DEFAULT_PRECEDENCE = {"::1/128": 50, "::/0": 40, "2002::/16": 30,
@@ -258,7 +258,16 @@ class Manager:
     def active_backup_names(self):
         state = self.state()
         return {entry["backup"] for key in ("priority", "temporary", "complete")
-                for entry in (state.get(key),) if isinstance(entry, dict) and "backup" in entry}
+                for entry in (state.get(key),) if isinstance(entry, dict) and entry.get("backup")}
+
+    def recovery_payload(self, entry, kind):
+        """兼容旧备份；未选择备份时从私有状态读取自动恢复数据。"""
+        if entry.get("backup"):
+            return self.read_backup(entry["backup"], kind)
+        payload = entry.get("recovery")
+        if not isinstance(payload, dict):
+            raise ToolError("恢复数据缺失；未修改配置。")
+        return payload
 
     def list_backups(self):
         directory = self.state_dir / "backups"
@@ -370,23 +379,26 @@ class Manager:
     def check_gai_owned(self, state):
         entry = state.get("priority")
         if entry:
-            saved = self.read_backup(entry["backup"], "priority")
+            saved = self.recovery_payload(entry, "priority")
             current = file_snapshot(self.gai)
             original = saved["gai"]
             is_original = current == original
             is_applied = current["exists"] and current["sha256"] == entry["applied"]
             is_previous = current == entry.get("previous")
             if not is_applied and not (entry.get("phase") in ("preparing", "restoring") and (is_original or is_previous)):
-                raise ToolError("gai.conf 在应用后被其他程序修改；拒绝覆盖，请人工合并备份。")
+                raise ToolError("gai.conf 在应用后被其他程序修改；拒绝覆盖，请人工合并恢复数据。")
             return original
         return file_snapshot(self.gai)
 
-    def priority(self, mode):
+    def priority(self, mode, backup=False):
         state = self.state()
         original = self.check_gai_owned(state)
         if mode == "restore":
             if "priority" not in state:
                 return "没有本工具修改的优先级配置。"
+            if backup:
+                self.backup("priority", {"gai": file_snapshot(self.gai)},
+                            note="恢复原优先级前的配置", role="manual")
             previous = file_snapshot(self.gai)
             before = dict(state["priority"])
             state["priority"]["phase"] = "restoring"
@@ -404,13 +416,18 @@ class Manager:
         source = unpack(original["data"]) if original["exists"] else b""
         desired = priority_config(source, mode)
         previous = file_snapshot(self.gai)
-        backup = state["priority"]["backup"] if "priority" in state else self.backup(
-            "priority", {"gai": original}, note="原始数据：首次设置优先级前")
+        entry = state.get("priority")
+        backup_name = entry.get("backup") if entry else None
+        if backup and not backup_name:
+            backup_name = self.backup("priority", {"gai": original}, note="原始数据：首次设置优先级前")
         old_state = dict(state)
-        # 第一次原始备份始终保留，切换不会覆盖为“已修改”状态。
-        state["priority"] = {"backup": backup,
-                             "mode": mode, "applied": digest(desired), "phase": "preparing",
-                             "previous": previous}
+        # 始终保留首次修改前的恢复基线；只有用户选择时才额外创建备份文件。
+        state["priority"] = {"mode": mode, "applied": digest(desired),
+                             "phase": "preparing", "previous": previous}
+        if backup_name:
+            state["priority"]["backup"] = backup_name
+        else:
+            state["priority"]["recovery"] = {"gai": original}
         self.save_state(state)
         try:
             atomic_write(self.gai, desired, previous.get("mode", 0o644),
@@ -424,8 +441,10 @@ class Manager:
             restore_file(self.gai, previous)
             self.save_state(old_state)
             raise
-        return ("已设置 %s 优先；不改变协议启用状态。长期运行的应用可能需要重启。\n原始备份：%s" %
-                ("IPv4" if mode == "ipv4" else "IPv6", self.state_dir / "backups" / state["priority"]["backup"]))
+        message = "已设置 %s 优先；不改变协议启用状态。长期运行的应用可能需要重启。" % (
+            "IPv4" if mode == "ipv4" else "IPv6")
+        return message + ("\n原始备份：" + str(self.state_dir / "backups" / backup_name)
+                          if backup_name else "\n未创建备份文件；恢复数据保存在工具内部状态中。")
 
     def boot_id(self):
         return self.path("proc/sys/kernel/random/boot_id").read_text().strip()
@@ -482,24 +501,28 @@ class Manager:
         actual = self.flags()
         if any(actual.get(name) != value for name, value in saved["flags"].items()
                if name != "all"):
-            raise ToolError("恢复后接口开关不匹配，保留备份供重试。")
+            raise ToolError("恢复后接口开关不匹配，保留恢复数据供重试。")
 
-    def temporary(self):
+    def temporary(self, backup=False):
         state = self.state()
         if self.kernel_disabled() or "complete" in state:
             raise ToolError("已配置或已从内核关闭 IPv6；请先执行 enable 并按提示重启。")
         if "temporary" in state:
-            saved = self.read_backup(state["temporary"]["backup"], "temporary")
+            saved = self.recovery_payload(state["temporary"], "temporary")
             if saved["boot_id"] == self.boot_id():
                 if any(value != "1" for name, value in self.flags().items() if name != "all"):
                     raise ToolError("临时禁用后有接口被其他程序重新启用；请先恢复，再重新禁用。")
-                return "IPv6 已临时禁用；原始备份保留。"
+                if backup and not state["temporary"].get("backup"):
+                    name = self.backup("temporary", saved, note="原始数据：临时禁用 IPv6 前")
+                    state["temporary"] = {"backup": name}
+                    self.save_state(state)
+                return "IPv6 已临时禁用；恢复数据保留。"
             del state["temporary"]
             self.save_state(state)
         saved = self.runtime_snapshot()
-        backup = self.backup("temporary", saved, note="原始数据：临时禁用 IPv6 前")
+        backup_name = self.backup("temporary", saved, note="原始数据：临时禁用 IPv6 前") if backup else None
         # 在改变接口之前登记恢复点，异常退出后仍可 enable。
-        state["temporary"] = {"backup": backup}
+        state["temporary"] = {"backup": backup_name} if backup_name else {"recovery": saved}
         self.save_state(state)
         try:
             self.apply_flags(dict.fromkeys(saved["flags"], "1"))
@@ -511,9 +534,11 @@ class Manager:
                 del state["temporary"]
                 self.save_state(state)
             except BaseException as rollback:
-                raise ToolError("临时禁用失败，自动恢复也失败；备份保留，请执行 enable。\n%s\n%s" % (exc, rollback)) from exc
+                raise ToolError("临时禁用失败，自动恢复也失败；恢复数据保留，请执行 enable。\n%s\n%s" % (exc, rollback)) from exc
             raise
-        return "IPv6 已临时禁用，包括 ::1；没有写入启动配置。\n运行 ipv6tool enable 恢复；重启后临时禁用结束。"
+        return ("IPv6 已临时禁用，包括 ::1；没有写入启动配置。\n运行 ipv6tool enable 恢复；重启后临时禁用结束。" +
+                ("\n原始备份：" + str(self.state_dir / "backups" / backup_name) if backup_name else
+                 "\n未创建备份文件；恢复数据保存在工具内部状态中。"))
 
     def check_boot_backend(self):
         release = self.path("etc/os-release").read_text()
@@ -613,8 +638,10 @@ class Manager:
         if not current["exists"] or unpack(current["data"]) != BOOT_CONTENT:
             raise ToolError("GRUB 工具片段已被外部修改；拒绝覆盖，请人工合并备份。")
 
-    def enable(self):
+    def enable(self, backup=False):
         state = self.state()
+        if backup and ("complete" in state or "temporary" in state):
+            self.create_manual_backup("恢复禁用前 IPv6 配置前")
         if "complete" in state:
             entry = state["complete"]
             saved = self.read_backup(entry["backup"], "complete")
@@ -631,7 +658,7 @@ class Manager:
                 return "关闭前的启动配置已恢复；重启后重新启用 IPv6。不会自动重启。"
             return "关闭前的启动配置已恢复；当前内核没有 ipv6.disable=1。"
         if "temporary" in state:
-            saved = self.read_backup(state["temporary"]["backup"], "temporary")
+            saved = self.recovery_payload(state["temporary"], "temporary")
             if saved["boot_id"] != self.boot_id():
                 del state["temporary"]
                 self.save_state(state)
@@ -725,8 +752,8 @@ class Manager:
                                                    for name, value in flags.items() if name not in ("all", "default")))
             lines.append("新接口默认：" + ("禁用" if flags["default"] == "1" else "启用"))
         if "temporary" in state:
-            saved = self.read_backup(state["temporary"]["backup"], "temporary")
-            lines.append("临时禁用备份：" + ("可恢复" if saved["boot_id"] == self.boot_id() else "属于上次启动，临时禁用已结束"))
+            saved = self.recovery_payload(state["temporary"], "temporary")
+            lines.append("临时禁用恢复数据：" + ("可恢复" if saved["boot_id"] == self.boot_id() else "属于上次启动，临时禁用已结束"))
         for args, title in ((["ip", "-6", "address", "show"], "IPv6 地址"),
                             (["ip", "-6", "route", "show", "default"], "IPv6 默认路由")):
             try:
@@ -788,6 +815,16 @@ def confirm(message, yes=False):
         raise ToolError("修改需要交互确认；命令行自动化请显式添加 --yes。")
     if input(message + " [y/N] ").strip().lower() not in ("y", "yes"):
         raise ToolError("已取消，未修改配置。")
+
+
+def ask_backup(explicit=False, yes=False):
+    if explicit:
+        return True
+    if yes:
+        return False
+    if not sys.stdin.isatty():
+        return False
+    return input("是否备份当前配置？ [y/N] ").strip().lower() in ("y", "yes")
 
 
 def highlighted_priority(description):
@@ -858,20 +895,22 @@ def backup_menu(manager):
             return
 
 
-def operate(manager, command, mode=None, yes=False):
+def operate(manager, command, mode=None, yes=False, backup=False):
     with manager.locked():
         if command == "priority":
             if mode != "restore":
                 require_glibc()
-            confirm("恢复原优先级配置？" if mode == "restore" else "设置 %s 优先（保留并备份原配置）？" % mode, yes)
-            return manager.priority(mode)
+            confirm("恢复原优先级配置？" if mode == "restore" else "设置 %s 优先？" % mode, yes)
+            selected = ask_backup(backup, yes) if mode != "restore" or "priority" in manager.state() else False
+            return manager.priority(mode, backup=selected)
         if command == "disable":
             guard_ssh()
             confirm("临时禁用所有接口 IPv6（包括 ::1）？" if mode == "temporary" else
                     "备份后配置内核彻底关闭 IPv6？重启后生效，包括 ::1 和 IPv6 socket", yes)
-            return manager.temporary() if mode == "temporary" else manager.complete()
+            return manager.temporary(backup=ask_backup(backup, yes)) if mode == "temporary" else manager.complete()
         confirm("恢复本工具禁用前的 IPv6 配置？内核关闭的恢复需要重启", yes)
-        return manager.enable()
+        selected = ask_backup(backup, yes) if any(key in manager.state() for key in ("complete", "temporary")) else False
+        return manager.enable(backup=selected)
 
 
 def menu(manager):
@@ -921,11 +960,14 @@ def main(argv=None):
     priority = commands.add_parser("priority", help="设置地址选择优先级或恢复")
     priority.add_argument("mode", choices=("ipv4", "ipv6", "restore"))
     priority.add_argument("--yes", action="store_true")
+    priority.add_argument("--backup", action="store_true", help="创建可选备份文件；默认不备份")
     disable = commands.add_parser("disable", help="临时禁用或内核彻底关闭 IPv6")
     disable.add_argument("mode", choices=("temporary", "complete"))
     disable.add_argument("--yes", action="store_true")
-    enable = commands.add_parser("enable", help="从备份恢复禁用前配置")
+    disable.add_argument("--backup", action="store_true", help="临时禁用时创建可选备份；彻底关闭始终强制备份")
+    enable = commands.add_parser("enable", help="从恢复数据还原禁用前配置")
     enable.add_argument("--yes", action="store_true")
+    enable.add_argument("--backup", action="store_true", help="恢复前创建可选备份文件；默认不备份")
     args = parser.parse_args(argv)
     if platform.system() != "Linux":
         parser.error("请在 Linux VPS 上运行；此工具不会修改当前非 Linux 主机。")
@@ -942,7 +984,7 @@ def main(argv=None):
         elif command == "status":
             print(manager.status())
         else:
-            print(operate(manager, command, getattr(args, "mode", None), args.yes))
+            print(operate(manager, command, getattr(args, "mode", None), args.yes, args.backup))
         return 0
     except (ToolError, OSError, ValueError, KeyError) as exc:
         print("[ipv6tool] 错误：" + str(exc), file=sys.stderr)
