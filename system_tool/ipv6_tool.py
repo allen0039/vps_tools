@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Linux Ipv4/ipv6管理工具：地址选择优先级、临时禁用、GRUB 内核禁用。"""
+"""Linux Ipv4和ipv6管理：地址选择优先级、临时禁用、GRUB 内核禁用。"""
 
 import argparse
 import base64
@@ -22,7 +22,7 @@ import tempfile
 import uuid
 
 TOOL_ID = "vps-tools-ipv6tool"
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 MARKER = "# Managed by ipv6tool; restore with ipv6tool enable"
 BOOT_CONTENT = (MARKER + '\nGRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:+$GRUB_CMDLINE_LINUX }ipv6.disable=1"\n').encode()
 DEFAULT_PRECEDENCE = {"::1/128": 50, "::/0": 40, "2002::/16": 30,
@@ -530,7 +530,7 @@ class Manager:
                 description += "（操作未完成，可恢复原优先级）"
             if not self.gai.exists() or digest(self.gai.read_bytes()) != priority["applied"]:
                 description += "（配置被外部修改）"
-        lines = ["Ipv4/ipv6管理工具 v" + VERSION, "系统地址选择策略：" + description]
+        lines = ["Ipv4和ipv6管理 v" + VERSION, "系统地址选择策略：" + description]
         lines.append("当前内核：" + ("IPv6 已从内核禁用" if self.kernel_disabled() else "没有 ipv6.disable=1 参数"))
         if "complete" in state:
             phase = state["complete"].get("phase")
@@ -628,7 +628,7 @@ def menu(manager):
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise ToolError("菜单需要交互终端；请使用 --help 查看命令模式。")
     while True:
-        print("\nIpv4/ipv6管理工具 v" + VERSION)
+        print("\nIpv4和ipv6管理 v" + VERSION)
         print("1. 查看 IPv6 状态\n2. IPv4 优先\n3. IPv6 优先\n4. 恢复原优先级")
         print("5. 临时禁用 IPv6\n6. 彻底关闭 IPv6（备份后配置，重启生效）\n7. 恢复禁用前的 IPv6 配置\n0. 退出")
         try:
@@ -652,7 +652,7 @@ def menu(manager):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Ipv4/ipv6管理工具；不会禁用 IPv4，不会自动重启。")
+    parser = argparse.ArgumentParser(description="Ipv4和ipv6管理；不会禁用 IPv4，不会自动重启。")
     parser.add_argument("--version", action="version", version=VERSION)
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("menu", help="中文交互菜单（默认）")

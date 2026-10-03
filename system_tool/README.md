@@ -1,4 +1,4 @@
-# Ipv4/ipv6管理工具 v0.1.1
+# Ipv4和ipv6管理 v0.1.2
 
 独立命令 `ipv6tool`，提供中文交互菜单、IPv4/IPv6 地址选择优先级、临时禁用 IPv6、从内核彻底关闭 IPv6，以及从备份恢复。不会关闭 IPv4，不提供持久 sysctl 禁用，不修改 DNS，不自动重启。
 
@@ -20,7 +20,7 @@ sudo python3 system_tool/ipv6_tool.py
 需要 Python 3.8+；临时禁用及地址恢复需要 iproute2 的 `ip` 命令。安装只部署程序，不修改系统网络或启动配置。已接入 `vpstools` 总菜单和统一安装器：运行 `vpstools` 选择第 11 项，或运行 `sudo vpstools run ipv6 status` 查看状态。独立安装方式仍可使用。
 
 ```text
-Ipv4/ipv6管理工具
+Ipv4和ipv6管理
 1. 查看 IPv6 状态
 2. IPv4 优先
 3. IPv6 优先

@@ -1,6 +1,6 @@
 # VPS Tools
 
-面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、Fail2ban、DNS、Swap、TCP / BBR 调优、妙妙屋 Agent 重启、网址检测、iperf3 测速和 Ipv4/ipv6管理工具整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
+面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、Fail2ban、DNS、Swap、TCP / BBR 调优、妙妙屋 Agent 重启、网址检测、iperf3 测速和“Ipv4和ipv6管理”整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
 
 [GitHub 仓库](https://github.com/allen0039/vps_tools) · [Gitee 镜像](https://gitee.com/allen0039/vps_tools)
 
@@ -17,9 +17,9 @@
 | 妙妙屋 Agent 重启 | 重启并验证 `mmw-agent.service`，展示 PID、内存与 TCP 连接变化 | `restart-mmw-agent` | [Agent 使用指南](restart-mmw-agent/README.md) |
 | 网址与网络检测 | 解析域名 IP，检测 Ping 延迟、丢包、TCP 端口和 HTTP / HTTPS | `netcheck` | [检测使用指南](web_tool/README.md) |
 | iperf3 测速 | 本地与 VPS 双向测速，1 / 4 / 8 连接、随机端口与自动清理 | `iperfprobe` | [测速使用指南](iperf3_tool/README.md) |
-| Ipv4/ipv6管理工具 | 设置 IPv4/IPv6 优先级、临时禁用或备份后彻底关闭 IPv6、恢复配置 | `ipv6tool` | [Ipv4/ipv6管理工具指南](system_tool/README.md) |
+| Ipv4和ipv6管理 | 设置 IPv4/IPv6 优先级、临时禁用或备份后彻底关闭 IPv6、恢复配置 | `ipv6tool` | [使用指南](system_tool/README.md) |
 
-Ipv4/ipv6管理工具已接入统一安装器和菜单；安装仅部署程序，网络与引导配置在子工具中按需修改。
+“Ipv4和ipv6管理”已接入统一安装器和菜单；安装仅部署程序，网络与引导配置在子工具中按需修改。
 
 ## 快速安装
 
@@ -74,7 +74,7 @@ VPS Tools 工具箱
   8. 网址与网络检测
   9. iperf3 本地与 VPS 测速
   10. Fail2ban SSH 防暴力破解
-  11. Ipv4/ipv6管理工具
+  11. Ipv4和ipv6管理
   12. 安装 / 更新全部工具
   0. 退出
 ```
@@ -189,7 +189,7 @@ vps_tools/
 ├── restart-mmw-agent/    # Agent 重启
 ├── web_tool/             # SSH 终端网址与网络检测
 ├── iperf3_tool/          # 本地与 VPS 的逐轮 iperf3 测速
-├── system_tool/          # Ipv4/ipv6管理工具
+├── system_tool/          # Ipv4和ipv6管理
 └── tests/                # 工具箱测试
 ```
 

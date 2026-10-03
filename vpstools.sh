@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # VPS Tools 的统一入口；具体操作交给独立工具。
 set -Eeuo pipefail
-VERSION=0.2.6
+VERSION=0.2.7
 BIN_DIR=${VPS_TOOLS_BIN_DIR:-/usr/local/bin}
 SBIN_DIR=${VPS_TOOLS_SBIN_DIR:-/usr/local/sbin}
 LIB_DIR=${VPS_TOOLS_LIB_DIR:-/usr/local/lib/vpstools}
@@ -81,7 +81,7 @@ menu() {
         printf '\nVPS Tools 工具箱 v%s\n' "$VERSION"
         printf '%s\n' '  1. SSH 端口与备份恢复' '  2. 防火墙管理' '  3. DNS 切换与恢复' '  4. Swap 虚拟内存' '  5. TCP / BBR 调优' '  6. 重启妙妙屋 Agent' '  7. 查看工具安装状态' '  8. 网址与网络检测' '  9. iperf3 本地与 VPS 测速'
         # 安装 / 更新始终放在所有其他功能下方、退出上方；新增功能项应放在上方。
-        printf '%s\n' '  10. Fail2ban SSH 防暴力破解' '  11. Ipv4/ipv6管理工具' '  12. 安装 / 更新全部工具' '  0. 退出'
+        printf '%s\n' '  10. Fail2ban SSH 防暴力破解' '  11. Ipv4和ipv6管理' '  12. 安装 / 更新全部工具' '  0. 退出'
         read -r -p '请选择：' choice || return 0
         case $choice in
             1) run_tool ssh || printf 'SSH 工具已取消或执行失败。\n' ;;
@@ -98,7 +98,7 @@ menu() {
             8) run_tool netcheck || printf '检测已取消或有项目未通过。\n' ;;
             9) run_tool iperf || printf '测速已取消或有项目未完成。\n' ;;
             10) run_tool fail2ban || printf 'Fail2ban 工具已取消或执行失败。\n' ;;
-            11) run_tool ipv6 || printf 'Ipv4/ipv6管理工具已取消或执行失败。\n' ;;
+            11) run_tool ipv6 || printf 'Ipv4和ipv6管理已取消或执行失败。\n' ;;
             12)
                 read -r -p '下载渠道：1. GitHub（默认）  2. Gitee：' channel || return 0
                 case $channel in
