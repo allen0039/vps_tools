@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.24"
+VERSION="2.10.25"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -316,6 +316,7 @@ usage() {
   sudo ./bbr-tune.sh confirm                 确认保留当前参数并取消安全回滚
   sudo ./bbr-tune.sh restore                 交互选择恢复参数
   sudo ./bbr-tune.sh rollback [--backup DIR|--original] 恢复参数
+  sudo ./bbr-tune.sh clear-tuning [--yes]     清理调优参数并恢复初始状态（自动备份当前状态）
   sudo ./bbr-tune.sh cleanup-data            交互清理数据（备份或会话记录）
   sudo ./bbr-tune.sh cleanup-backups         直接清理历史备份（保留原始备份）
   sudo ./bbr-tune.sh cleanup-history         直接清理历史会话记录
@@ -376,7 +377,7 @@ parse_args() {
   fi
   case "$1" in
     kernel) COMMAND=kernel; shift; KERNEL_ARGS=("$@"); return ;;
-    menu|autotune|network-test|qdisc|status|backup-current|history|history-compare|history-params|apply-history|update|confirm|restore|rollback|cleanup-data|cleanup-backups|cleanup-history|help) COMMAND="$1"; shift ;;
+    menu|autotune|network-test|qdisc|status|backup-current|history|history-compare|history-params|apply-history|update|confirm|restore|rollback|clear-tuning|cleanup-data|cleanup-backups|cleanup-history|help) COMMAND="$1"; shift ;;
     --help|-h) COMMAND="help"; shift ;;
     --version) printf '%s %s\n' "$PROGRAM" "$VERSION"; exit 0 ;;
     *) die "未知命令：$1" ;;
@@ -420,6 +421,7 @@ parse_args() {
   if (( RESTORE_ORIGINAL )); then
     [[ "$COMMAND" == rollback && -z "$BACKUP_PATH" ]] || die "--original 仅用于 rollback，不能与 --backup 同时使用"
   fi
+  [[ "$COMMAND" != clear-tuning || -z "$BACKUP_PATH" ]] || die "clear-tuning 固定恢复初始备份，不能指定 --backup"
 }
 
 configure_strategy() {
@@ -2059,7 +2061,11 @@ restore_backup() {
       snapshot="$temporary"
     fi
   fi
-  if systemd_available; then systemctl disable --now bbr-tcp-tuning.service >/dev/null 2>&1 || true; fi
+  if systemd_available && ! systemctl disable --now bbr-tcp-tuning.service >/dev/null 2>&1; then
+    if [[ -e "$SERVICE_FILE" || -L "$SERVICE_FILE" ]]; then
+      error "无法停用调优开机服务"; failed=1
+    fi
+  fi
   restore_files "$backup" || failed=1
   while IFS=$'\t' read -r key value; do
     [[ -n "$key" ]] || continue
@@ -2261,6 +2267,7 @@ confirm_tuning() {
   cancel_rollback_for_backup "$backup"
   set_active_session_from_backup "$backup" || warn "已确认参数，但无法记录当前使用会话：$backup"
   info "已确认保留当前参数，安全回滚已取消"
+  info "调优前备份仍然保留；以后可通过恢复菜单或 rollback 手动恢复"
 }
 
 rollback_command() {
@@ -2299,6 +2306,234 @@ rollback_command() {
   fi
 }
 
+# Copy and validate the fixed set of files owned by this tool before any writes.
+# A recovery target is kept in the operation directory; the initial backup stays intact.
+prepare_clear_target() {
+  local backup="$1" target="$2" snapshot tag state path expected key value current available count=0
+  local IFACE="" ROOT_QDISC="" ROOT_QDISC_KIND="" SERVICE_ENABLED="unknown" SERVICE_ACTIVE="unknown" QDISC_POLICY="manage"
+  backup_is_restorable "$backup" || { error "初始备份不完整，未修改参数"; return 1; }
+  mkdir -p "$target" || return 1
+  for path in meta.env files.tsv qdisc.txt; do cp -a "$backup/$path" "$target/$path" || return 1; done
+  while IFS=$'\t' read -r tag state path; do
+    case "$tag" in
+      sysctl) expected="$SYSCTL_FILE" ;; modules) expected="$MODULES_FILE" ;;
+      env) expected="$ENV_FILE" ;; helper) expected="$QDISC_HELPER" ;; service) expected="$SERVICE_FILE" ;;
+      *) error "初始备份含未知配置文件：$tag"; return 1 ;;
+    esac
+    [[ "$path" == "$expected" && "$state" =~ ^(present|absent)$ && ! -e "$target/${tag}.seen" ]] || {
+      error "初始备份文件清单无效：$tag"; return 1;
+    }
+    touch "$target/${tag}.seen" || return 1
+    count=$((count+1))
+    if [[ "$state" == present ]]; then
+      [[ -f "$backup/${tag}.file" || -L "$backup/${tag}.file" ]] || { error "缺少文件备份：$tag"; return 1; }
+      cp -a "$backup/${tag}.file" "$target/${tag}.file" || return 1
+    fi
+    [[ ! -d "$path" ]] || { error "配置路径变为目录，不能自动恢复：$path"; return 1; }
+  done <"$target/files.tsv"
+  (( count == 5 )) || { error "初始备份缺少开机配置记录，未修改参数"; return 1; }
+  snapshot="$backup/full-sysctl.tsv"
+  [[ -s "$snapshot" ]] || snapshot="$backup/observed.tsv"
+  [[ -s "$snapshot" ]] || snapshot="$backup/sysctl.tsv"
+  awk -F '\t' -v keys="${TUNING_SYSCTL_KEYS[*]}" '
+    BEGIN {n=split(keys,a," "); for(i=1;i<=n;i++) wanted[a[i]]=1}
+    $1 in wanted && $2 !~ /^</ {
+      if (NF<2 || $2=="" || seen[$1]++) bad=1
+      print; count++
+    }
+    END {if(bad || !count) exit 1}
+  ' "$snapshot" >"$target/full-sysctl.tsv" || { error "初始 TCP 参数记录无效，未修改参数"; return 1; }
+  cp "$target/full-sysctl.tsv" "$target/sysctl.tsv" || return 1
+  for key in "${TUNING_SYSCTL_KEYS[@]}"; do
+    current="$(sysctl_get "$key")"
+    value="$(awk -F '\t' -v k="$key" '$1==k {sub(/^[^\t]*\t/, ""); print}' "$target/full-sysctl.tsv")"
+    if [[ -n "$current" || -n "$value" ]]; then
+      [[ -n "$current" && -n "$value" ]] || { error "当前内核或初始备份缺少参数：$key"; return 1; }
+      case "$key" in
+        net.ipv4.tcp_congestion_control|net.core.default_qdisc)
+          [[ "$value" =~ ^[a-zA-Z0-9_]+$ ]] || { error "初始参数值无效：$key"; return 1; } ;;
+        *) [[ "$value" =~ ^[0-9]+([[:space:]]+[0-9]+)*$ ]] || { error "初始参数值无效：$key"; return 1; } ;;
+      esac
+    fi
+    if [[ "$key" == net.ipv4.tcp_congestion_control && -n "$value" ]]; then
+      available="$(sysctl_get net.ipv4.tcp_available_congestion_control)"
+      [[ " $available " == *" $value "* ]] || { error "当前内核未提供原拥塞控制算法：$value"; return 1; }
+    fi
+  done
+  source "$target/meta.env" || return 1
+  [[ -n "$IFACE" ]] && ip link show dev "$IFACE" >/dev/null 2>&1 || { error "初始网卡不存在：${IFACE:-未记录}"; return 1; }
+  [[ -s "$backup/qdisc-original.json" ]] || {
+    error "初始备份缺少完整队列参数，无法验证完整清理；可使用 rollback --original 恢复旧备份记录的范围"; return 1;
+  }
+  cp "$backup/qdisc-original.json" "$target/qdisc-original.json" || return 1
+}
+
+# Reproduce each saved leaf in an isolated namespace, never on the live NIC.
+clear_qdisc_probe() (
+  local ns="bbrq-clear-$$-${RANDOM}" created=0 json plan parent kind handle text
+  local opts=()
+  trap '(( ! created )) || ip netns del "$ns" >/dev/null 2>&1' EXIT
+  trap 'exit 130' INT TERM HUP
+  ip netns add "$ns" || { qdisc_error '无法验证队列恢复，未修改服务器参数'; return 1; }
+  created=1
+  ip -n "$ns" link add bbrprobe type dummy || return 1
+  for json in "$@"; do
+    plan="${json%.json}.tsv"
+    while IFS=$'\t' read -r parent kind handle text; do
+      [[ "$kind" != mq && "$kind" != noqueue ]] || continue
+      opts=(); [[ -z "$text" ]] || read -r -a opts <<<"$text"
+      ip netns exec "$ns" tc qdisc replace dev bbrprobe root "$kind" ${opts[@]+"${opts[@]}"} || return 1
+      ip netns exec "$ns" tc -j -d qdisc show dev bbrprobe >"${SESSION_DIR}/clear-probe.json" || return 1
+      qdisc_json probe "$json" "$parent" "${SESSION_DIR}/clear-probe.json" || return 1
+    done <"$plan"
+  done
+)
+
+clear_qdisc_preflight() {
+  local target="$1" iface="$2" saved current parent kind handle text
+  local attachment=()
+  QDISC_ORIGINAL_JSON="${SESSION_DIR}/clear-current.json"
+  saved="$(qdisc_parse_layout <"$target/qdisc.txt")" || return 1
+  current="$(qdisc_read_layout "$iface")" || return 1
+  qdisc_json plan "$target/qdisc-original.json" >"$target/qdisc-original.tsv" || return 1
+  [[ "$(awk -F '\t' 'BEGIN{OFS="\t"} {print $1,$2,$3}' "$target/qdisc-original.tsv")" == "$saved" ]] || {
+    qdisc_error '初始队列布局与完整参数不一致'; return 1;
+  }
+  if [[ "$(awk '$1=="root"{print $2}' <<<"$saved")" == mq ]]; then
+    [[ "$(awk '$1=="root"{print $2,$3}' <<<"$saved")" == "$(awk '$1=="root"{print $2,$3}' <<<"$current")" &&
+       "$(awk '{print $1}' <<<"$saved")" == "$(awk '{print $1}' <<<"$current")" ]] || {
+      qdisc_error 'mq 根队列或子队列拓扑已变化，未修改参数'; return 1;
+    }
+  elif [[ "$(wc -l <<<"$current" | tr -d ' ')" != 1 ]]; then
+    qdisc_error '当前队列已变为分层布局，未修改参数'; return 1
+  fi
+  tc -j -d qdisc show dev "$iface" >"$QDISC_ORIGINAL_JSON" || return 1
+  qdisc_json plan "$QDISC_ORIGINAL_JSON" >"${QDISC_ORIGINAL_JSON%.json}.tsv" || return 1
+  if qdisc_json equal "$target/qdisc-original.json" "$QDISC_ORIGINAL_JSON"; then return 0; fi
+  [[ "$(awk '$1=="root"{print $2,$3}' <<<"$saved")" != 'mq 0:' ]] || {
+    qdisc_error '无法安全定位 mq 0: 子队列，未修改参数'; return 1;
+  }
+  while IFS=$'\t' read -r parent kind handle text; do
+    if [[ "$parent" == root ]]; then attachment=(root); else attachment=(parent "$parent"); fi
+    tc -j filter show dev "$iface" "${attachment[@]}" >"${SESSION_DIR}/clear-filters.json" || return 1
+    qdisc_json filters "${SESSION_DIR}/clear-filters.json" || return 1
+  done <"${QDISC_ORIGINAL_JSON%.json}.tsv"
+  clear_qdisc_probe "$target/qdisc-original.json" "$QDISC_ORIGINAL_JSON" || return 1
+}
+
+verify_restored_files() {
+  local backup="$1" tag state path failed=0
+  while IFS=$'\t' read -r tag state path; do
+    if [[ "$state" == absent ]]; then
+      [[ ! -e "$path" && ! -L "$path" ]] || { error "配置文件应已删除：$path"; failed=1; }
+    elif [[ -L "$backup/${tag}.file" ]]; then
+      [[ -L "$path" && "$(readlink "$path")" == "$(readlink "$backup/${tag}.file")" ]] || { error "配置链接恢复不一致：$path"; failed=1; }
+    else
+      [[ -f "$path" && ! -L "$path" ]] && cmp -s "$backup/${tag}.file" "$path" || { error "配置内容恢复不一致：$path"; failed=1; }
+    fi
+  done <"$backup/files.tsv"
+  (( failed == 0 ))
+}
+
+verify_restored_service() (
+  local SERVICE_ENABLED=unknown
+  systemd_available || return 0
+  source "$1/meta.env" || return 1
+  [[ "$SERVICE_ENABLED" != unknown ]] || return 0
+  [[ "$(systemctl is-enabled bbr-tcp-tuning.service 2>/dev/null || true)" == "$SERVICE_ENABLED" ]] || {
+    error "开机服务启用状态验证失败"; return 1;
+  }
+)
+
+clear_tuning_on_exit() {
+  local rc=$? result
+  trap - EXIT INT TERM HUP
+  # Recovery must survive both a redirected sysctl and a disconnected terminal.
+  trap '' PIPE
+  set +e
+  exec >>"$RUN_LOG" 2>&1
+  if (( CLEAR_MUTATING )); then
+    error "清理未完整完成，正在尝试恢复清理前状态"
+    if restore_backup "$BACKUP_DIR" original && verify_restored_files "$BACKUP_DIR" && verify_restored_service "$BACKUP_DIR"; then
+      result="已恢复清理前状态；原安全回滚与备份保留"
+      info "$result"
+    else
+      result="清理前状态也未完整恢复，请使用以下备份手动重试：$BACKUP_DIR"
+      error "$result"
+    fi
+    error "清理失败，日志：$RUN_LOG"
+    printf '\n[未完成] %s\n清理日志：%s\n' "$result" "$RUN_LOG" >&9
+    (( rc != 0 )) || rc=1
+  fi
+  exit "$rc"
+}
+
+clear_tuning_command() (
+  require_linux; require_root
+  for cmd in ip tc sysctl awk mktemp python3 tee cmp; do have "$cmd" || die "缺少命令：$cmd"; done
+  local original target iface key value pending answer
+  local SESSION_ID SESSION_DIR RUN_LOG BACKUP_DIR="" QDISC_ONLY=0 QDISC_POLICY=manage QDISC_ORIGINAL_JSON=""
+  local CLEAR_MUTATING=0
+  local IFACE="" ROOT_QDISC="" ROOT_QDISC_KIND="" SERVICE_ENABLED="unknown" SERVICE_ACTIVE="unknown"
+  original="$(original_backup_path_readonly)" || die "未找到有效初始备份，不能推测原参数；未执行清理"
+  (( YES )) || [[ -t 0 ]] || die "非交互清理需要 --yes"
+  umask 077
+  SESSION_ID="clear-$(date +%Y%m%d-%H%M%S)-$$-${RANDOM}"
+  SESSION_DIR="${SESSION_ROOT}/${SESSION_ID}"
+  mkdir -p "$SESSION_DIR" || die "无法创建清理记录"
+  RUN_LOG="${SESSION_DIR}/clear-tuning.log"
+  exec 9>&1
+  exec > >(tee -a "$RUN_LOG" 8>&-) 2>&1
+  trap clear_tuning_on_exit EXIT
+  trap 'exit 130' INT TERM HUP
+  target="${SESSION_DIR}/restore-target"
+  prepare_clear_target "$original" "$target" || die "初始备份恢复预检失败，未修改参数；日志：$RUN_LOG"
+  source "$target/meta.env"
+  iface="$IFACE"
+  clear_qdisc_preflight "$target" "$iface" || die "队列恢复预检失败，未修改参数；日志：$RUN_LOG"
+  section "清理调优参数，恢复初始状态"
+  printf '  恢复目标：%s\n  备份目录：%s\n  原始网卡：%s\n' "$(backup_label "$original")" "$original" "$iface"
+  printf '  初始备份时间：%s\n' "$(date -r "$original/meta.env" '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || printf '未记录')"
+  printf '  初始状态以工具首次备份为准；更早的调优或未备份操作无法追溯。\n'
+  printf '  将恢复即时参数、出口队列及开机配置；保留备份、历史记录和内核。\n'
+  printf '  执行前自动保存清理前状态；清理成功后取消旧安全回滚。\n\n'
+  while IFS=$'\t' read -r key value; do
+    printf '  %s\n    %s → %s\n' "$key" "$(sysctl_get "$key")" "${value//$'\t'/ }"
+  done <"$target/full-sysctl.tsv"
+  printf '  出口队列：%s → %s\n' "$(root_qdisc_kind "$iface")" "${ROOT_QDISC:-$ROOT_QDISC_KIND}"
+  if (( ! YES )); then
+    read -r -p '确认清理调优参数并恢复初始状态？[y/N] ' answer || return 0
+    [[ "$answer" =~ ^[Yy]$ ]] || { info "已取消，当前参数未修改"; return 0; }
+  fi
+  # Recheck after the user has reviewed the target; keep the normal latest link.
+  clear_qdisc_preflight "$target" "$iface" || die "队列状态已变化或恢复检查失败，未执行清理"
+  QDISC_POLICY=manage
+  BACKUP_DIR="$(create_backup "$iface" 0 '清理调优前状态（可撤销清理）' 0)" || die "清理前备份失败，未修改参数"
+  prepare_clear_target "$BACKUP_DIR" "${SESSION_DIR}/undo-target" || die "清理前备份不完整，未修改参数"
+  touch "$BACKUP_DIR/qdisc-changed" || die "无法标记撤销备份，未修改参数"
+  info "清理前备份：$BACKUP_DIR"
+  printf '  撤销清理：sudo bbr-tune rollback --backup %s\n' "$BACKUP_DIR"
+  CLEAR_MUTATING=1
+  if systemd_available; then
+    systemctl disable --now bbr-tcp-tuning.service >/dev/null 2>&1 || true
+    [[ "$(systemctl is-active bbr-tcp-tuning.service 2>/dev/null || true)" != active ]] || die "无法停止调优开机服务"
+  fi
+  restore_backup "$target" original && verify_restored_files "$target" || die "初始状态恢复或配置验证失败"
+  verify_restored_service "$target" || die "开机服务恢复验证失败"
+  # Only a fully verified restore may retire the previous safety window.
+  CLEAR_MUTATING=0
+  clear_active_session || die "参数已恢复，但无法清除当前使用标记；请检查日志：$RUN_LOG"
+  for pending in "$PENDING_DIR"/*; do
+    [[ -d "$pending" && ! -L "$pending" ]] || continue
+    cancel_pending_dir "$pending" || die "参数已恢复，但旧安全回滚未能取消；请检查日志：$RUN_LOG"
+    [[ ! -e "$pending" ]] || die "参数已恢复，但旧回滚记录未能清除；请检查日志：$RUN_LOG"
+  done
+  if [[ -L "$PENDING_LATEST" ]]; then rm -f "$PENDING_LATEST" || die "无法清除旧回滚标记：$PENDING_LATEST"; fi
+  info "调优参数已清理：即时参数、出口队列和开机配置均已恢复初始备份状态"
+  info "旧安全回滚已取消；初始备份、清理前备份和历史记录保留"
+  info "清理日志：$RUN_LOG"
+)
+
 restore_interactive() {
   require_linux; require_root
   [[ -t 0 ]] || die "选择恢复参数需要交互终端；非交互请使用 rollback"
@@ -2306,14 +2541,14 @@ restore_interactive() {
   local BACKUP_PATH="" RESTORE_ORIGINAL=0 YES=0
   local -a backups=()
   while true; do
-    section "恢复参数"
+    section "恢复 / 清理调优参数"
     printf '  1  恢复调优前参数（最近一次调优或队列操作前的备份）\n'
-    printf '  2  恢复原始参数（初始备份）\n'
+    printf '  2  清理调优参数，恢复初始状态\n'
     printf '  3  恢复指定备份参数\n  0  返回\n'
     read -r -p '请选择：' choice || return 0
     case "$choice" in
       1) rollback_command; return ;;
-      2) RESTORE_ORIGINAL=1; rollback_command; return ;;
+      2) clear_tuning_command; return ;;
       3)
         backups=()
         for backup in "$BACKUP_ROOT"/*; do
@@ -4107,7 +4342,7 @@ ui_menu_options() {
   ui_menu_item 3 '查看历史测试 / 关键参数对比 / 应用'
   printf '\n  %s参数管理%s\n' "$UI_BLUE" "$UI_RESET"
   ui_menu_item 4 '确认保留当前参数'
-  ui_menu_item 5 '恢复参数'
+  ui_menu_item 5 '恢复 / 清理调优参数'
   ui_menu_item 6 '更改出口队列算法'
   printf '\n  %s工具%s\n' "$UI_BLUE" "$UI_RESET"
   ui_menu_item 7 '使用说明'
@@ -4396,7 +4631,7 @@ main() {
     require_linux; require_root
     stop_expired_session
   fi
-  case "$COMMAND" in autotune|qdisc|backup-current|apply-history|confirm|restore|rollback|cleanup-data|cleanup-backups|cleanup-history) acquire_operation_lock ;; esac
+  case "$COMMAND" in autotune|qdisc|backup-current|apply-history|confirm|restore|rollback|clear-tuning|cleanup-data|cleanup-backups|cleanup-history) acquire_operation_lock ;; esac
   case "$COMMAND" in
     menu) menu ;;
     autotune) autotune ;;
@@ -4412,6 +4647,7 @@ main() {
     update) update_command ;;
     confirm) confirm_tuning ;;
     rollback) rollback_command ;;
+    clear-tuning) clear_tuning_command ;;
     restore) restore_interactive ;;
     cleanup-data) cleanup_data_command ;;
     cleanup-backups) cleanup_backups_command ;;

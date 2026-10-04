@@ -38,6 +38,8 @@ while [[ ! -f "$STATE_DIR/release" ]]; do sleep 0.05; done
         assert tcp.returncode!=0 and '正在运行' in tcp.stderr, tcp
         queue=subprocess.run([bash,'-c',prelude+"main qdisc --qdisc cake",'queue',root,str(state)],env=env,capture_output=True,text=True)
         assert queue.returncode!=0 and '正在运行' in queue.stderr,queue
+        clearing=subprocess.run([bash,'-c',prelude+"main clear-tuning --yes",'clearing',root,str(state)],env=env,capture_output=True,text=True)
+        assert clearing.returncode!=0 and '正在运行' in clearing.stderr,clearing
         kernel=subprocess.run([bash,'-c','''source "$1/bbr-kernel.sh"
 K_ROOT="$2/kernels"
 k_lock

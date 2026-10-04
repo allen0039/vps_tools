@@ -18,6 +18,8 @@ sysctl() {
 }
 sysctl_get() { awk -F= -v key="$1" '$1==key{value=$2} END{print value}' "$STATE_DIR/writes"; }
 restore_qdisc() { printf '%s %s\n' "$4" "$5" >"$STATE_DIR/queue-policy"; }
+# These fixtures exercise backup selection; transactional clearing is covered separately.
+clear_tuning_command() { RESTORE_ORIGINAL=1; rollback_command; }
 parse_args "$2" ${3:+"$3"} ${4:+"$4"}
 case "$COMMAND" in restore) restore_interactive ;; rollback) rollback_command ;; esac
 RUNNER
