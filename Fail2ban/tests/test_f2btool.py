@@ -50,6 +50,44 @@ class ConfigTest(unittest.TestCase):
             return result(args, output="\n".join(map(repr, commands)))
         return result(args)
 
+    def test_configure_does_not_automatically_whitelist_current_ssh_ip(self):
+        source = "203.0.113.8"
+        for command in (None, ["configure", "--yes"], ["configure", "--no-current-ip", "--yes"]):
+            with self.subTest(command=command), \
+                    patch.object(self.app, "preflight"), \
+                    patch.object(self.app, "ports", return_value=[22022]), \
+                    patch.object(self.app, "inherited_ignoreip", return_value=self.settings["ignoreip"]), \
+                    patch.object(self.app, "apply") as apply, \
+                    patch.object(f2b, "current_ip", return_value=source), \
+                    patch.object(f2b, "confirm", return_value=True), \
+                    patch("builtins.input", side_effect=[""] * 5), \
+                    patch.object(f2b.sys, "platform", "linux"), \
+                    patch.object(f2b.os, "geteuid", return_value=0), \
+                    patch.object(f2b, "App", return_value=self.app), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                if command is None:
+                    self.app.configure()
+                else:
+                    f2b.main(command)
+                self.assertNotIn(source, apply.call_args.args[0]["ignoreip"])
+                self.assertIn(source + "（仅显示，不自动加入白名单）", output.getvalue())
+
+    def test_configure_preserves_existing_whitelist_and_accepts_explicit_ip(self):
+        source = "203.0.113.8"
+        self.settings["ignoreip"].append("198.51.100.7")
+        self.save()
+        with patch.object(self.app, "preflight"), \
+                patch.object(self.app, "ports", return_value=[22022]), \
+                patch.object(self.app, "apply") as apply, \
+                patch.object(f2b, "current_ip", return_value=source), \
+                patch.object(f2b.sys, "platform", "linux"), \
+                patch.object(f2b.os, "geteuid", return_value=0), \
+                patch.object(f2b, "App", return_value=self.app), \
+                contextlib.redirect_stdout(io.StringIO()):
+            f2b.main(["configure", "--ignore-ip", source, "--yes"])
+        self.assertIn("198.51.100.7", apply.call_args.args[0]["ignoreip"])
+        self.assertIn(source, apply.call_args.args[0]["ignoreip"])
+
     def test_ip_inputs_and_config_injection_rejected(self):
         for value in ("$(touch /tmp/nope)", "203.0.113.1\n[DEFAULT]", "0.0.0.0/0", "::/0"):
             with self.subTest(value=value), self.assertRaises(f2b.ToolError):

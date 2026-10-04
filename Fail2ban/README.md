@@ -12,7 +12,7 @@
 | 触发阈值 | 窗口内失败达到 5 次 |
 | 封禁时长 | 604800 秒（7 天） |
 | 封禁范围 | 当前 SSH TCP 端口 |
-| 白名单 | 回环地址、继承的已有 SSH 白名单、检测到的当前 SSH 来源 IP |
+| 白名单 | 回环地址、继承的已有 SSH 白名单；不自动加入当前 SSH 来源 IP |
 
 阈值可在菜单中修改。选择“全部端口”改用 `iptables-allports` 和 `protocol=all`，同时限制来源 IP 的其他宿主机入站流量。
 
@@ -50,7 +50,7 @@ Gitee：
 curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/Fail2ban/install.sh' -o /tmp/f2b-install.sh && sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT bash /tmp/f2b-install.sh --channel gitee
 ```
 
-若 sudo 策略不允许保留 SSH 环境变量，或管理地址会经代理/NAT 变化，可显式追加 `--ignore-ip <管理IP或CIDR>`。例如 `--ignore-ip 203.0.113.8`。还可传 `--scope all`、`--bantime`、`--findtime`、`--maxretry`；运行 `bash /tmp/f2b-install.sh --help` 查看选项。脚本不会切换 SSH 端口，也不会安装完整 VPS 工具箱。
+当前 SSH 来源 IP 仅用于显示，不会自动加入白名单，适合动态公网 IP。需要白名单时，可显式追加 `--ignore-ip <管理IP或CIDR>`，例如 `--ignore-ip 203.0.113.8`。还可传 `--scope all`、`--bantime`、`--findtime`、`--maxretry`；运行 `bash /tmp/f2b-install.sh --help` 查看选项。脚本不会切换 SSH 端口，也不会安装完整 VPS 工具箱。
 
 从本地仓库执行：
 
@@ -104,7 +104,7 @@ sudo f2btool restore <备份名称>
 
 `disable` 只停用 SSH jail，其他 jail 可以继续运行。同步端口和修改白名单不会启动原本停止的服务，显式配置或 `enable` 才会启动并设置自启。解封不移除防火墙自身的 IP/国家黑名单。
 
-sudo 策略可能清除 SSH 来源变量，配置时会显示是否检测到来源 IP。需要稳定管理入口时，显式加入自己的 IP；动态 IP 改变后应更新白名单。
+sudo 策略可能清除 SSH 来源变量，配置时会显示是否检测到来源 IP，但默认不自动加入白名单。菜单、命令模式和一键部署均采用此行为；`configure --no-current-ip` 保留兼容。需要白名单时，通过 `--ignore-ip` 或白名单菜单手动添加。升级和重新配置会保留已有白名单，包括旧版本自动添加的 IP；不再需要的条目请在白名单菜单移除。
 
 ## 校验与恢复
 

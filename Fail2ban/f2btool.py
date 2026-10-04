@@ -20,7 +20,7 @@ import tempfile
 import time
 import uuid
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 CONFIG_NAME = "99-vpstools-sshd.local"
 MARKER = "# vpstools-fail2ban: "
 CHAIN = "f2b-vpstools-sshd"
@@ -449,8 +449,6 @@ class App:
             if existing is None:
                 settings["ignoreip"] = self.inherited_ignoreip(settings)
             source = current_ip()
-            if source and (not args or not args.no_current_ip):
-                settings["ignoreip"] = list(dict.fromkeys([*settings["ignoreip"], source]))
             if args:
                 for key in ("bantime", "findtime", "maxretry", "scope"):
                     if getattr(args, key) is not None:
@@ -472,7 +470,7 @@ class App:
                 extra = input("额外管理 IP/CIDR（多个用空格分隔，回车跳过）：").split()
                 settings["ignoreip"] = list(dict.fromkeys([*settings["ignoreip"], *(normalize_ip(value) for value in extra)]))
             show_settings(settings)
-            print("当前 SSH 来源 IP：" + (source or "未检测到，请在白名单菜单添加管理 IP"))
+            print("当前 SSH 来源 IP：" + (source or "未检测到") + "（仅显示，不自动加入白名单）")
             if args and args.yes or confirm("应用以上配置并启用 SSH 防护？"):
                 self.apply(settings, activate=True)
             else:
@@ -737,7 +735,7 @@ def main(argv=None):
         configure.add_argument("--" + key, type=int)
     configure.add_argument("--scope", choices=("ssh", "all"))
     configure.add_argument("--ignore-ip", action="append", default=[])
-    configure.add_argument("--no-current-ip", action="store_true", help="不自动加入当前 SSH 来源 IP")
+    configure.add_argument("--no-current-ip", action="store_true", help="兼容旧命令；默认已不自动加入当前 SSH 来源 IP")
     configure.add_argument("--yes", action="store_true", help="接受配置并安装缺失的软件包")
     sub.add_parser("unban").add_argument("ip")
     whitelist = sub.add_parser("whitelist")
