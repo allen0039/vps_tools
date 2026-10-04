@@ -1,6 +1,6 @@
 # VPS Tools
 
-面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、Fail2ban、DNS、Swap、TCP / BBR 调优、妙妙屋 Agent 重启、网址检测、iperf3 测速和“Ipv4和ipv6管理”整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
+面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、Fail2ban、DNS、Swap、TCP / BBR 调优、妙妙屋 Agent 重启、网址检测、iperf3 测速、TCP 参数导入和“Ipv4和ipv6管理”整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
 
 [GitHub 仓库](https://github.com/allen0039/vps_tools) · [Gitee 镜像](https://gitee.com/allen0039/vps_tools)
 
@@ -17,6 +17,7 @@
 | 妙妙屋 Agent 重启 | 重启并验证 `mmw-agent.service`，展示 PID、内存与 TCP 连接变化 | `restart-mmw-agent` | [Agent 使用指南](restart-mmw-agent/README.md) |
 | 网址与网络检测 | 解析域名 IP，检测 Ping 延迟、丢包、TCP 端口和 HTTP / HTTPS | `netcheck` | [检测使用指南](web_tool/README.md) |
 | iperf3 测速 | 本地与 VPS 双向测速，1 / 4 / 8 连接、随机端口与自动清理 | `iperfprobe` | [测速使用指南](iperf3_tool/README.md) |
+| TCP 参数导入 | 粘贴或导入 sysctl 参数，预检查、备份、应用与回滚 | `tcptool` | [TCP 使用指南](tcp-tool/README.md) |
 | Ipv4和ipv6管理 | 设置 IPv4/IPv6 优先级、临时禁用或备份后彻底关闭 IPv6、恢复配置 | `ipv6tool` | [使用指南](system_tool/README.md) |
 
 “Ipv4和ipv6管理”已接入统一安装器和菜单；安装仅部署程序，网络与引导配置在子工具中按需修改。
@@ -47,7 +48,7 @@ vpstools
 
 只需 SSH 的 Fail2ban 防护时，可以使用 [Fail2ban 一键部署脚本](Fail2ban/README.md#一键部署)，安装并配置 Fail2ban 与配套防火墙工具，无需安装整个工具箱。
 
-统一安装会部署全部 9 个独立工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或 DNS、创建 Swap、应用 TCP 调优参数、重启 Agent 或修改 IPv6 / GRUB 配置。BBR 安装器可能通过系统包管理器补齐基础依赖；iperf3 测速启动时会自动检测并安装缺失的 iperf3，Debian/Ubuntu 会选择不启动常驻服务。Fail2ban 系统包和防护规则在子菜单中按需安装与启用。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
+统一安装会部署全部 10 个独立工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或 DNS、创建 Swap、应用 TCP 调优参数、重启 Agent 或修改 IPv6 / GRUB 配置。BBR 安装器可能通过系统包管理器补齐基础依赖；iperf3 测速启动时会自动检测并安装缺失的 iperf3，Debian/Ubuntu 会选择不启动常驻服务。Fail2ban 系统包和防护规则在子菜单中按需安装与启用。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
 
 也可以克隆仓库后安装本地文件：
 
@@ -75,7 +76,8 @@ VPS Tools 工具箱
   9. iperf3 本地与 VPS 测速
   10. Fail2ban SSH 防暴力破解
   11. Ipv4和ipv6管理
-  12. 安装 / 更新全部工具
+  12. TCP 参数导入与回滚
+  13. 安装 / 更新全部工具
   0. 退出
 ```
 
@@ -106,6 +108,11 @@ vpstools run fail2ban
 # 查看 IPv6 状态（修改配置需在子工具中确认）
 sudo vpstools run ipv6 status
 
+# TCP 参数检查、应用和回滚
+vpstools run tcp check params.conf
+sudo vpstools run tcp apply params.conf
+sudo vpstools run tcp rollback
+
 # 查看 DNS、Swap 和 BBR 状态
 sudo vpstools run dns status
 vpstools run swap status
@@ -122,7 +129,7 @@ vpstools run netcheck dns example.com --json
 vpstools run iperf --host 203.0.113.10 --streams 1,4,8 --direction both
 ```
 
-`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`、`iperf`、`fail2ban`、`ipv6`。直接执行 `vpstools run agent` 会重启服务；总菜单中的额外确认只适用于菜单操作。
+`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`、`iperf`、`fail2ban`、`ipv6`、`tcp`（别名 `tcptool`）。直接执行 `vpstools run agent` 会重启服务；总菜单中的额外确认只适用于菜单操作。
 
 也可使用独立命令，例如：
 
@@ -147,7 +154,7 @@ vpstools update github
 vpstools update gitee
 ```
 
-也可以选择总菜单最后的第 12 项，或重新执行快速安装命令。菜单更新成功后会自动重新打开已安装的新版本。旧版本菜单若在更新后仍显示旧版本号，请选择 `0` 退出，再运行 `vpstools --version` 检查版本并用 `vpstools` 重新打开。
+也可以选择总菜单最后的第 13 项，或重新执行快速安装命令。菜单更新成功后会自动重新打开已安装的新版本。旧版本菜单若在更新后仍显示旧版本号，请选择 `0` 退出，再运行 `vpstools --version` 检查版本并用 `vpstools` 重新打开。
 
 远程安装时，安装器先查询所选渠道 `main` 分支的最新提交，再从同一个固定提交下载全部脚本。所有文件通过非空、对应 Bash / Python 脚本头及语法检查后，才开始部署；下载失败时尚未执行各工具安装步骤。安装锁用于防止两个工具箱安装同时运行。
 
@@ -167,6 +174,7 @@ vpstools update gitee
 - **Fail2ban：** 第一版支持 Debian/Ubuntu + systemd + iptables/ip6tables，需要配套新版 SSH 工具。配置会保留已有白名单，并默认加入检测到的当前管理 IP；可设置仅封禁 SSH 或全部宿主机入站端口。
 - **DNS：** 首次安装保存的配置可用于恢复。切换成功表示配置写入成功，实际解析仍取决于 DNS 的网络可达性。可用 `getent hosts example.com` 验证，必要时运行 `sudo dnstool restore`。
 - **Swap：** 创建或调整需要足够磁盘空间。工具确认交换空间实际启用后才写入开机配置；现有 `/swapfile` 有使用量时会停止调整。特殊 Btrfs 存储布局仍可能不支持交换文件。
+- **TCP 参数导入：** 默认仅导入网络参数，预览后确认并备份；仅管理自己的 sysctl 配置文件。与 BBR 工具管理相同参数时应先处理配置冲突。总菜单会通过 sudo 打开 TCP 子菜单；命令模式的修改操作请显式使用 sudo。
 - **TCP / BBR：** 测速会消耗时间与流量，结果取决于线路和测试环境。调整后按提示验证、确认或回滚；第三方内核安装需单独评估启动与驱动兼容性。
 - **Agent：** 重启会短暂中断现有代理连接。工具验证 Agent 状态并展示变化，不重启 Guard 服务。
 - **网址检测：** 按需运行，无第三方 Python 依赖或常驻服务；默认最多并行检测 3 个 IP，网站检测使用 HEAD、不下载正文。结果反映当前 VPS 到目标的网络情况；Ping 不通不代表网站不可用。
@@ -189,6 +197,7 @@ vps_tools/
 ├── restart-mmw-agent/    # Agent 重启
 ├── web_tool/             # SSH 终端网址与网络检测
 ├── iperf3_tool/          # 本地与 VPS 的逐轮 iperf3 测速
+├── tcp-tool/             # TCP 参数导入与回滚
 ├── system_tool/          # Ipv4和ipv6管理
 └── tests/                # 工具箱测试
 ```
@@ -199,6 +208,7 @@ vps_tools/
 bash -n install.sh
 bash -n vpstools.sh
 python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m unittest discover -s tcp-tool/tests -p 'test_*.py'
 python3 -m unittest discover -s system_tool/tests -p 'test_*.py'
 python3 -m unittest discover -s Fail2ban/tests -p 'test_*.py'
 python3 -m unittest discover -s web_tool/tests -p 'test_*.py'

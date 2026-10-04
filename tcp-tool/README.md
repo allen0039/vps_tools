@@ -17,7 +17,7 @@ sudo bash tcp-tool/install.sh
 sudo tcptool
 ```
 
-当前版本为独立工具，尚未接入 `vpstools` 统一安装器或总菜单；安装只部署程序。
+已接入 `vpstools` 统一安装器和总菜单第 12 项；安装只部署程序，不应用参数。也可运行 `vpstools run tcp`（别名 `vpstools run tcptool`）打开菜单，普通用户会通过 sudo 启动；命令模式例如 `vpstools run tcp check params.conf`，修改时使用 `sudo vpstools run tcp apply params.conf`。
 
 菜单：
 

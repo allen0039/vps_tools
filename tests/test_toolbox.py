@@ -58,6 +58,14 @@ class ToolboxTests(unittest.TestCase):
         self.assertEqual(result.stdout, "unban\n2001:db8::1\n")
         self.assertEqual(result.returncode, 17)
 
+    def test_tcp_dispatch_preserves_arguments_and_exit_status(self):
+        self.mock("tcptool", 'printf "<%s>\\n" "$@"; exit 17')
+        for name in ("tcp", "tcptool"):
+            result = self.run_cli("run", name, "apply", "two words.conf", "--yes")
+            self.assertEqual(result.stdout, "<apply>\n<two words.conf>\n<--yes>\n")
+            self.assertEqual(result.returncode, 17)
+        self.assertIn("tcp        已安装", self.run_cli("list").stdout)
+
     def test_missing_tool_and_unknown_command(self):
         self.assertEqual(self.run_cli("run", "dns").returncode, 1)
         self.assertEqual(self.run_cli("run", "unknown").returncode, 2)
@@ -109,13 +117,16 @@ class ToolboxTests(unittest.TestCase):
         self.mock("dnstool", "echo DNS_CHILD_FAILED; exit 7")
         self.mock("restart-mmw-agent", "echo AGENT_MUST_NOT_RUN")
         self.mock("ipv6tool", "echo IPV6_CHILD; exit 7")
+        self.mock("tcptool", "echo TCP_CHILD; exit 7")
+        self.mock("sudo", '[[ ${1:-} != -- ]] || shift; exec "$@"')
+        self.env["PATH"] = str(self.base) + os.pathsep + os.environ["PATH"]
         master, slave = pty.openpty()
         proc = subprocess.Popen(["bash", str(ROOT / "vpstools.sh")], env=self.env,
                                 stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         output = b""
         try:
-            os.write(master, b"3\n6\nn\n7\n11\n0\n")
+            os.write(master, b"3\n6\nn\n7\n11\n12\n0\n")
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 ready, _, _ = select.select([master], [], [], 0.1)
@@ -136,7 +147,8 @@ class ToolboxTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, text)
         self.assertIn("DNS_CHILD_FAILED", text)
         self.assertIn("IPV6_CHILD", text)
-        self.assertIn("12. 安装 / 更新全部工具", text)
+        self.assertIn("TCP_CHILD", text)
+        self.assertIn("13. 安装 / 更新全部工具", text)
         self.assertGreaterEqual(text.count("VPS Tools 工具箱"), 4)
         self.assertNotIn("AGENT_MUST_NOT_RUN", text)
 
@@ -169,7 +181,7 @@ printf INSTALL_MUST_NOT_START
     def test_install_only_uses_bbr_installer_and_never_runs_swap_or_agent(self):
         for folder, file in [("safe-ssh-port", "safe-ssh-port.sh"),
                              ("dns_tool", "dns_tool.sh"), ("bbr-tune", "install.sh"),
-                             ("system_tool", "install.sh")]:
+                             ("system_tool", "install.sh"), ("tcp-tool", "install.sh")]:
             path = self.base / folder / file
             path.parent.mkdir()
             path.write_text('#!/usr/bin/env bash\nprintf "%s %s\\n" "' + folder + '" "$*"\n')
@@ -188,6 +200,7 @@ install_tools
         self.assertIn("/usr/local/bin/iperfprobe", result.stdout)
         self.assertIn("/usr/local/sbin/f2btool", result.stdout)
         self.assertIn("system_tool ", result.stdout)
+        self.assertIn("tcp-tool ", result.stdout)
 
 
 if __name__ == "__main__":

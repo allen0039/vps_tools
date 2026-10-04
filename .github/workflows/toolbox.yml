@@ -1,9 +1,9 @@
 name: VPS Toolbox Checks
 on:
   push:
-    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", "iperf3_tool/**", "Fail2ban/**", "system_tool/**", ".github/workflows/toolbox.yml"]
+    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", "iperf3_tool/**", "Fail2ban/**", "system_tool/**", "tcp-tool/**", ".github/workflows/toolbox.yml"]
   pull_request:
-    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", "iperf3_tool/**", "Fail2ban/**", "system_tool/**", ".github/workflows/toolbox.yml"]
+    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", "iperf3_tool/**", "Fail2ban/**", "system_tool/**", "tcp-tool/**", ".github/workflows/toolbox.yml"]
 permissions:
   contents: read
 jobs:
@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate shell syntax
-        run: bash -n install.sh && bash -n vpstools.sh && bash -n Fail2ban/install.sh && bash -n web_tool/install.sh && bash -n iperf3_tool/iperf3-tool.sh && bash -n system_tool/install.sh
+        run: bash -n install.sh && bash -n vpstools.sh && bash -n Fail2ban/install.sh && bash -n web_tool/install.sh && bash -n iperf3_tool/iperf3-tool.sh && bash -n system_tool/install.sh && bash -n tcp-tool/install.sh
       - name: Check toolbox routing and installation
         run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Check Fail2ban configuration and firewall compatibility
@@ -25,6 +25,8 @@ jobs:
         run: python3 -m unittest discover -s web_tool/tests -p 'test_*.py'
       - name: Check IPv6 management and recovery
         run: python3 -m unittest discover -s system_tool/tests -p 'test_*.py' -v
+      - name: Check TCP parameter import and recovery
+        run: python3 -m unittest discover -s tcp-tool/tests -p 'test_*.py' -v
       - name: Install iperf3 for bounded loopback tests
         run: |
           echo 'iperf3 iperf3/start_daemon boolean false' | sudo debconf-set-selections
