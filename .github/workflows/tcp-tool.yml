@@ -1,0 +1,33 @@
+name: TCP Tool
+
+on:
+  push:
+    paths:
+      - 'tcp-tool/**'
+      - '.github/workflows/tcp-tool.yml'
+    tags:
+      - 'tcptool-v*'
+  pull_request:
+    paths:
+      - 'tcp-tool/**'
+      - '.github/workflows/tcp-tool.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tests and syntax
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tcp-tool/tests -v
+          bash -n tcp-tool/install.sh
+          git diff --check
+      - name: Install and read-only Linux compatibility check
+        run: |
+          sudo bash tcp-tool/install.sh
+          /usr/local/sbin/tcptool --version
+          /usr/local/sbin/tcptool check tcp-tool/example-omnitt.conf --include-system
