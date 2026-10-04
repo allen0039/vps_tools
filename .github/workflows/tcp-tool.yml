@@ -2,6 +2,8 @@ name: TCP Tool
 
 on:
   push:
+    branches:
+      - main
     paths:
       - 'tcp-tool/**'
       - '.github/workflows/tcp-tool.yml'
