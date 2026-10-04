@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.26"
+VERSION="2.10.27"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -992,7 +992,10 @@ def options(q):
 
 def normalized(q):
     o=dict(q['options'])
-    if q['kind']=='fq': o.setdefault('pacing',True)
+    if q['kind']=='fq':
+        o.setdefault('pacing',True)
+        # Older tc omits this disabled option; newer tc prints an explicit 0.
+        o.setdefault('offload_horizon',0)
     if q['kind']=='fq_codel': o.setdefault('ecn',False)
     if q['kind']=='cake': o['fwmark']=fwmark(o.get('fwmark',0))
     return q['kind'],o
@@ -1107,8 +1110,8 @@ prepare_qdisc_switch() {
 }
 
 restore_qdisc_exact() {
-  local backup="$1" iface="$2" parent kind handle text current saved after
-  local opts=() cmd=()
+  local backup="$1" iface="$2" scope="${3:-changes}" parent kind handle text current saved after
+  local opts=() cmd=() attachment=()
   saved="$(qdisc_parse_layout <"${backup}/qdisc.txt")" || return 1
   current="$(qdisc_read_layout "$iface")" || return 1
   tc -j -d qdisc show dev "$iface" >"${backup}/qdisc-current.json" || return 1
@@ -1134,8 +1137,29 @@ restore_qdisc_exact() {
     fi
   fi
   if qdisc_json equal "${backup}/qdisc-original.json" "${backup}/qdisc-current.json"; then return 0; fi
-  [[ -f "${backup}/qdisc-changed" || "${3:-}" == original ]] || { qdisc_error '本次尚未修改队列；当前队列被其他操作改变，保持不动'; return 1; }
+  [[ -f "${backup}/qdisc-changed" || "$scope" == original || "$scope" == snapshot ]] || {
+    qdisc_error '本次尚未修改队列；当前队列与备份不同，普通回滚保持不动；手动恢复请明确选择备份'; return 1;
+  }
   qdisc_json restore-plan "${backup}/qdisc-original.json" >"${backup}/qdisc-restore.tsv" || return 1
+  if [[ "$scope" == snapshot ]]; then
+    # Explicit selection permits restoring an older snapshot, but never erases
+    # unrelated filters, unsupported trees or an altered mq topology.
+    while IFS=$'\t' read -r parent kind handle text; do
+      if [[ "$parent" == root ]]; then attachment=(root); else attachment=(parent "$parent"); fi
+      tc -j filter show dev "$iface" "${attachment[@]}" >"${backup}/qdisc-restore-filters.json" || return 1
+      qdisc_json filters "${backup}/qdisc-restore-filters.json" || return 1
+    done <"${backup}/qdisc-current.tsv"
+    if [[ "${4:-}" == preflight ]]; then
+      # Validate both directions before restore_backup changes files or sysctls.
+      (
+        local SESSION_DIR
+        SESSION_DIR="$(mktemp -d)" || exit 1
+        trap 'rm -rf "$SESSION_DIR"' EXIT
+        clear_qdisc_probe "${backup}/qdisc-original.json" "${backup}/qdisc-current.json"
+      )
+      return
+    fi
+  fi
   while IFS=$'\t' read -r parent kind handle text; do
     [[ "$kind" != mq ]] || continue
     if qdisc_json record-equal "${backup}/qdisc-original.json" "$parent" "${backup}/qdisc-current.json"; then continue; fi
@@ -2109,7 +2133,7 @@ restore_backup() {
   source "${backup}/meta.env" || return 1
   iface="$IFACE"; kind="${ROOT_QDISC:-$ROOT_QDISC_KIND}"
   snapshot="${backup}/sysctl.tsv"
-  if [[ "$scope" == original ]]; then
+  if [[ "$scope" == original || "$scope" == snapshot ]]; then
     QDISC_POLICY=manage
     if [[ -r "${backup}/full-sysctl.tsv" ]]; then
       snapshot="${backup}/full-sysctl.tsv"
@@ -2121,6 +2145,12 @@ restore_backup() {
       ' "${backup}/observed.tsv" >"$temporary" || { rm -f "$temporary"; return 1; }
       snapshot="$temporary"
     fi
+  fi
+  if [[ "$scope" == snapshot && -s "${backup}/qdisc-original.json" ]] &&
+     ! restore_qdisc_exact "$backup" "$iface" "$scope" preflight; then
+    [[ -z "$temporary" ]] || rm -f "$temporary"
+    error "指定备份的队列恢复预检失败，未修改 TCP 参数或开机配置：$backup"
+    return 1
   fi
   if systemd_available && ! systemctl disable --now bbr-tcp-tuning.service >/dev/null 2>&1; then
     if [[ -e "$SERVICE_FILE" || -L "$SERVICE_FILE" ]]; then
@@ -2334,6 +2364,9 @@ confirm_tuning() {
 rollback_command() {
   require_linux; require_root
   local backup="$BACKUP_PATH" scope=changes pending
+  # Watchdogs pass --backup too: only a human selecting a target authorizes
+  # restoring the complete snapshot over later, unrelated queue changes.
+  if [[ -n "$backup" && "${BBR_AUTO_ROLLBACK:-0}" != 1 ]]; then scope=snapshot; fi
   if (( RESTORE_ORIGINAL )); then
     backup="$(original_backup_path)" || die "未找到可用的初始备份"
     scope=original

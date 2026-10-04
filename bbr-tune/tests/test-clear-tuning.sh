@@ -100,7 +100,7 @@ cases = ['success', 'menu-clear', 'cake', 'noqueue', 'mq', 'partial-queue', 'cha
          'legacy-queue', 'fail-namespace', 'filters', 'fail-sysctl', 'false-sysctl',
          'interrupt-sysctl', 'hangup', 'hangup-disconnect', 'fail-file', 'false-delete', 'fail-service-stop',
          'false-service-enable', 'fail-queue', 'corrupt-queue']
-cases += ['default-mq', 'default-mq-broken-weights', 'default-mq-reset-mismatch',
+cases += ['default-mq', 'default-mq-older-tc', 'default-mq-broken-weights', 'default-mq-reset-mismatch',
           'default-mq-fail-sysctl', 'default-mq-undo', 'default-mq-cancel',
           'default-mq-foreign-driver', 'default-mq-extra-tx', 'default-mq-custom-leaf',
           'default-mq-fail-tap', 'default-mq-filters', 'default-mq-changed-default',
@@ -198,6 +198,11 @@ for name in cases:
         saved=[{'kind':'mq','handle':'0:','root':True,'options':{}},
                {'kind':'fq','handle':'0:','parent':':1','options':defaults['fq']}]
         (state/'default-mq.json').write_text(json.dumps(saved))
+        if name=='default-mq-older-tc':
+            # Older backup omits a disabled option that current tc prints.
+            current_default=json.loads(json.dumps(saved))
+            current_default[1]['options']['offload_horizon']=0
+            (state/'default-mq.json').write_text(json.dumps(current_default))
         if name=='default-mq-custom-leaf':
             saved=json.loads(json.dumps(saved)); saved[1]['options']['limit']=12345
         if name=='default-mq-broken-weights': (state/'broken-weights').touch()
@@ -297,7 +302,9 @@ touch "$BACKUP_ROOT/02-latest/qdisc-changed"
         assert read_sysctls(state)==latest and '调优前备份仍然保留' in screen,(name,screen)
     else:
         assert read_sysctls(state)==original and configs(state)==initial_config,(name,screen)
-        assert json.loads((state/'live.json').read_text())==saved,(name,screen)
+        expected_queue=json.loads(json.dumps(saved))
+        if name=='default-mq-older-tc': expected_queue[1]['options']['offload_horizon']=0
+        assert json.loads((state/'live.json').read_text())==expected_queue,(name,screen)
         assert not (state/'pending-latest').exists() and not (state/'active-session').exists(),(name,screen)
         assert not list((state/'pending').glob('*')),(name,screen)
         assert len(undo_backups)==1 and '调优参数已清理：' in screen,(name,screen)
