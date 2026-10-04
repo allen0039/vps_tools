@@ -20,7 +20,7 @@ import tempfile
 import time
 import uuid
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 CONFIG_NAME = "99-vpstools-sshd.local"
 MARKER = "# vpstools-fail2ban: "
 CHAIN = "f2b-vpstools-sshd"
@@ -467,10 +467,31 @@ class App:
                     raise ToolError("范围选项无效，已取消。")
                 if scope:
                     settings["scope"] = "ssh" if scope == "1" else "all"
+                if source and not ipaddress.ip_address(source).is_loopback:
+                    source_network = ipaddress.ip_network(source)
+                    single_entries = []
+                    covering_entries = []
+                    for entry in settings["ignoreip"]:
+                        try:
+                            network = ipaddress.ip_network(entry, strict=False)
+                        except ValueError:
+                            continue
+                        if network == source_network:
+                            single_entries.append(entry)
+                        elif network.version == source_network.version and source_network.subnet_of(network):
+                            covering_entries.append(entry)
+                    if single_entries:
+                        print("当前 SSH 来源 IP 已有单地址白名单条目；选择否将移除这些条目。")
+                    if confirm(f"是否将当前 SSH 来源 IP {source} 加入白名单？"):
+                        settings["ignoreip"] = list(dict.fromkeys([*settings["ignoreip"], source]))
+                    else:
+                        settings["ignoreip"] = [entry for entry in settings["ignoreip"] if entry not in single_entries]
+                    if covering_entries:
+                        print("当前 SSH 来源 IP 仍被已有网段白名单覆盖：" + " ".join(covering_entries) + "；如不需要，请在白名单菜单移除对应网段。")
                 extra = input("额外管理 IP/CIDR（多个用空格分隔，回车跳过）：").split()
                 settings["ignoreip"] = list(dict.fromkeys([*settings["ignoreip"], *(normalize_ip(value) for value in extra)]))
             show_settings(settings)
-            print("当前 SSH 来源 IP：" + (source or "未检测到") + "（仅显示，不自动加入白名单）")
+            print("当前 SSH 来源 IP：" + (source or "未检测到") + "（默认不加入白名单）")
             if args and args.yes or confirm("应用以上配置并启用 SSH 防护？"):
                 self.apply(settings, activate=True)
             else:

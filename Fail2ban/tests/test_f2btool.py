@@ -59,7 +59,7 @@ class ConfigTest(unittest.TestCase):
                     patch.object(self.app, "inherited_ignoreip", return_value=self.settings["ignoreip"]), \
                     patch.object(self.app, "apply") as apply, \
                     patch.object(f2b, "current_ip", return_value=source), \
-                    patch.object(f2b, "confirm", return_value=True), \
+                    patch.object(f2b, "confirm", side_effect=[False, True] if command is None else [True]), \
                     patch("builtins.input", side_effect=[""] * 5), \
                     patch.object(f2b.sys, "platform", "linux"), \
                     patch.object(f2b.os, "geteuid", return_value=0), \
@@ -70,7 +70,58 @@ class ConfigTest(unittest.TestCase):
                 else:
                     f2b.main(command)
                 self.assertNotIn(source, apply.call_args.args[0]["ignoreip"])
-                self.assertIn(source + "（仅显示，不自动加入白名单）", output.getvalue())
+                self.assertIn(source + "（默认不加入白名单）", output.getvalue())
+
+    def test_menu_current_ip_whitelist_choice_defaults_to_no(self):
+        cases = [
+            ("203.0.113.8", [], "", False),
+            ("203.0.113.8", [], "n", False),
+            ("203.0.113.8", [], "y", True),
+            ("203.0.113.8", ["203.0.113.8", "203.0.113.8/32"], "", False),
+            ("203.0.113.8", ["203.0.113.8"], "y", True),
+            ("2001:db8::8", ["2001:db8:0:0::8/128"], "", False),
+            ("2001:db8::8", [], "y", True),
+        ]
+        for source, single_entries, answer, included in cases:
+            with self.subTest(source=source, single_entries=single_entries, answer=answer):
+                settings = copy.deepcopy(self.settings)
+                preserved = ["198.51.100.7", "203.0.113.0/24", "2001:db8::/32", "trusted.example.com"]
+                settings["ignoreip"].extend([*preserved, *single_entries])
+                with patch.object(self.app, "preflight"), \
+                        patch.object(self.app, "load", return_value=settings), \
+                        patch.object(self.app, "ports", return_value=[22022]), \
+                        patch.object(self.app, "apply") as apply, \
+                        patch.object(f2b, "current_ip", return_value=source), \
+                        patch.object(f2b.sys.stdin, "isatty", return_value=True), \
+                        patch("builtins.input", side_effect=[""] * 4 + [answer, "", "y"]) as input_mock, \
+                        contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.app.configure()
+                whitelist = apply.call_args.args[0]["ignoreip"]
+                self.assertEqual(source in whitelist, included)
+                for entry in preserved:
+                    self.assertIn(entry, whitelist)
+                if not included:
+                    for entry in single_entries:
+                        self.assertNotIn(entry, whitelist)
+                self.assertIn(f"是否将当前 SSH 来源 IP {source} 加入白名单？ [y/N] ",
+                              [call.args[0] for call in input_mock.call_args_list])
+                self.assertIn("仍被已有网段白名单覆盖", output.getvalue())
+                if single_entries:
+                    self.assertIn("选择否将移除这些条目", output.getvalue())
+
+    def test_menu_without_detected_source_does_not_ask_to_whitelist_it(self):
+        with patch.object(self.app, "preflight"), \
+                patch.object(self.app, "ports", return_value=[22022]), \
+                patch.object(self.app, "inherited_ignoreip", return_value=self.settings["ignoreip"]), \
+                patch.object(self.app, "apply") as apply, \
+                patch.object(f2b, "current_ip", return_value=None), \
+                patch.object(f2b.sys.stdin, "isatty", return_value=True), \
+                patch("builtins.input", side_effect=[""] * 5 + ["y"]) as input_mock, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.app.configure()
+        self.assertEqual(apply.call_args.args[0]["ignoreip"], self.settings["ignoreip"])
+        self.assertFalse(any("是否将当前 SSH 来源 IP" in call.args[0]
+                             for call in input_mock.call_args_list))
 
     def test_configure_preserves_existing_whitelist_and_accepts_explicit_ip(self):
         source = "203.0.113.8"

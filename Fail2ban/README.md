@@ -50,7 +50,7 @@ Gitee：
 curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/Fail2ban/install.sh' -o /tmp/f2b-install.sh && sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT bash /tmp/f2b-install.sh --channel gitee
 ```
 
-当前 SSH 来源 IP 仅用于显示，不会自动加入白名单，适合动态公网 IP。需要白名单时，可显式追加 `--ignore-ip <管理IP或CIDR>`，例如 `--ignore-ip 203.0.113.8`。还可传 `--scope all`、`--bantime`、`--findtime`、`--maxretry`；运行 `bash /tmp/f2b-install.sh --help` 查看选项。脚本不会切换 SSH 端口，也不会安装完整 VPS 工具箱。
+一键部署不会自动将当前 SSH 来源 IP 加入白名单，适合动态公网 IP。需要白名单时，可显式追加 `--ignore-ip <管理IP或CIDR>`，例如 `--ignore-ip 203.0.113.8`。还可传 `--scope all`、`--bantime`、`--findtime`、`--maxretry`；运行 `bash /tmp/f2b-install.sh --help` 查看选项。脚本不会切换 SSH 端口，也不会安装完整 VPS 工具箱。
 
 从本地仓库执行：
 
@@ -104,7 +104,9 @@ sudo f2btool restore <备份名称>
 
 `disable` 只停用 SSH jail，其他 jail 可以继续运行。同步端口和修改白名单不会启动原本停止的服务，显式配置或 `enable` 才会启动并设置自启。解封不移除防火墙自身的 IP/国家黑名单。
 
-sudo 策略可能清除 SSH 来源变量，配置时会显示是否检测到来源 IP，但默认不自动加入白名单。菜单、命令模式和一键部署均采用此行为；`configure --no-current-ip` 保留兼容。需要白名单时，通过 `--ignore-ip` 或白名单菜单手动添加。升级和重新配置会保留已有白名单，包括旧版本自动添加的 IP；不再需要的条目请在白名单菜单移除。
+菜单配置检测到当前 SSH 来源 IP 后，会询问“是否将当前 SSH 来源 IP 加入白名单？ [y/N]”，回车默认不加入。如果该 IP 已有单地址条目（含 IPv4 /32、IPv6 /128），会提示选择否将移除这些条目；包含该 IP 的已有网段白名单会保留并提示手动处理。其他管理 IP、网段和继承的域名条目继续保留；额外管理 IP 仍可显式输入。
+
+命令模式和一键部署默认不自动加入来源 IP，也不自动移除已有白名单；`configure --no-current-ip` 保留兼容。需要白名单时，通过 `--ignore-ip` 或白名单菜单手动添加。sudo 策略可能清除 SSH 来源变量，未检测到来源 IP 时不会询问。旧版本添加的其他历史 IP 请在白名单菜单移除。
 
 ## 校验与恢复
 
