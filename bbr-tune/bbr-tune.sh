@@ -2,7 +2,7 @@
 # bbr-tune.sh - 远程 Linux 服务器 TCP/BBR 自动测试与参数寻优工具
 set -Eeuo pipefail
 
-VERSION="2.10.25"
+VERSION="2.10.26"
 PROGRAM="${0##*/}"
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 [[ "$SCRIPT_PATH" == /* ]] || SCRIPT_PATH="${PWD}/${SCRIPT_PATH}"
@@ -820,9 +820,51 @@ validate_qdisc_options() {
 
 # Serialize only documented, reversible options from numeric tc JSON. Unknown
 # options fail closed; no shell evaluation or rounded display values are used.
+qdisc_fq_weights_syntax() (
+  local ns="bbrq-weights-$$-${RANDOM}" created=0 prefix json result=""
+  json="$(mktemp)" || return 1
+  trap 'rm -f "$json"; (( ! created )) || ip netns del "$ns" >/dev/null 2>&1' EXIT
+  trap 'exit 130' INT TERM HUP
+  ip netns add "$ns" >/dev/null || { rm -f "$json"; return 1; }
+  created=1
+  if ip -n "$ns" link add bbrprobe type dummy; then
+    for prefix in normal skip-first; do
+      if [[ "$prefix" == normal ]]; then
+        ip netns exec "$ns" tc qdisc replace dev bbrprobe root fq weights 65536 131072 196608 >/dev/null 2>&1 || continue
+      else
+        # iproute2 6.15 advances argv once too many before reading weights.
+        ip netns exec "$ns" tc qdisc replace dev bbrprobe root fq weights 0 65536 131072 196608 >/dev/null 2>&1 || continue
+      fi
+      ip netns exec "$ns" tc -j -d qdisc show dev bbrprobe >"$json" || break
+      if python3 - "$json" <<'PY_WEIGHTS'
+import json,sys
+d=json.load(open(sys.argv[1]))
+o=d[0].get('options',{}) if len(d)==1 and d[0].get('kind')=='fq' else {}
+sys.exit(0 if o.get('weights',o.get('weights '))==[65536,131072,196608] else 1)
+PY_WEIGHTS
+      then result="$prefix"; break; fi
+    done
+  fi
+  # Bash 3.x may skip a nested EXIT trap during an outer recovery EXIT trap.
+  # Explicitly clean up on the ordinary success/failure path as well.
+  ip netns del "$ns" >/dev/null 2>&1 || return 1
+  created=0
+  rm -f "$json"
+  if [[ -n "$result" ]]; then printf '%s\n' "$result"; return 0; fi
+  qdisc_error '当前 tc 无法准确重建 fq weights，未开始队列恢复'
+  return 1
+)
+
 qdisc_json() {
-  python3 - "$@" <<'PY_QDISC'
-import json, sys, re
+  local weights_syntax="${QDISC_FQ_WEIGHTS_SYNTAX:-normal}"
+  if [[ "${1:-}" == restore-plan ]] && qdisc_json has-weights "$2"; then
+    if [[ -z "${QDISC_FQ_WEIGHTS_SYNTAX:-}" ]]; then
+      QDISC_FQ_WEIGHTS_SYNTAX="$(qdisc_fq_weights_syntax)" || return 1
+    fi
+    weights_syntax="$QDISC_FQ_WEIGHTS_SYNTAX"
+  fi
+  BBR_FQ_WEIGHTS_SYNTAX="$weights_syntax" python3 - "$@" <<'PY_QDISC'
+import json, sys, re, os
 from decimal import Decimal
 
 def ident(s):
@@ -907,7 +949,7 @@ def options(q):
             weights=o['weights']
             if not isinstance(weights,list) or len(weights)!=3 or any(type(v)!=int or not 1<=v<=2**31-1 for v in weights):
                 raise ValueError('invalid fq weights')
-            args += ['weights'] + [str(v) for v in weights]
+            args += ['weights'] + (['0'] if os.environ['BBR_FQ_WEIGHTS_SYNTAX']=='skip-first' else []) + [str(v) for v in weights]
         for k in ('horizon_cap','horizon_drop'):
             known.add(k)
             if k in o:
@@ -961,7 +1003,12 @@ try:
         if json.load(open(sys.argv[2]))!=[]: raise ValueError('existing egress filters require keep')
     else:
         d=load(sys.argv[2])
-        if mode=='plan':
+        if mode=='has-weights':
+            sys.exit(0 if any(q['kind']=='fq' and 'weights' in q['options'] for q in d.values()) else 1)
+        elif mode=='default-mq-target':
+            sys.exit(0 if len(d)==2 and d['root']=={'kind':'mq','handle':'0:','options':{}} and
+                     '0:1' in d and d['0:1']['handle']=='0:' and d['0:1']['kind'] in ('fq','fq_codel') else 1)
+        elif mode in ('plan','restore-plan'):
             for p,q in sorted(d.items()): print('\t'.join((p,q['kind'],q['handle'],' '.join(options(q)))))
         elif mode=='equal':
             other=load(sys.argv[3]); ok=d.keys()==other.keys()
@@ -1012,6 +1059,7 @@ qdisc_switch_probe() (
   ip netns add "$ns" || { qdisc_error '无法创建临时网络命名空间；请使用 --qdisc keep，或在有完整网络管理权限的宿主机切换'; return 1; }
   created=1
   ip -n "$ns" link add bbrprobe type dummy || return 1
+  qdisc_json restore-plan "$QDISC_ORIGINAL_JSON" >"$QDISC_ORIGINAL_PLAN" || return 1
   qdisc_target_args
   ip netns exec "$ns" tc qdisc replace dev bbrprobe root "$TUNING_QDISC" ${QDISC_ARGS[@]+"${QDISC_ARGS[@]}"} || return 1
   ip netns exec "$ns" tc -j -d qdisc show dev bbrprobe >"${SESSION_DIR}/qdisc-probe.json" || return 1
@@ -1063,18 +1111,31 @@ restore_qdisc_exact() {
   local opts=() cmd=()
   saved="$(qdisc_parse_layout <"${backup}/qdisc.txt")" || return 1
   current="$(qdisc_read_layout "$iface")" || return 1
+  tc -j -d qdisc show dev "$iface" >"${backup}/qdisc-current.json" || return 1
+  qdisc_json plan "${backup}/qdisc-current.json" >"${backup}/qdisc-current.tsv" || return 1
   if [[ "$(awk '$1=="root"{print $2}' <<<"$saved")" == mq ]]; then
     [[ "$(awk '$1=="root"{print $2,$3}' <<<"$saved")" == "$(awk '$1=="root"{print $2,$3}' <<<"$current")" && "$(awk '{print $1}' <<<"$saved")" == "$(awk '{print $1}' <<<"$current")" ]] || {
       qdisc_error 'mq 布局已变化，未重建根队列'; return 1;
     }
   elif [[ "$(wc -l <<<"$current" | tr -d ' ')" != 1 ]]; then
-    qdisc_error '当前队列已变为分层布局，未执行覆盖恢复'; return 1
+    # Only undo a root reset performed and recorded by clear-tuning. Ordinary
+    # rollback must still refuse to flatten an unrelated hierarchy.
+    if [[ -s "$backup/qdisc-reset-expected.json" ]] &&
+       { qdisc_json equal "$backup/qdisc-reset-expected.json" "$backup/qdisc-current.json" ||
+         { [[ -s "$backup/qdisc-reset-observed.json" ]] && qdisc_json equal "$backup/qdisc-reset-observed.json" "$backup/qdisc-current.json"; }; }; then
+      local attachment=()
+      while IFS=$'\t' read -r parent kind handle text; do
+        if [[ "$parent" == root ]]; then attachment=(root); else attachment=(parent "$parent"); fi
+        tc -j filter show dev "$iface" "${attachment[@]}" >"$backup/qdisc-reset-filters.json" || return 1
+        qdisc_json filters "$backup/qdisc-reset-filters.json" || return 1
+      done <"$backup/qdisc-current.tsv"
+    else
+      qdisc_error '当前队列已变为分层布局，未执行覆盖恢复'; return 1
+    fi
   fi
-  tc -j -d qdisc show dev "$iface" >"${backup}/qdisc-current.json" || return 1
-  qdisc_json plan "${backup}/qdisc-current.json" >"${backup}/qdisc-current.tsv" || return 1
   if qdisc_json equal "${backup}/qdisc-original.json" "${backup}/qdisc-current.json"; then return 0; fi
   [[ -f "${backup}/qdisc-changed" || "${3:-}" == original ]] || { qdisc_error '本次尚未修改队列；当前队列被其他操作改变，保持不动'; return 1; }
-  qdisc_json plan "${backup}/qdisc-original.json" >"${backup}/qdisc-restore.tsv" || return 1
+  qdisc_json restore-plan "${backup}/qdisc-original.json" >"${backup}/qdisc-restore.tsv" || return 1
   while IFS=$'\t' read -r parent kind handle text; do
     [[ "$kind" != mq ]] || continue
     if qdisc_json record-equal "${backup}/qdisc-original.json" "$parent" "${backup}/qdisc-current.json"; then continue; fi
@@ -1247,7 +1308,7 @@ apply_boot_qdisc() {
 
 render_qdisc_helper() {
   printf '#!/usr/bin/env bash\n# Managed by bbr-tune.sh\nset -Eeuo pipefail\n'
-  declare -f qdisc_error qdisc_parse_layout qdisc_read_layout qdisc_safe qdisc_shape qdisc_can_apply_layout qdisc_preflight qdisc_json qdisc_target_args qdisc_switch_probe prepare_qdisc_switch restore_qdisc_exact apply_qdisc_leaf apply_qdisc apply_boot_qdisc
+  declare -f qdisc_error qdisc_parse_layout qdisc_read_layout qdisc_safe qdisc_shape qdisc_can_apply_layout qdisc_preflight qdisc_fq_weights_syntax qdisc_json qdisc_target_args qdisc_switch_probe prepare_qdisc_switch restore_qdisc_exact apply_qdisc_leaf apply_qdisc apply_boot_qdisc
   cat <<'EOF_HELPER'
 source /etc/default/bbr-tcp-tuning
 CAKE_BANDWIDTH_MBPS="${BBR_CAKE_BANDWIDTH_MBPS:-}"
@@ -2378,7 +2439,8 @@ clear_qdisc_probe() (
   created=1
   ip -n "$ns" link add bbrprobe type dummy || return 1
   for json in "$@"; do
-    plan="${json%.json}.tsv"
+    plan="${json%.json}.restore.tsv"
+    qdisc_json restore-plan "$json" >"$plan" || return 1
     while IFS=$'\t' read -r parent kind handle text; do
       [[ "$kind" != mq && "$kind" != noqueue ]] || continue
       opts=(); [[ -z "$text" ]] || read -r -a opts <<<"$text"
@@ -2389,9 +2451,43 @@ clear_qdisc_probe() (
   done
 )
 
+# The implicit mq root is generated by the device, not reconstructed with a
+# user-assigned handle. Limit automatic reset to the verified virtio case.
+qdisc_default_mq_device() {
+  local iface="$1" queue_dir="${2:-/sys/class/net/$1/queues}"
+  local queues=("$queue_dir"/tx-*)
+  [[ ${#queues[@]} == 1 && "${queues[0]}" == "$queue_dir/tx-0" && -d "${queues[0]}" ]] || return 1
+  ip -d -j link show dev "$iface" >"$SESSION_DIR/reset-device.json" || return 1
+  python3 - "$SESSION_DIR/reset-device.json" <<'PY_DEVICE'
+import json,sys
+d=json.load(open(sys.argv[1]))
+ok=len(d)==1 and d[0].get('parentbus')=='virtio' and type(d[0].get('num_tx_queues'))==int and d[0]['num_tx_queues']>1
+sys.exit(0 if ok else 1)
+PY_DEVICE
+}
+
+clear_default_mq_probe() (
+  local target="$1" iface="$2" ns="bbrq-default-$$-${RANDOM}" created=0 kind
+  qdisc_json default-mq-target "$target/qdisc-original.json" || return 1
+  qdisc_default_mq_device "$iface" || return 1
+  kind="$(awk -F '\t' '$1=="0:1"{print $2}' "$target/qdisc-original.tsv")"
+  [[ "$(sysctl_get net.core.default_qdisc)" == "$kind" ]] || return 1
+  trap '(( ! created )) || ip netns del "$ns" >/dev/null 2>&1' EXIT
+  trap 'exit 130' INT TERM HUP
+  ip netns add "$ns" || return 1
+  created=1
+  # A multiqueue TAP with one active TX queue reproduces an implicit mq 0:.
+  # Do not set sysctls here: net.core.default_qdisc is not namespace-local.
+  ip netns exec "$ns" ip tuntap add dev bbrprobe mode tap multi_queue || return 1
+  ip -n "$ns" link set bbrprobe up || return 1
+  ip netns exec "$ns" tc -j -d qdisc show dev bbrprobe >"$SESSION_DIR/reset-default.json" || return 1
+  qdisc_json equal "$target/qdisc-original.json" "$SESSION_DIR/reset-default.json"
+)
+
 clear_qdisc_preflight() {
   local target="$1" iface="$2" saved current parent kind handle text
   local attachment=()
+  QDISC_RESET_DEFAULT=0
   QDISC_ORIGINAL_JSON="${SESSION_DIR}/clear-current.json"
   saved="$(qdisc_parse_layout <"$target/qdisc.txt")" || return 1
   current="$(qdisc_read_layout "$iface")" || return 1
@@ -2399,18 +2495,24 @@ clear_qdisc_preflight() {
   [[ "$(awk -F '\t' 'BEGIN{OFS="\t"} {print $1,$2,$3}' "$target/qdisc-original.tsv")" == "$saved" ]] || {
     qdisc_error '初始队列布局与完整参数不一致'; return 1;
   }
+  tc -j -d qdisc show dev "$iface" >"$QDISC_ORIGINAL_JSON" || return 1
+  qdisc_json plan "$QDISC_ORIGINAL_JSON" >"${QDISC_ORIGINAL_JSON%.json}.tsv" || return 1
   if [[ "$(awk '$1=="root"{print $2}' <<<"$saved")" == mq ]]; then
-    [[ "$(awk '$1=="root"{print $2,$3}' <<<"$saved")" == "$(awk '$1=="root"{print $2,$3}' <<<"$current")" &&
-       "$(awk '{print $1}' <<<"$saved")" == "$(awk '{print $1}' <<<"$current")" ]] || {
-      qdisc_error 'mq 根队列或子队列拓扑已变化，未修改参数'; return 1;
-    }
+    if [[ "$(awk '$1=="root"{print $2,$3}' <<<"$saved")" != "$(awk '$1=="root"{print $2,$3}' <<<"$current")" ||
+          "$(awk '{print $1}' <<<"$saved")" != "$(awk '{print $1}' <<<"$current")" ]]; then
+      if [[ "$(wc -l <<<"$current" | tr -d ' ')" == 1 && "$(awk '$1=="root"{print $2}' <<<"$current")" =~ ^(fq|fq_codel)$ ]] &&
+         clear_default_mq_probe "$target" "$iface"; then
+        QDISC_RESET_DEFAULT=1
+        info '已验证网卡默认 mq 队列与初始备份一致；确认后将恢复默认布局'
+      else
+        qdisc_error 'mq 根队列或子队列拓扑已变化，且无法验证网卡默认布局，未修改参数'; return 1
+      fi
+    fi
   elif [[ "$(wc -l <<<"$current" | tr -d ' ')" != 1 ]]; then
     qdisc_error '当前队列已变为分层布局，未修改参数'; return 1
   fi
-  tc -j -d qdisc show dev "$iface" >"$QDISC_ORIGINAL_JSON" || return 1
-  qdisc_json plan "$QDISC_ORIGINAL_JSON" >"${QDISC_ORIGINAL_JSON%.json}.tsv" || return 1
   if qdisc_json equal "$target/qdisc-original.json" "$QDISC_ORIGINAL_JSON"; then return 0; fi
-  [[ "$(awk '$1=="root"{print $2,$3}' <<<"$saved")" != 'mq 0:' ]] || {
+  [[ "$QDISC_RESET_DEFAULT" == 1 || "$(awk '$1=="root"{print $2,$3}' <<<"$saved")" != 'mq 0:' ]] || {
     qdisc_error '无法安全定位 mq 0: 子队列，未修改参数'; return 1;
   }
   while IFS=$'\t' read -r parent kind handle text; do
@@ -2418,6 +2520,10 @@ clear_qdisc_preflight() {
     tc -j filter show dev "$iface" "${attachment[@]}" >"${SESSION_DIR}/clear-filters.json" || return 1
     qdisc_json filters "${SESSION_DIR}/clear-filters.json" || return 1
   done <"${QDISC_ORIGINAL_JSON%.json}.tsv"
+  # Cache parser compatibility in the worker before mutation, so error recovery
+  # can reuse it without depending on another namespace being available.
+  qdisc_json restore-plan "$target/qdisc-original.json" >"$target/qdisc-original.restore.tsv" || return 1
+  qdisc_json restore-plan "$QDISC_ORIGINAL_JSON" >"${QDISC_ORIGINAL_JSON%.json}.restore.tsv" || return 1
   clear_qdisc_probe "$target/qdisc-original.json" "$QDISC_ORIGINAL_JSON" || return 1
 }
 
@@ -2473,7 +2579,7 @@ clear_tuning_command() (
   for cmd in ip tc sysctl awk mktemp python3 tee cmp; do have "$cmd" || die "缺少命令：$cmd"; done
   local original target iface key value pending answer
   local SESSION_ID SESSION_DIR RUN_LOG BACKUP_DIR="" QDISC_ONLY=0 QDISC_POLICY=manage QDISC_ORIGINAL_JSON=""
-  local CLEAR_MUTATING=0
+  local CLEAR_MUTATING=0 QDISC_RESET_DEFAULT=0 QDISC_FQ_WEIGHTS_SYNTAX=""
   local IFACE="" ROOT_QDISC="" ROOT_QDISC_KIND="" SERVICE_ENABLED="unknown" SERVICE_ACTIVE="unknown"
   original="$(original_backup_path_readonly)" || die "未找到有效初始备份，不能推测原参数；未执行清理"
   (( YES )) || [[ -t 0 ]] || die "非交互清理需要 --yes"
@@ -2511,12 +2617,27 @@ clear_tuning_command() (
   BACKUP_DIR="$(create_backup "$iface" 0 '清理调优前状态（可撤销清理）' 0)" || die "清理前备份失败，未修改参数"
   prepare_clear_target "$BACKUP_DIR" "${SESSION_DIR}/undo-target" || die "清理前备份不完整，未修改参数"
   touch "$BACKUP_DIR/qdisc-changed" || die "无法标记撤销备份，未修改参数"
+  if (( QDISC_RESET_DEFAULT )); then
+    cp "$target/qdisc-original.json" "$BACKUP_DIR/qdisc-reset-expected.json" || die "无法保存队列拓扑回退记录，未修改参数"
+  fi
   info "清理前备份：$BACKUP_DIR"
   printf '  撤销清理：sudo bbr-tune rollback --backup %s\n' "$BACKUP_DIR"
   CLEAR_MUTATING=1
   if systemd_available; then
     systemctl disable --now bbr-tcp-tuning.service >/dev/null 2>&1 || true
     [[ "$(systemctl is-active bbr-tcp-tuning.service 2>/dev/null || true)" != active ]] || die "无法停止调优开机服务"
+  fi
+  if (( QDISC_RESET_DEFAULT )); then
+    # Revalidate after backup/service handling, before dropping buffered packets.
+    clear_default_mq_probe "$target" "$iface" || die "网卡默认队列验证已变化，未重置根队列"
+    tc -j -d qdisc show dev "$iface" >"$SESSION_DIR/reset-before.json" || die "无法读取重置前队列"
+    qdisc_json equal "$QDISC_ORIGINAL_JSON" "$SESSION_DIR/reset-before.json" || die "当前队列已变化，未重置根队列"
+    tc -j filter show dev "$iface" root >"$SESSION_DIR/reset-filters.json" || die "无法读取重置前过滤器"
+    qdisc_json filters "$SESSION_DIR/reset-filters.json" || die "当前新增了过滤器，未重置根队列"
+    tc qdisc del dev "$iface" root || die "恢复网卡默认队列失败"
+    tc -j -d qdisc show dev "$iface" >"$BACKUP_DIR/qdisc-reset-observed.json" || die "无法读取默认队列，正在尝试回退"
+    qdisc_json equal "$target/qdisc-original.json" "$BACKUP_DIR/qdisc-reset-observed.json" || die "网卡默认队列与初始备份不一致，正在尝试回退"
+    info '网卡默认 mq 布局及完整队列参数已恢复并验证'
   fi
   restore_backup "$target" original && verify_restored_files "$target" || die "初始状态恢复或配置验证失败"
   verify_restored_service "$target" || die "开机服务恢复验证失败"

@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import signal
 from decimal import Decimal
 
 base = Path(os.environ['QDISC_TEST_DIR'])
@@ -20,14 +21,26 @@ if command == 'ip':
         sys.exit(0)
     if args[:2] == ['netns', 'del']:
         (base / (args[2] + '.json')).unlink()
+        (base / (args[2] + '.tap')).unlink(missing_ok=True)
         if (base / 'drift-after-probe').exists():
             (base / 'live.json').write_text((base / 'fq_codel.json').read_text())
         sys.exit(0)
     if args[:2] == ['netns', 'exec']:
         ns = args[2]
+        if args[3:6] == ['ip', 'tuntap', 'add']:
+            if (base / 'fail-tap').exists(): sys.exit(1)
+            (base / (ns + '.tap')).touch()
+            sys.exit(0)
         assert args[3] == 'tc', args
         args = args[4:]
     else:
+        if args[:4] == ['-d', '-j', 'link', 'show']:
+            print((base / 'device.json').read_text() if (base / 'device.json').exists() else '[{"parentbus":"virtio","num_tx_queues":2}]')
+            sys.exit(0)
+        if args[0] == '-n' and args[2:4] == ['link', 'set']:
+            if (base / (args[1] + '.tap')).exists():
+                (base / (args[1] + '.json')).write_text((base / 'default-mq.json').read_text())
+            sys.exit(0)
         assert args[:2] == ['link', 'show'] or (args[0] == '-n' and args[2:4] == ['link', 'add']), args
         sys.exit(0)
 file = base / (ns + '.json' if ns else 'live.json')
@@ -54,7 +67,13 @@ if not ns and (base / 'fail-parent').exists() and parent == (base / 'fail-parent
     sys.exit(1)
 if args[1] == 'del':
     assert parent == 'root', args
-    file.write_text('[{"kind":"noqueue","root":true,"handle":"0:","options":{}}]')
+    if not ns and (base / 'default-mq.json').exists():
+        data=json.loads((base / 'default-mq.json').read_text())
+        if (base / 'bad-default-reset').exists(): data[1]['options']['limit'] += 1
+        file.write_text(json.dumps(data))
+        if (base / 'interrupt-root-reset').exists(): os.kill(os.getppid(),signal.SIGHUP)
+    else:
+        file.write_text('[{"kind":"noqueue","root":true,"handle":"0:","options":{}}]')
     sys.exit(0)
 assert args[1] in ('replace', 'change'), args
 pos = args.index('parent')+2 if 'parent' in args else args.index('root')+1
@@ -108,6 +127,11 @@ while i < len(args):
         i += 19
         continue
     if key == 'weights':
+        if (base / 'unsupported-weights').exists(): sys.exit(1)
+        if (base / 'broken-weights').exists():
+            # 6.15 consumes one extra argument; normal triples cannot work.
+            if len(args[i+1:]) < 4 or args[i+1] != '0': sys.exit(1)
+            args.pop(i+1)
         weights = [int(v) for v in args[i+1:i+4]]
         assert len(weights) == 3, args
         options['weights'] = weights
@@ -141,5 +165,6 @@ while i < len(args):
         options[key] = int(val)
 if kind == 'cake' and options.get('raw') and options.get('atm') == 'noatm':
     options.pop('atm')
-state[index] = q
+if parent == 'root': state=[q]
+else: state[index] = q
 file.write_text(json.dumps(state))

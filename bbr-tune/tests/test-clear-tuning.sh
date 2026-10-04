@@ -17,6 +17,8 @@ PENDING_DIR="$STATE_DIR/pending"; PENDING_LATEST="$STATE_DIR/pending-latest"; AC
 SYSCTL_FILE="$STATE_DIR/config/sysctl"; MODULES_FILE="$STATE_DIR/config/modules"; ENV_FILE="$STATE_DIR/config/env"
 QDISC_HELPER="$STATE_DIR/config/helper"; SERVICE_FILE="$STATE_DIR/config/service"
 export QDISC_TEST_DIR="$STATE_DIR"
+eval "$(declare -f qdisc_default_mq_device | sed '1s/qdisc_default_mq_device/qdisc_default_mq_device_real/')"
+qdisc_default_mq_device() { qdisc_default_mq_device_real "$1" "$STATE_DIR/queues"; }
 require_linux() { :; }; require_root() { :; }
 systemd_available() { [[ "$mode" != no-systemd ]]; }
 sysctl_get() { awk -F '\t' -v k="$1" '$1==k {sub(/^[^\t]*\t/, ""); print}' "$STATE_DIR/sysctls.tsv"; }
@@ -98,12 +100,25 @@ cases = ['success', 'menu-clear', 'cake', 'noqueue', 'mq', 'partial-queue', 'cha
          'legacy-queue', 'fail-namespace', 'filters', 'fail-sysctl', 'false-sysctl',
          'interrupt-sysctl', 'hangup', 'hangup-disconnect', 'fail-file', 'false-delete', 'fail-service-stop',
          'false-service-enable', 'fail-queue', 'corrupt-queue']
+cases += ['default-mq', 'default-mq-broken-weights', 'default-mq-reset-mismatch',
+          'default-mq-fail-sysctl', 'default-mq-undo', 'default-mq-cancel',
+          'default-mq-foreign-driver', 'default-mq-extra-tx', 'default-mq-custom-leaf',
+          'default-mq-fail-tap', 'default-mq-filters', 'default-mq-changed-default',
+          'default-mq-unsupported-weights', 'default-mq-interrupt-reset', 'hangup-default-mq']
+if os.environ.get('BBR_CLEAR_TEST_CASES'):
+    selected=os.environ['BBR_CLEAR_TEST_CASES'].split(',')
+    assert set(selected)<=set(cases),selected
+    cases=[name for name in cases if name in selected]
 early_failures = {'no-yes', 'missing-original', 'missing-file', 'incomplete-sysctls',
                   'unsupported-cc', 'missing-interface', 'legacy-queue',
                   'fail-namespace', 'filters', 'corrupt-queue', 'changed-topology'}
+early_failures |= {'default-mq-foreign-driver', 'default-mq-extra-tx', 'default-mq-custom-leaf',
+                   'default-mq-fail-tap', 'default-mq-filters', 'default-mq-changed-default',
+                   'default-mq-unsupported-weights'}
 recovered_failures = {'fail-sysctl', 'false-sysctl', 'interrupt-sysctl', 'fail-file',
                       'false-delete', 'false-service-enable', 'fail-queue', 'partial-queue',
                       'hangup', 'hangup-disconnect'}
+recovered_failures |= {'default-mq-reset-mismatch', 'default-mq-fail-sysctl', 'default-mq-interrupt-reset', 'hangup-default-mq'}
 defaults = {'fq': {'limit':10000, 'quantum':1514, 'pacing':True},
             'fq_codel': {'limit':10240, 'flows':1024, 'quantum':1514, 'ecn':True},
             'cake': {'bandwidth':'unlimited', 'diffserv':'diffserv3', 'flowmode':'triple-isolate',
@@ -164,6 +179,10 @@ def run(state, name, inputs=None):
     return subprocess.CompletedProcess(args,proc.returncode,output.decode(errors='replace'),'')
 for name in cases:
     state=tmp/name; (state/'config').mkdir(parents=True)
+    default_mq=name.startswith('default-mq') or name=='hangup-default-mq'
+    if default_mq:
+        (state/'queues/tx-0').mkdir(parents=True)
+        defaults['fq'].update(weights=[589824,196608,65536])
     for session in ['01-initial','02-latest']:
         (state/'sessions'/session).mkdir(parents=True)
     (state/'defaults.json').write_text(json.dumps(defaults))
@@ -175,6 +194,15 @@ for name in cases:
     if name in {'mq','partial-queue','changed-topology'}:
         saved=[{'kind':'mq','handle':'1:','root':True,'options':{}}]+[
             {'kind':'fq_codel','handle':f'{i}0:','parent':f'1:{i}','options':defaults['fq_codel']} for i in (1,2)]
+    if default_mq:
+        saved=[{'kind':'mq','handle':'0:','root':True,'options':{}},
+               {'kind':'fq','handle':'0:','parent':':1','options':defaults['fq']}]
+        (state/'default-mq.json').write_text(json.dumps(saved))
+        if name=='default-mq-custom-leaf':
+            saved=json.loads(json.dumps(saved)); saved[1]['options']['limit']=12345
+        if name=='default-mq-broken-weights': (state/'broken-weights').touch()
+        # Preserve a single standard default algorithm throughout reset probes.
+        original['net.core.default_qdisc']=latest['net.core.default_qdisc']=tuned['net.core.default_qdisc']='fq'
     (state/'live.json').write_text(json.dumps(saved))
     (state/'config/modules').write_text('# Original modules\nsch_fq_codel\n')
     (state/'config/env').write_text('# Original environment\n')
@@ -230,8 +258,19 @@ touch "$BACKUP_ROOT/02-latest/qdisc-changed"
         (state/name).touch()
     if name=='fail-queue': (state/'fail-parent').write_text('root\n')
     if name=='partial-queue': (state/'fail-parent').write_text('1:2\n')
+    if name=='default-mq-reset-mismatch': (state/'bad-default-reset').touch()
+    if name=='default-mq-fail-sysctl': (state/'fail-sysctl').touch()
+    if name=='default-mq-foreign-driver': (state/'device.json').write_text('[{"parentbus":"pci","num_tx_queues":2}]')
+    if name=='default-mq-extra-tx': (state/'queues/tx-1').mkdir()
+    if name=='default-mq-fail-tap': (state/'fail-tap').touch()
+    if name=='default-mq-filters': (state/'filters.json').write_text('[{"kind":"bpf"}]')
+    if name=='default-mq-changed-default':
+        values=read_sysctls(state); values['net.core.default_qdisc']='fq_codel'; write_sysctls(state,values)
+        before_sysctls=read_sysctls(state)
+    if name=='default-mq-unsupported-weights': (state/'unsupported-weights').touch()
+    if name=='default-mq-interrupt-reset': (state/'interrupt-root-reset').touch()
     original_files={f.name:f.read_bytes() for f in initial.iterdir() if f.is_file()}
-    inputs=b'n\n' if name=='cancel' else b'2\ny\n' if name=='menu-clear' else None
+    inputs=b'n\n' if name in {'cancel','default-mq-cancel'} else b'2\ny\n' if name=='menu-clear' else None
     result=run(state,name,inputs)
     screen=result.stdout+result.stderr
     should_succeed=name not in early_failures|recovered_failures|{'fail-service-stop','fail-queue'}
@@ -241,7 +280,7 @@ touch "$BACKUP_ROOT/02-latest/qdisc-changed"
     assert {f.name:f.read_bytes() for f in initial.iterdir() if f.is_file()}==original_files,(name,screen)
     assert not list(state.glob('bbrq-*.json')),(name,screen)
     undo_backups=list((state/'backups').glob('clear-*'))
-    if name in early_failures|{'cancel'}:
+    if name in early_failures|{'cancel','default-mq-cancel'}:
         assert not undo_backups and not (state/'sysctl-writes').exists(),(name,screen)
         assert configs(state)==before_config and (state/'live.json').read_text()==before_queue,(name,screen)
         assert (state/'pending-latest/armed').exists() and (state/'active-session').exists(),(name,screen)
@@ -266,7 +305,7 @@ touch "$BACKUP_ROOT/02-latest/qdisc-changed"
             repeated=run(state,name)
             assert repeated.returncode==0,(name,repeated)
             assert read_sysctls(state)==original and configs(state)==initial_config,(name,repeated)
-        if name=='undo':
+        if name in {'undo','default-mq-undo'}:
             undo=tmp/'undo.sh'; undo.write_text(prelude+'''\nBACKUP_PATH="$3"; YES=1\nrollback_command\n''')
             undone=subprocess.run([bash,str(undo),str(state),name,str(undo_backups[0])],env=env,capture_output=True,text=True,timeout=5)
             assert undone.returncode==0,(name,undone)

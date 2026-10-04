@@ -149,6 +149,11 @@ BACKUP_DIR="$(create_backup eth0)"
 apply_tuning_qdisc eth0 || fail 'tc JSON array labels with trailing spaces apply failed'
 qdisc_json equal "$TMP/fq_new.json" "$TMP/live.json" || fail 'tc JSON array labels changed fq options'
 no_live_writes
+touch "$TMP/fail-namespace"
+unset QDISC_FQ_WEIGHTS_SYNTAX
+select_tuning_qdisc eth0 || fail 'unchanged fq with weights unnecessarily requires namespaces'
+restore_qdisc "$BACKUP_DIR" eth0 fq original || fail 'unchanged fq rollback unnecessarily requires namespaces'
+no_live_writes
 set_live mq_fq_new; REQUESTED_QDISC=fq; CAKE_BANDWIDTH_MBPS=""
 select_tuning_qdisc eth0 || fail 'existing mq with newer fq leaves cannot remain unchanged'
 BACKUP_DIR="$(create_backup eth0)"
@@ -296,4 +301,20 @@ grep -Fq '无法自动恢复原队列' "$TMP/failed-no-backup-command.log" || fa
  grep -Fq '安全回滚：' "$TMP/ui-qdisc-backup.log" || fail 'queue menu hid backup timer'
 ) || fail 'queue menu backup selection failed'
 no_namespace_leaks
+# Detect parser behavior rather than trusting a version string. Custom weights
+# must survive switching and rollback even with iproute2 6.15's skipped argv.
+(
+ set_live fq_new_tc; REQUESTED_QDISC=cake; CAKE_BANDWIDTH_MBPS=""
+ unset QDISC_FQ_WEIGHTS_SYNTAX
+ touch "$TMP/broken-weights"
+ select_tuning_qdisc eth0 || fail 'broken weights parser preflight'
+ no_live_writes; no_namespace_leaks
+ BACKUP_DIR="$(create_backup eth0)"
+ apply_tuning_qdisc eth0 || fail 'broken weights parser switch'
+ restore_qdisc "$BACKUP_DIR" eth0 fq || fail 'broken weights parser rollback'
+ qdisc_json equal "$TMP/fq_new_tc.json" "$TMP/live.json" || fail 'custom weights lost with parser workaround'
+ render_qdisc_helper >"$TMP/weights-boot-helper"
+ grep -q '^qdisc_fq_weights_syntax' "$TMP/weights-boot-helper" || fail 'boot helper lacks weights compatibility'
+ rm "$TMP/broken-weights"
+) || fail 'weights compatibility regression'
 printf 'All explicit queue selection, CAKE shaping, exact recovery and UI tests passed.\n'
