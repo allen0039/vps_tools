@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # VPS Tools 的统一入口；具体操作交给独立工具。
 set -Eeuo pipefail
-VERSION=0.2.10
+VERSION=0.3.0
 BIN_DIR=${VPS_TOOLS_BIN_DIR:-/usr/local/bin}
 SBIN_DIR=${VPS_TOOLS_SBIN_DIR:-/usr/local/sbin}
 LIB_DIR=${VPS_TOOLS_LIB_DIR:-/usr/local/lib/vpstools}
@@ -81,35 +81,89 @@ update_tools() {
     fi
 }
 
+menu_item() {
+    local number=$1 id=$2 label=$3 path suffix=
+    path=$(tool_path "$id")
+    [[ -x $path ]] || suffix=' [未安装]'
+    printf '    %s. %s%s\n' "$number" "$label" "$suffix"
+}
+
+category_menu() {
+    local category=$1 title choice index id label
+    local -a ids labels
+    case $category in
+        system)
+            title=系统管理
+            ids=(ssh sshkey sshpass firewall fail2ban dns ipv6 swap)
+            labels=('SSH 端口与配置恢复' 'SSH 密钥登录管理' 'SSH 密码登录管理' '防火墙管理' 'Fail2ban 防暴力破解' 'DNS 设置与恢复' 'IPv4 / IPv6 管理' 'Swap 管理') ;;
+        network)
+            title=网络检测与测速
+            ids=(netcheck iperf)
+            labels=('网址与网络检测' 'iperf3 带宽测速') ;;
+        tuning)
+            title=网络调优
+            ids=(bbr tcp)
+            labels=('TCP / BBR 调优' 'TCP 参数导入与回滚') ;;
+        services)
+            title=服务管理
+            ids=(agent)
+            labels=('妙妙屋 Agent 重启') ;;
+        *) return 2 ;;
+    esac
+    while :; do
+        printf '\nVPS Tools > %s\n' "$title"
+        for (( index=0; index<${#ids[@]}; index++ )); do
+            if [[ $category == system ]]; then
+                case $index in
+                    0) printf '\n  SSH 与访问防护\n' ;;
+                    5) printf '\n  网络基础配置\n' ;;
+                    7) printf '\n  系统资源\n' ;;
+                esac
+            fi
+            menu_item "$((index + 1))" "${ids[index]}" "${labels[index]}"
+        done
+        printf '\n    0. 返回主菜单\n'
+        read -r -p '请选择：' choice || return 1
+        [[ $choice != 0 ]] || return 0
+        # 先校验字符，再转十进制，避免把输入当作 Bash 算术表达式。
+        if [[ ! $choice =~ ^[1-9][0-9]?$ ]]; then
+            printf '无效选项，请重新输入。\n'
+            continue
+        fi
+        index=$((10#$choice - 1))
+        if (( index >= ${#ids[@]} )); then
+            printf '无效选项，请重新输入。\n'
+            continue
+        fi
+        id=${ids[index]}
+        label=${labels[index]}
+        if [[ ! -x $(tool_path "$id") ]]; then
+            printf '工具未安装：%s。请返回主菜单，选择「6. 安装 / 更新工具箱」。\n' "$label"
+            continue
+        fi
+        if [[ $id == agent ]]; then
+            read -r -p '重启会短暂中断代理连接，确认继续？[y/N] ' choice || return 1
+            [[ $choice == y || $choice == Y ]] || continue
+        fi
+        run_tool "$id" || printf '%s已取消、有项目未通过或执行失败，请查看上方输出。\n' "$label"
+    done
+}
+
 menu() {
     [[ -t 0 && -t 1 ]] || { printf '菜单需要交互终端；可使用 vpstools list 或 vpstools run。\n' >&2; return 1; }
     local choice channel
     while :; do
-        printf '\nVPS Tools 工具箱 v%s\n' "$VERSION"
-        printf '%s\n' '  1. SSH 端口与备份恢复' '  2. 防火墙管理' '  3. DNS 切换与恢复' '  4. Swap 虚拟内存' '  5. TCP / BBR 调优' '  6. 重启妙妙屋 Agent' '  7. 查看工具安装状态' '  8. 网址与网络检测' '  9. iperf3 本地与 VPS 测速'
-        # 安装 / 更新始终放在所有其他功能下方、退出上方；新增功能项应放在上方。
-        printf '%s\n' '  10. Fail2ban SSH 防暴力破解' '  11. Ipv4和ipv6管理' '  12. TCP 参数导入与回滚' '  13. SSH 密钥登录管理' '  14. SSH 密码登录管理（临时 / 永久）' '  15. 安装 / 更新全部工具' '  0. 退出'
+        printf '\nVPS Tools 工具箱 v%s\n\n' "$VERSION"
+        printf '%s\n' '  1. 系统管理' '  2. 网络检测与测速' '  3. 网络调优' '  4. 服务管理' '' '  5. 查看工具安装状态' '  6. 安装 / 更新工具箱' '  0. 退出'
         read -r -p '请选择：' choice || return 0
         case $choice in
-            1) run_tool ssh || printf 'SSH 工具已取消或执行失败。\n' ;;
-            2) run_tool firewall || printf '防火墙工具已取消或执行失败。\n' ;;
-            3) run_tool dns || printf 'DNS 工具已取消或执行失败。\n' ;;
-            4) run_tool swap || printf 'Swap 工具已取消或执行失败。\n' ;;
-            5) run_tool bbr || printf 'BBR 工具已取消或执行失败。\n' ;;
+            1) category_menu system || return 0 ;;
+            2) category_menu network || return 0 ;;
+            3) category_menu tuning || return 0 ;;
+            4) category_menu services || return 0 ;;
+            5) list_tools ;;
+            # 更新始终放在所有其他功能下方、退出上方。
             6)
-                read -r -p '重启会短暂中断代理连接，确认继续？[y/N] ' choice || return 0
-                if [[ $choice == y || $choice == Y ]]; then
-                    run_tool agent || printf 'Agent 重启失败，请查看上方日志。\n'
-                fi ;;
-            7) list_tools ;;
-            8) run_tool netcheck || printf '检测已取消或有项目未通过。\n' ;;
-            9) run_tool iperf || printf '测速已取消或有项目未完成。\n' ;;
-            10) run_tool fail2ban || printf 'Fail2ban 工具已取消或执行失败。\n' ;;
-            11) run_tool ipv6 || printf 'Ipv4和ipv6管理已取消或执行失败。\n' ;;
-            12) run_tool tcp || printf 'TCP 工具已取消或执行失败。\n' ;;
-            13) run_tool sshkey || printf 'SSH 密钥工具已取消或操作未完成。\n' ;;
-            14) run_tool sshpass || printf '密码登录工具已取消或执行失败。\n' ;;
-            15)
                 read -r -p '下载渠道：1. GitHub（默认）  2. Gitee：' channel || return 0
                 case $channel in
                     1|'') channel=github ;;

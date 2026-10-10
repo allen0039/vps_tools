@@ -13,7 +13,7 @@ sudo bash ssh-password/install.sh
 sudo sshpasswdtool
 ```
 
-也可直接运行 `sudo python3 ssh-password/ssh_password_tool.py`。已接入工具箱第 14 项，或运行 `sudo vpstools run sshpass status`。需要 Python 3.8+、OpenSSH 支持 `Include`，以及正在运行的 systemd 和支持 reload 的 `ssh.service` 或 `sshd.service`。支持标准 `/etc/ssh/sshd_config` 启动方式；遇到自定义 `-f/-o/-p` 参数停止自动修改。
+也可直接运行 `sudo python3 ssh-password/ssh_password_tool.py`。已接入工具箱「系统管理 → SSH 密码登录管理」，或运行 `sudo vpstools run sshpass status`。需要 Python 3.8+、OpenSSH 支持 `Include`，以及正在运行的 systemd 和支持 reload 的 `ssh.service` 或 `sshd.service`。支持标准 `/etc/ssh/sshd_config` 启动方式；遇到自定义 `-f/-o/-p` 参数停止自动修改。
 
 安装只部署程序。首次开启时才备份并添加一个带标记的空 `Include` 入口。通常在主配置末尾；存在本仓库 `sshkeytool` 的已识别配置块时，入口放在这些块前。
 

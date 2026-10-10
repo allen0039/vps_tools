@@ -65,7 +65,7 @@ sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT bash Fail2ban/install.sh
 ```bash
 sudo bash install.sh
 vpstools
-# 选择 10. Fail2ban SSH 防暴力破解
+# 选择「系统管理 → Fail2ban 防暴力破解」
 ```
 
 统一安装只部署工具文件，系统包和防护规则在子菜单“安装 / 配置 SSH 防护”中按需安装与启用。手动只部署这两个工具也可以：

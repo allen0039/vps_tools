@@ -113,13 +113,8 @@ class ToolboxTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "INSTALL_ARGS <--channel>\nINSTALL_ARGS <gitee>\n")
 
-    def test_menu_returns_after_child_failure_and_agent_requires_confirmation(self):
-        self.mock("dnstool", "echo DNS_CHILD_FAILED; exit 7")
-        self.mock("restart-mmw-agent", "echo AGENT_MUST_NOT_RUN")
-        self.mock("ipv6tool", "echo IPV6_CHILD; exit 7")
-        self.mock("tcptool", "echo TCP_CHILD; exit 7")
-        self.mock("sshpasswdtool", "echo SSHPASS_CHILD; exit 7")
-        self.mock("sudo", '[[ ${1:-} != -- ]] || shift; exec "$@"')
+    def run_menu(self, choices):
+        self.mock("sudo", 'while [[ ${1:-} == --* ]]; do shift; done; exec "$@"')
         self.env["PATH"] = str(self.base) + os.pathsep + os.environ["PATH"]
         master, slave = pty.openpty()
         proc = subprocess.Popen(["bash", str(ROOT / "vpstools.sh")], env=self.env,
@@ -127,8 +122,8 @@ class ToolboxTests(unittest.TestCase):
         os.close(slave)
         output = b""
         try:
-            os.write(master, b"3\n6\nn\n7\n11\n12\n14\n0\n")
-            deadline = time.monotonic() + 5
+            os.write(master, choices.encode())
+            deadline = time.monotonic() + 8
             while time.monotonic() < deadline:
                 ready, _, _ = select.select([master], [], [], 0.1)
                 if ready:
@@ -146,14 +141,75 @@ class ToolboxTests(unittest.TestCase):
             os.close(master)
         text = output.decode()
         self.assertEqual(proc.returncode, 0, text)
-        self.assertIn("DNS_CHILD_FAILED", text)
-        self.assertIn("IPV6_CHILD", text)
-        self.assertIn("TCP_CHILD", text)
-        self.assertIn("13. SSH 密钥登录管理", text)
-        self.assertIn("SSHPASS_CHILD", text)
-        self.assertIn("15. 安装 / 更新全部工具", text)
-        self.assertGreaterEqual(text.count("VPS Tools 工具箱"), 4)
-        self.assertNotIn("AGENT_MUST_NOT_RUN", text)
+        return text
+
+    def test_homepage_has_categories_and_fixed_maintenance_entries(self):
+        text = self.run_menu("0\n")
+        for label in ("1. 系统管理", "2. 网络检测与测速", "3. 网络调优",
+                      "4. 服务管理", "5. 查看工具安装状态", "6. 安装 / 更新工具箱"):
+            self.assertIn(label, text)
+        self.assertNotIn("SSH 端口", text)
+        self.assertNotIn("TCP 参数导入", text)
+
+    def test_system_category_routes_all_tools_and_returns_after_failure(self):
+        commands = ("safe-ssh-port", "sshkeytool", "sshpasswdtool", "f2btool",
+                    "dnstool", "ipv6tool", "swaptool")
+        for command in commands:
+            self.mock(command, 'printf "CHILD ' + command + ' <%s>\\n" "$*"; exit 7')
+        text = self.run_menu("1\n1\n2\n3\n4\n5\n6\n7\n8\n0\n0\n")
+        for command in commands:
+            self.assertIn("CHILD " + command, text)
+        self.assertIn("CHILD safe-ssh-port <firewall>", text)
+        self.assertGreaterEqual(text.count("VPS Tools > 系统管理"), 9)
+        self.assertEqual(text.count("VPS Tools 工具箱"), 2)
+        self.assertIn("SSH 与访问防护", text)
+        self.assertIn("网络基础配置", text)
+        self.assertIn("系统资源", text)
+
+    def test_network_and_tuning_categories_route_and_return(self):
+        for command in ("netcheck", "iperfprobe", "bbr-tune", "tcptool"):
+            self.mock(command, "echo CHILD_" + command)
+        text = self.run_menu("2\n1\n2\n0\n3\n1\n2\n0\n0\n")
+        for command in ("netcheck", "iperfprobe", "bbr-tune", "tcptool"):
+            self.assertIn("CHILD_" + command, text)
+        self.assertEqual(text.count("VPS Tools > 网络检测与测速"), 3)
+        self.assertEqual(text.count("VPS Tools > 网络调优"), 3)
+
+    def test_service_restart_requires_confirmation_and_returns_to_category(self):
+        self.mock("restart-mmw-agent", "echo AGENT_CHILD")
+        text = self.run_menu("4\n1\n\n1\nn\n1\ny\n0\n0\n")
+        self.assertEqual(text.count("AGENT_CHILD"), 1)
+        self.assertEqual(text.count("VPS Tools > 服务管理"), 4)
+
+    def test_missing_tools_and_invalid_choices_stay_in_category(self):
+        text = self.run_menu("1\n6\n9\n01\n-1\nabc\n1+1\n0\n0\n")
+        self.assertIn("DNS 设置与恢复 [未安装]", text)
+        self.assertIn("请选择", text)
+        self.assertIn("请返回主菜单", text)
+        self.assertEqual(text.count("无效选项"), 5)
+        self.assertEqual(text.count("VPS Tools 工具箱"), 2)
+
+    def test_eof_in_category_exits_without_reopening_homepage(self):
+        text = self.run_menu("1\n\x04")
+        self.assertEqual(text.count("VPS Tools 工具箱"), 1)
+        self.assertEqual(text.count("VPS Tools > 系统管理"), 1)
+
+    def test_menu_update_relaunches_installed_entry_and_forwards_channel(self):
+        self.mock("install.sh", 'printf "CHANNEL %s\\n" "$*"')
+        self.mock("vpstools", 'printf "REOPENED %s\\n" "$*"')
+        text = self.run_menu("6\n2\n")
+        self.assertIn("CHANNEL --channel gitee", text)
+        self.assertIn("REOPENED menu", text)
+
+    def test_menu_update_failure_returns_home_and_status_does_not_launch_tools(self):
+        self.mock("install.sh", "echo INSTALL_FAILED; exit 7")
+        self.mock("dnstool", "echo DNS_MUST_NOT_RUN")
+        text = self.run_menu("6\n1\n5\n0\n")
+        self.assertIn("INSTALL_FAILED", text)
+        self.assertIn("安装未完成", text)
+        self.assertIn("已安装", text)
+        self.assertNotIn("DNS_MUST_NOT_RUN", text)
+        self.assertEqual(text.count("VPS Tools 工具箱"), 3)
 
     def test_local_bundle_stages_every_required_file(self):
         result = subprocess.run(["bash", "-c", 'source "$1/install.sh"; prepare_sources; '

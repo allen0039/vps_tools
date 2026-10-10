@@ -1,6 +1,6 @@
 # SSH 密钥登录管理
 
-`sshkeytool` v0.1.0，提供中文菜单、公钥导入、自动生成公私钥、指定用户的仅密钥登录切换和独立定时回退。接入工具箱第 13 项，也可使用 `vpstools run sshkey`。
+`sshkeytool` v0.1.0，提供中文菜单、公钥导入、自动生成公私钥、指定用户的仅密钥登录切换和独立定时回退。接入工具箱「系统管理 → SSH 密钥登录管理」，也可使用 `vpstools run sshkey`。
 
 第一版的自动修改支持 **Debian/Ubuntu、OpenSSH、systemd**，默认管理 root。安装不会生成密钥或改变认证配置。需要 Python 3.8+、OpenSSH 的 `sshd` / `ssh-keygen`；无需第三方 Python 包。
 

@@ -27,7 +27,7 @@ sudo bash install.sh /usr/local/bin
 netcheck
 ```
 
-完整仓库的统一安装器也会部署 `netcheck`。安装后，`vpstools` 第 9 项打开检测菜单，或执行 `vpstools run netcheck check example.com`。
+完整仓库的统一安装器也会部署 `netcheck`。安装后，选择 `vpstools` 的「网络检测与测速 → 网址与网络检测」打开检测菜单，或执行 `vpstools run netcheck check example.com`。
 
 ## 命令示例
 

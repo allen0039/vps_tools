@@ -32,7 +32,7 @@ iperfprobe
 
 ```bash
 vpstools
-# 选择 9：iperf3 本地与 VPS 测速
+# 选择「网络检测与测速 → iperf3 带宽测速」
 
 # 或直接进入独立工具
 vpstools run iperf
