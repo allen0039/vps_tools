@@ -148,7 +148,8 @@ class ToolboxTests(unittest.TestCase):
         self.assertIn("DNS_CHILD_FAILED", text)
         self.assertIn("IPV6_CHILD", text)
         self.assertIn("TCP_CHILD", text)
-        self.assertIn("13. 安装 / 更新全部工具", text)
+        self.assertIn("13. SSH 密钥登录管理", text)
+        self.assertIn("14. 安装 / 更新全部工具", text)
         self.assertGreaterEqual(text.count("VPS Tools 工具箱"), 4)
         self.assertNotIn("AGENT_MUST_NOT_RUN", text)
 
@@ -181,7 +182,8 @@ printf INSTALL_MUST_NOT_START
     def test_install_only_uses_bbr_installer_and_never_runs_swap_or_agent(self):
         for folder, file in [("safe-ssh-port", "safe-ssh-port.sh"),
                              ("dns_tool", "dns_tool.sh"), ("bbr-tune", "install.sh"),
-                             ("system_tool", "install.sh"), ("tcp-tool", "install.sh")]:
+                             ("system_tool", "install.sh"), ("tcp-tool", "install.sh"),
+                             ("ssh-key", "install.sh")]:
             path = self.base / folder / file
             path.parent.mkdir()
             path.write_text('#!/usr/bin/env bash\nprintf "%s %s\\n" "' + folder + '" "$*"\n')
@@ -201,6 +203,16 @@ install_tools
         self.assertIn("/usr/local/sbin/f2btool", result.stdout)
         self.assertIn("system_tool ", result.stdout)
         self.assertIn("tcp-tool ", result.stdout)
+        self.assertIn("ssh-key ", result.stdout)
+
+    def test_sshkey_dispatch_preserves_authentication_environment(self):
+        self.mock("sshkeytool", 'printf "%s\\n" "$@" "$SSH_CONNECTION" "$SSH_USER_AUTH"; exit 17')
+        self.env.update(SSH_CONNECTION="192.0.2.1 40000 192.0.2.2 21919", SSH_USER_AUTH="/tmp/auth-info")
+        result = self.run_cli("run", "sshkey", "confirm", "a" * 32)
+        self.assertEqual(result.returncode, 17)
+        self.assertEqual(result.stdout, "confirm\n" + "a" * 32 + "\n192.0.2.1 40000 192.0.2.2 21919\n/tmp/auth-info\n")
+        self.assertIn("sshkey     已安装", self.run_cli("list").stdout)
+
 
 
 if __name__ == "__main__":

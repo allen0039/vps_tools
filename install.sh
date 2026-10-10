@@ -8,7 +8,8 @@ FILES=(vpstools.sh install.sh safe-ssh-port/safe-ssh-port.sh dns_tool/dns_tool.s
        swap_tool/swap_tool.sh restart-mmw-agent/restart-mmw-agent
        bbr-tune/install.sh bbr-tune/bbr-tune.sh bbr-tune/bbr-kernel.sh web_tool/netcheck.py
        iperf3_tool/iperf3-tool.sh iperf3_tool/iperf3_tool.py Fail2ban/f2btool.py
-       system_tool/install.sh system_tool/ipv6_tool.py tcp-tool/install.sh tcp-tool/tcp_tool.py)
+       system_tool/install.sh system_tool/ipv6_tool.py tcp-tool/install.sh tcp-tool/tcp_tool.py
+       ssh-key/install.sh ssh-key/ssh_key_tool.py)
 
 die() { printf '[vpstools] 错误：%s\n' "$*" >&2; exit 1; }
 usage() {
@@ -80,6 +81,7 @@ install_tools() {
     install -m 0755 "$STAGE/Fail2ban/f2btool.py" /usr/local/sbin/f2btool
     bash "$STAGE/system_tool/install.sh" || die 'Ipv4/ipv6管理工具安装失败。此前已完成的安装保留，可修复后重试。'
     bash "$STAGE/tcp-tool/install.sh" || die 'TCP 工具安装失败。此前已完成的安装保留，可修复后重试。'
+    bash "$STAGE/ssh-key/install.sh" || die 'SSH 密钥工具安装失败。此前已完成的安装保留，可修复后重试。'
     bash "$STAGE/bbr-tune/install.sh" --install-only || die 'BBR 安装失败。此前已完成的安装保留，可修复后重试。'
     install -m 0755 "$STAGE/install.sh" /usr/local/lib/vpstools/install.sh
     install -m 0755 "$STAGE/vpstools.sh" /usr/local/bin/vpstools

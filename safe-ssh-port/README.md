@@ -8,6 +8,7 @@
 - 自动备份 SSH 配置并运行 `sshd -t`
 - 把唯一有效的 `Port` 写入 `/etc/ssh/sshd_config`，兼容 Kejilion 等只读取主配置的脚本
 - 修改前后比较实际生效的认证配置
+- 与 `sshkeytool` 共用 SSH 操作锁；待确认密钥操作结束前，拒绝改端口或恢复 SSH 备份
 - 保留 cloud-init 和其他 `sshd_config.d` 文件，只注释其中冲突的有效 `Port`
 - 自动管理启用中的 UFW、firewalld 或 restrictive iptables/ip6tables
 - 新配置从一开始只包含新端口，不提供双端口模式

@@ -1,0 +1,34 @@
+name: SSH Key Tool
+
+on:
+  push:
+    branches: [main]
+    paths: ['ssh-key/**', 'safe-ssh-port/tests/test_ssh_key_coordination.py', '.github/workflows/ssh-key.yml']
+    tags: ['sshkeytool-v*']
+  pull_request:
+    paths: ['ssh-key/**', 'safe-ssh-port/tests/test_ssh_key_coordination.py', '.github/workflows/ssh-key.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenSSH for isolated configuration tests
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server util-linux
+          sudo mkdir -p /run/sshd
+      - name: Validate source and run tests
+        run: |
+          bash -n ssh-key/install.sh
+          bash -n vpstools.sh
+          bash -n install.sh
+          bash -n safe-ssh-port/safe-ssh-port.sh
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s ssh-key/tests -v
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s safe-ssh-port/tests -p 'test_ssh_key_coordination.py' -v
+          git diff --check

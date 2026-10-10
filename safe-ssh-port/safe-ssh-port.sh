@@ -31,6 +31,9 @@ SS_BIN=${SAFE_SSH_PORT_SS_BIN:-ss}
 F2B_TOOL=${SAFE_SSH_PORT_F2B_TOOL:-/usr/local/sbin/f2btool}
 F2B_CONFIG=${SAFE_SSH_PORT_F2B_CONFIG:-/etc/fail2ban/jail.d/99-vpstools-sshd.local}
 IPTABLES_RULES_DIR=${SAFE_SSH_PORT_RULES_DIR:-/etc/iptables}
+SSH_OPERATION_LOCK=${VPS_TOOLS_SSH_LOCK:-/run/lock/vpstools-ssh.lock}
+SSHKEY_ACTIVE_FILE=${VPS_TOOLS_SSHKEY_ACTIVE:-/var/lib/sshkeytool/active.json}
+SSH_OPERATION_LOCK_HELD=no
 
 STATE_STATUS=
 STATE_NEW_PORT=
@@ -72,6 +75,21 @@ uppercase() {
 die() {
     printf '[safe-ssh-port] 错误: %s\n' "$*" >&2
     exit 1
+}
+
+acquire_ssh_operation_lock() {
+    if [[ $SSH_OPERATION_LOCK_HELD != yes ]]; then
+        command -v flock >/dev/null || die 'SSH 配置操作需要 flock（util-linux）。'
+        [[ ! -L $SSH_OPERATION_LOCK ]] || die 'SSH 操作锁不能是符号链接。'
+        mkdir -p "$(dirname "$SSH_OPERATION_LOCK")"
+        (umask 077; touch "$SSH_OPERATION_LOCK")
+        [[ -f $SSH_OPERATION_LOCK && -O $SSH_OPERATION_LOCK ]] || die 'SSH 操作锁类型或属主不正确。'
+        exec 200<>"$SSH_OPERATION_LOCK"
+        flock -w 30 200 || die '另一个 SSH 配置操作正在运行。'
+        SSH_OPERATION_LOCK_HELD=yes
+    fi
+    [[ ! -e $SSHKEY_ACTIVE_FILE && ! -L $SSHKEY_ACTIVE_FILE ]] ||
+        die '密钥工具有待确认/待恢复操作，请先用 sshkeytool confirm 或 rollback 结束。'
 }
 
 usage() {
@@ -709,6 +727,8 @@ restore_backup_interactive() {
         return 0
     }
 
+    acquire_ssh_operation_lock
+    [[ ! -e $STATE_FILE ]] || die '存在未结束的端口切换状态，拒绝恢复。'
     "$SSHD_BIN" -t || die '当前 SSH 配置本身无法通过 sshd -t，拒绝恢复。'
     detect_service
     collect_config_files
@@ -2844,6 +2864,8 @@ switch_port() {
     local -a old_ports effective_after
     local discovered_port
     validate_port "$new_port" || die '端口必须是 1 到 65535 之间的整数。'
+    confirm_cloud_firewall "$new_port" "$cloud_ready"
+    acquire_ssh_operation_lock
     [[ ! -e $STATE_FILE ]] || die "已有迁移状态；先运行 $PROGRAM status、finalize 或 rollback。"
 
     "$SSHD_BIN" -t || die '当前 SSH 配置本身无法通过 sshd -t，拒绝修改。'
@@ -2862,7 +2884,6 @@ switch_port() {
     port_in_list "$new_port" "${old_ports[@]}" && die "端口 $new_port 已经是有效 SSH 端口。"
     port_is_listening "$new_port" && die "端口 $new_port 已被其他服务监听。"
 
-    confirm_cloud_firewall "$new_port" "$cloud_ready"
     open_host_firewall "$new_port" "$skip_host_firewall"
 
     STATE_STATUS=staging
@@ -3007,6 +3028,9 @@ finalize_port() {
         [[ $answer == "$STATE_NEW_PORT" ]] || die '确认不匹配，未关闭旧端口。'
     fi
 
+    acquire_ssh_operation_lock
+    load_state
+    [[ $STATE_STATUS == staged ]] || die '等待确认期间端口迁移状态已改变。'
     "$SSHD_BIN" -t || die '当前 SSH 配置无法通过 sshd -t，拒绝 finalize。'
     auth_before=$(auth_fingerprint)
     ensure_main_in_backup || die '旧版迁移备份不完整，无法安全写入 SSH 主配置。'
@@ -3035,6 +3059,7 @@ finalize_port() {
 }
 
 commit_port() {
+    acquire_ssh_operation_lock
     load_state
     [[ $STATE_STATUS == finalized ]] || die "当前状态是 ${STATE_STATUS}，只有 finalized 状态可以 commit。"
     "$SSHD_BIN" -t || die '当前 SSH 配置无法通过 sshd -t，拒绝 commit。'
@@ -3045,6 +3070,7 @@ commit_port() {
 }
 
 rollback_port() {
+    acquire_ssh_operation_lock
     load_state
     restore_config_files || die "无法从 $STATE_BACKUP_DIR 恢复配置。"
     "$SSHD_BIN" -t || die '恢复后的 SSH 配置未通过 sshd -t；尚未 reload。'
