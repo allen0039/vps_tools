@@ -10,6 +10,7 @@
 | --- | --- | --- | --- |
 | SSH 管理 | 切换 SSH 单端口、查看状态、从历史备份恢复配置 | `allentool` / `safe-ssh-port` | [SSH 使用指南](safe-ssh-port/README.md) |
 | SSH 密钥登录 | 准确识别认证状态、导入或生成密钥、两阶段切换和定时回退 | `sshkeytool` | [密钥登录指南](ssh-key/README.md) |
+| SSH 密码登录管理 | 指定用户定时、直到重启或永久开放密码，手动关闭，继续允许密钥 | `sshpasswdtool` | [使用指南](ssh-password/README.md) |
 | 防火墙管理 | 管理 TCP/UDP 端口、保护 SSH、配置 IP 与国家黑白名单 | `allentool` 内的防火墙菜单 | [防火墙说明](safe-ssh-port/README.md#交互式防火墙管理) |
 | Fail2ban 防护 | 配置 SSH 防暴力破解、白名单和解封，与 iptables 防火墙联动 | `f2btool` | [Fail2ban 使用指南](Fail2ban/README.md) |
 | DNS 切换 | 切换公共或自定义 IPv4/IPv6 DNS，恢复首次安装前的配置 | `dnstool` | [DNS 使用指南](dns_tool/README.md) |
@@ -79,7 +80,8 @@ VPS Tools 工具箱
   11. Ipv4和ipv6管理
   12. TCP 参数导入与回滚
   13. SSH 密钥登录管理
-  14. 安装 / 更新全部工具
+  14. SSH 密码登录管理（临时 / 永久）
+  15. 安装 / 更新全部工具
   0. 退出
 ```
 
@@ -108,6 +110,13 @@ vpstools run firewall
 sudo vpstools run sshkey status
 vpstools run sshkey
 
+# SSH 临时密码：30 分钟或服务器重启后恢复
+sudo vpstools run sshpass enable --minutes 30 --yes
+sudo vpstools run sshpass close --yes
+# SSH 永久密码：重启后保留，直到手动关闭
+sudo vpstools run sshpass enable --permanent --yes
+sudo vpstools run sshpass close --yes
+
 # SSH 防暴力破解菜单
 vpstools run fail2ban
 
@@ -135,7 +144,7 @@ vpstools run netcheck dns example.com --json
 vpstools run iperf --host 203.0.113.10 --streams 1,4,8 --direction both
 ```
 
-`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`sshkey`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`、`iperf`、`fail2ban`、`ipv6`、`tcp`（别名 `tcptool`）。直接执行 `vpstools run agent` 会重启服务；总菜单中的额外确认只适用于菜单操作。
+`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`sshkey`、`sshpass`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`、`iperf`、`fail2ban`、`ipv6`、`tcp`（别名 `tcptool`）。直接执行 `vpstools run agent` 会重启服务；总菜单中的额外确认只适用于菜单操作。
 
 也可使用独立命令，例如：
 
@@ -160,7 +169,7 @@ vpstools update github
 vpstools update gitee
 ```
 
-也可以选择总菜单最后的第 14 项，或重新执行快速安装命令。菜单更新成功后会自动重新打开已安装的新版本。旧版本菜单若在更新后仍显示旧版本号，请选择 `0` 退出，再运行 `vpstools --version` 检查版本并用 `vpstools` 重新打开。
+也可以选择总菜单最后的第 15 项，或重新执行快速安装命令。菜单更新成功后会自动重新打开已安装的新版本。旧版本菜单若在更新后仍显示旧版本号，请选择 `0` 退出，再运行 `vpstools --version` 检查版本并用 `vpstools` 重新打开。
 
 远程安装时，安装器先查询所选渠道 `main` 分支的最新提交，再从同一个固定提交下载全部脚本。所有文件通过非空、对应 Bash / Python 脚本头及语法检查后，才开始部署；下载失败时尚未执行各工具安装步骤。安装锁用于防止两个工具箱安装同时运行。
 
@@ -198,6 +207,7 @@ vps_tools/
 ├── install.sh            # 全量安装与更新
 ├── safe-ssh-port/        # SSH 与防火墙
 ├── ssh-key/              # SSH 密钥登录与定时回退
+├── ssh-password/         # SSH 密码登录，支持临时与永久模式
 ├── Fail2ban/             # SSH 防暴力破解与 iptables 联动
 ├── dns_tool/             # DNS 切换与恢复
 ├── swap_tool/            # Swap 管理
@@ -217,6 +227,7 @@ bash -n install.sh
 bash -n vpstools.sh
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 -m unittest discover -s ssh-key/tests -p 'test_*.py'
+python3 -m unittest discover -s ssh-password/tests -p 'test_*.py'
 python3 -m unittest discover -s tcp-tool/tests -p 'test_*.py'
 python3 -m unittest discover -s system_tool/tests -p 'test_*.py'
 python3 -m unittest discover -s Fail2ban/tests -p 'test_*.py'

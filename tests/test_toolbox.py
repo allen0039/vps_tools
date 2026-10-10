@@ -118,6 +118,7 @@ class ToolboxTests(unittest.TestCase):
         self.mock("restart-mmw-agent", "echo AGENT_MUST_NOT_RUN")
         self.mock("ipv6tool", "echo IPV6_CHILD; exit 7")
         self.mock("tcptool", "echo TCP_CHILD; exit 7")
+        self.mock("sshpasswdtool", "echo SSHPASS_CHILD; exit 7")
         self.mock("sudo", '[[ ${1:-} != -- ]] || shift; exec "$@"')
         self.env["PATH"] = str(self.base) + os.pathsep + os.environ["PATH"]
         master, slave = pty.openpty()
@@ -126,7 +127,7 @@ class ToolboxTests(unittest.TestCase):
         os.close(slave)
         output = b""
         try:
-            os.write(master, b"3\n6\nn\n7\n11\n12\n0\n")
+            os.write(master, b"3\n6\nn\n7\n11\n12\n14\n0\n")
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 ready, _, _ = select.select([master], [], [], 0.1)
@@ -149,7 +150,8 @@ class ToolboxTests(unittest.TestCase):
         self.assertIn("IPV6_CHILD", text)
         self.assertIn("TCP_CHILD", text)
         self.assertIn("13. SSH 密钥登录管理", text)
-        self.assertIn("14. 安装 / 更新全部工具", text)
+        self.assertIn("SSHPASS_CHILD", text)
+        self.assertIn("15. 安装 / 更新全部工具", text)
         self.assertGreaterEqual(text.count("VPS Tools 工具箱"), 4)
         self.assertNotIn("AGENT_MUST_NOT_RUN", text)
 
@@ -183,7 +185,7 @@ printf INSTALL_MUST_NOT_START
         for folder, file in [("safe-ssh-port", "safe-ssh-port.sh"),
                              ("dns_tool", "dns_tool.sh"), ("bbr-tune", "install.sh"),
                              ("system_tool", "install.sh"), ("tcp-tool", "install.sh"),
-                             ("ssh-key", "install.sh")]:
+                             ("ssh-key", "install.sh"), ("ssh-password", "install.sh")]:
             path = self.base / folder / file
             path.parent.mkdir()
             path.write_text('#!/usr/bin/env bash\nprintf "%s %s\\n" "' + folder + '" "$*"\n')
@@ -204,6 +206,7 @@ install_tools
         self.assertIn("system_tool ", result.stdout)
         self.assertIn("tcp-tool ", result.stdout)
         self.assertIn("ssh-key ", result.stdout)
+        self.assertIn("ssh-password ", result.stdout)
 
     def test_sshkey_dispatch_preserves_authentication_environment(self):
         self.mock("sshkeytool", 'printf "%s\\n" "$@" "$SSH_CONNECTION" "$SSH_USER_AUTH"; exit 17')
@@ -213,6 +216,14 @@ install_tools
         self.assertEqual(result.stdout, "confirm\n" + "a" * 32 + "\n192.0.2.1 40000 192.0.2.2 21919\n/tmp/auth-info\n")
         self.assertIn("sshkey     已安装", self.run_cli("list").stdout)
 
+    def test_temporary_password_dispatch_preserves_context_and_exit_status(self):
+        self.mock("sshpasswdtool", 'printf "<%s>\\n" "$@" "$SSH_CONNECTION"; exit 17')
+        self.env["SSH_CONNECTION"] = "2001:db8::1 12345 2001:db8::2 21919"
+        for name in ("sshpass", "sshpasswdtool"):
+            result = self.run_cli("run", name, "enable", "--minutes", "30", "--yes")
+            self.assertEqual(result.returncode, 17)
+            self.assertEqual(result.stdout, "<enable>\n<--minutes>\n<30>\n<--yes>\n"
+                             "<2001:db8::1 12345 2001:db8::2 21919>\n")
 
 
 if __name__ == "__main__":
