@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+/task_plan.md
+/findings.md
+/progress.md
