@@ -9,7 +9,7 @@ FILES=(vpstools.sh install.sh safe-ssh-port/safe-ssh-port.sh dns_tool/dns_tool.s
        bbr-tune/install.sh bbr-tune/bbr-tune.sh bbr-tune/bbr-kernel.sh web_tool/netcheck.py
        iperf3_tool/iperf3-tool.sh iperf3_tool/iperf3_tool.py Fail2ban/f2btool.py
        system_tool/install.sh system_tool/ipv6_tool.py tcp-tool/install.sh tcp-tool/tcp_tool.py
-       ssh-key/install.sh ssh-key/ssh_key_tool.py ssh-password/install.sh ssh-password/ssh_password_tool.py)
+       ssh-key/install.sh ssh-key/ssh_key_tool.py ssh-password/install.sh ssh-password/ssh_password_tool.py socks5/socks5.sh)
 
 die() { printf '[vpstools] 错误：%s\n' "$*" >&2; exit 1; }
 usage() {
@@ -66,6 +66,9 @@ prepare_sources() {
         else
             head -n 1 "$STAGE/$file" | grep -q '^#!/usr/bin/env bash' || die "文件不是 Bash 脚本：$file"
             bash -n "$STAGE/$file" || die "语法检查失败：$file"
+            if [[ $file == socks5/socks5.sh ]]; then
+                python3 -c 'import ast, pathlib, sys; text = pathlib.Path(sys.argv[1]).read_text(); marker = "<<" + chr(39) + "PY_SOCKS5" + chr(39) + "\n"; ast.parse(text.split(marker, 1)[1].rsplit("\nPY_SOCKS5", 1)[0])' "$STAGE/$file" || die "内嵌 Python 语法检查失败：$file"
+            fi
         fi
     done
 }
@@ -84,6 +87,8 @@ install_tools() {
     bash "$STAGE/ssh-key/install.sh" || die 'SSH 密钥工具安装失败。此前已完成的安装保留，可修复后重试。'
     bash "$STAGE/ssh-password/install.sh" || die 'SSH 密码登录工具安装失败。此前已完成的安装保留，可修复后重试。'
     bash "$STAGE/bbr-tune/install.sh" --install-only || die 'BBR 安装失败。此前已完成的安装保留，可修复后重试。'
+    # 保留独立 socks5 命令给代理部署流程，避免占用其首次安装检查的路径。
+    install -m 0755 "$STAGE/socks5/socks5.sh" /usr/local/lib/vpstools/socks5.sh
     install -m 0755 "$STAGE/install.sh" /usr/local/lib/vpstools/install.sh
     install -m 0755 "$STAGE/vpstools.sh" /usr/local/bin/vpstools
     printf '\n[vpstools] 全部安装完成，输入 vpstools 打开工具箱。\n'

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # VPS Tools 的统一入口；具体操作交给独立工具。
 set -Eeuo pipefail
-VERSION=0.3.0
+VERSION=0.3.1
 BIN_DIR=${VPS_TOOLS_BIN_DIR:-/usr/local/bin}
 SBIN_DIR=${VPS_TOOLS_SBIN_DIR:-/usr/local/sbin}
 LIB_DIR=${VPS_TOOLS_LIB_DIR:-/usr/local/lib/vpstools}
@@ -16,7 +16,7 @@ VPS Tools 中文工具箱
   vpstools update [github|gitee]  安装或更新全部工具
   vpstools --version
 
-工具：ssh、sshkey、sshpass、firewall、dns、swap、bbr、agent、netcheck、iperf、fail2ban、ipv6、tcp（别名 tcptool）
+工具：ssh、sshkey、sshpass、firewall、dns、swap、bbr、agent、netcheck、iperf、fail2ban、ipv6、tcp（别名 tcptool）、socks5
 示例：vpstools run dns status
       vpstools run ssh interactive
       vpstools run bbr status
@@ -36,6 +36,7 @@ tool_path() {
         iperf) printf '%s/iperfprobe\n' "$BIN_DIR" ;;
         fail2ban) printf '%s/f2btool\n' "$SBIN_DIR" ;;
         tcp|tcptool) printf '%s/tcptool\n' "$SBIN_DIR" ;;
+        socks5) printf '%s/socks5.sh\n' "$LIB_DIR" ;;
         ipv6) printf '%s/ipv6tool\n' "$SBIN_DIR" ;;
         *) printf '未知工具：%s\n' "$1" >&2; return 2 ;;
     esac
@@ -43,7 +44,7 @@ tool_path() {
 
 list_tools() {
     local id path state
-    for id in ssh sshkey sshpass firewall dns swap bbr agent netcheck iperf fail2ban ipv6 tcp; do
+    for id in ssh sshkey sshpass firewall dns swap bbr agent netcheck iperf fail2ban ipv6 tcp socks5; do
         path=$(tool_path "$id")
         state=未安装
         [[ ! -x $path ]] || state=已安装
@@ -57,7 +58,7 @@ run_tool() {
     path=$(tool_path "$id") || return $?
     [[ -x $path ]] || { printf '工具未安装：%s。请运行 vpstools update。\n' "$id" >&2; return 1; }
     if [[ $id == firewall ]]; then set -- firewall "$@"; fi
-    if [[ $EUID != 0 ]] && { [[ $id == agent && ${1:-} != --help && ${1:-} != -h ]] || [[ ( $id == tcp || $id == tcptool || $id == sshkey ) && $# == 0 ]]; }; then
+    if [[ $EUID != 0 ]] && { [[ $id == agent && ${1:-} != --help && ${1:-} != -h ]] || [[ ( $id == tcp || $id == tcptool || $id == sshkey || $id == socks5 ) && $# == 0 ]]; }; then
         command -v sudo >/dev/null || { printf '需要 root 或 sudo 权限。\n' >&2; return 1; }
         if [[ $id == sshkey ]]; then
             sudo --preserve-env=SSH_CONNECTION,SSH_USER_AUTH -- "$path" "$@"
@@ -106,8 +107,8 @@ category_menu() {
             labels=('TCP / BBR 调优' 'TCP 参数导入与回滚') ;;
         services)
             title=服务管理
-            ids=(agent)
-            labels=('妙妙屋 Agent 重启') ;;
+            ids=(agent socks5)
+            labels=('妙妙屋 Agent 重启' 'SOCKS5 / TLS 代理管理') ;;
         *) return 2 ;;
     esac
     while :; do

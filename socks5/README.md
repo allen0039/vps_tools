@@ -31,7 +31,9 @@ curl -fL 'https://github.com/allen0039/vps_tools/releases/download/socks5-v0.1.0
 sha256sum --check --ignore-missing SHA256SUMS
 ```
 
-SOCKS5 当前独立安装和发布，尚未接入仓库根目录的 `vpstools` 菜单。
+已接入工具箱「服务管理 → SOCKS5 / TLS 代理管理」，或运行 `vpstools run socks5` 打开菜单。普通用户打开菜单时通过 sudo 启动；命令模式例如 `sudo vpstools run socks5 status`。
+
+工具箱统一安装只保存管理脚本到 `/usr/local/lib/vpstools/socks5.sh`，不下载 GOST、不创建代理服务、不修改防火墙。`vpstools list` 的已安装仅表示管理入口可用；代理状态请用 `sudo vpstools run socks5 status` 查看。在菜单中选择安装后，部署流程才创建独立命令 `/usr/local/bin/socks5`。卸载代理后，仍可通过工具箱入口重新安装。
 
 也可以从本地上传：
 

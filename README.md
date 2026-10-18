@@ -16,6 +16,7 @@
 | DNS 切换 | 切换公共或自定义 IPv4/IPv6 DNS，恢复首次安装前的配置 | `dnstool` | [DNS 使用指南](dns_tool/README.md) |
 | Swap 管理 | 创建或调整 `/swapfile`，支持 Btrfs、ext4/XFS，检查实际启用状态 | `swaptool` | [Swap 使用指南](swap_tool/README.md) |
 | TCP / BBR 调优 | 测试 TCP 参数、管理出口队列、应用历史参数与回滚 | `bbrtcp` / `bbr-tune` | [BBR 使用指南](bbr-tune/README.md) |
+| SOCKS5 / TLS 代理 | 部署认证代理、TLS 隧道，管理凭据、端口与服务 | `socks5`（代理部署后） | [SOCKS5 使用指南](socks5/README.md) |
 | 妙妙屋 Agent 重启 | 重启并验证 `mmw-agent.service`，展示 PID、内存与 TCP 连接变化 | `restart-mmw-agent` | [Agent 使用指南](restart-mmw-agent/README.md) |
 | 网址与网络检测 | 解析域名 IP，检测 Ping 延迟、丢包、TCP 端口和 HTTP / HTTPS | `netcheck` | [检测使用指南](web_tool/README.md) |
 | iperf3 测速 | 本地与 VPS 双向测速，1 / 4 / 8 连接、随机端口与自动清理 | `iperfprobe` | [测速使用指南](iperf3_tool/README.md) |
@@ -50,7 +51,7 @@ vpstools
 
 只需 SSH 的 Fail2ban 防护时，可以使用 [Fail2ban 一键部署脚本](Fail2ban/README.md#一键部署)，安装并配置 Fail2ban 与配套防火墙工具，无需安装整个工具箱。
 
-统一安装会部署全部 12 个独立工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或认证方式、生成密钥、切换 DNS、创建 Swap、应用 TCP 调优参数、重启 Agent 或修改 IPv6 / GRUB 配置。BBR 安装器可能通过系统包管理器补齐基础依赖；iperf3 测速启动时会自动检测并安装缺失的 iperf3，Debian/Ubuntu 会选择不启动常驻服务。Fail2ban 系统包和防护规则在子菜单中按需安装与启用。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
+统一安装会部署全部 13 个独立工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或认证方式、生成密钥、切换 DNS、创建 Swap、应用 TCP 调优参数、重启 Agent、修改 IPv6 / GRUB 配置或创建 SOCKS5 服务。BBR 安装器可能通过系统包管理器补齐基础依赖；iperf3 测速启动时会自动检测并安装缺失的 iperf3，Debian/Ubuntu 会选择不启动常驻服务。Fail2ban 系统包和防护规则在子菜单中按需安装与启用。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
 
 也可以克隆仓库后安装本地文件：
 
@@ -105,7 +106,7 @@ VPS Tools > 系统管理
 | --- | --- | --- |
 | 网络检测与测速 | 网址与网络检测 | iperf3 带宽测速 |
 | 网络调优 | TCP / BBR 调优 | TCP 参数导入与回滚 |
-| 服务管理 | 妙妙屋 Agent 重启 | — |
+| 服务管理 | 妙妙屋 Agent 重启 | SOCKS5 / TLS 代理管理 |
 
 退出子工具后回到所属分类，分类页选择 `0` 返回主菜单，首页选择 `0` 退出。分类页展示当前位置；未安装的工具标注 `[未安装]`，选择后提示返回首页安装，不自动启动安装。Agent 重启仍需单独确认，直接回车默认取消。其他系统修改遵循各工具自己的权限检查、备份及确认流程。
 
@@ -155,6 +156,10 @@ sudo vpstools run dns status
 vpstools run swap status
 vpstools run bbr status
 
+# SOCKS5 部署与管理菜单（统一安装仅部署入口，不创建代理服务）
+vpstools run socks5
+sudo vpstools run socks5 status
+
 # 查看 Agent 帮助，不执行重启
 vpstools run agent --help
 
@@ -166,7 +171,7 @@ vpstools run netcheck dns example.com --json
 vpstools run iperf --host 203.0.113.10 --streams 1,4,8 --direction both
 ```
 
-`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`sshkey`、`sshpass`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`、`iperf`、`fail2ban`、`ipv6`、`tcp`（别名 `tcptool`）。直接执行 `vpstools run agent` 会重启服务；服务管理菜单中的额外确认只适用于菜单操作。
+`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`sshkey`、`sshpass`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`、`iperf`、`fail2ban`、`ipv6`、`tcp`（别名 `tcptool`）、`socks5`。直接执行 `vpstools run agent` 会重启服务；服务管理菜单中的额外确认只适用于菜单操作。
 
 也可使用独立命令，例如：
 
@@ -182,6 +187,8 @@ iperfprobe
 需要管理员权限的操作请按提示使用 `sudo`；非交互运行时建议显式加上 `sudo`。只想安装某个工具时，使用上表对应文档中的独立安装命令。
 
 ## 更新与安装机制
+
+从 v0.3.0 或更早版本升级并安装新增 SOCKS5 入口，建议重新执行上方快速安装命令。旧版保存的安装器使用旧工具清单；若使用 `vpstools update`，第一次会更新安装器，再执行一次即可部署新增入口。
 
 更新全部工具：
 
@@ -200,6 +207,7 @@ vpstools update gitee
 | 安装位置 | 用途 |
 | --- | --- |
 | `/usr/local/bin/vpstools` | 工具箱统一入口 |
+| `/usr/local/lib/vpstools/socks5.sh` | SOCKS5 管理入口；`vpstools list` 显示入口安装状态，代理服务状态用 `sudo vpstools run socks5 status` 查看 |
 | `/usr/local/lib/vpstools/install.sh` | 保存的工具箱安装器 |
 | `/usr/local/bin/`、`/usr/local/sbin/` | 各工具命令；可用 `vpstools list` 查看实际路径 |
 
@@ -234,6 +242,7 @@ vps_tools/
 ├── dns_tool/             # DNS 切换与恢复
 ├── swap_tool/            # Swap 管理
 ├── bbr-tune/             # TCP / BBR 调优
+├── socks5/               # SOCKS5 / TLS 代理部署与管理
 ├── restart-mmw-agent/    # Agent 重启
 ├── web_tool/             # SSH 终端网址与网络检测
 ├── iperf3_tool/          # 本地与 VPS 的逐轮 iperf3 测速
@@ -248,6 +257,7 @@ vps_tools/
 bash -n install.sh
 bash -n vpstools.sh
 python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m unittest discover -s socks5/tests -p 'test_*.py'
 python3 -m unittest discover -s ssh-key/tests -p 'test_*.py'
 python3 -m unittest discover -s ssh-password/tests -p 'test_*.py'
 python3 -m unittest discover -s tcp-tool/tests -p 'test_*.py'

@@ -66,6 +66,29 @@ class ToolboxTests(unittest.TestCase):
             self.assertEqual(result.returncode, 17)
         self.assertIn("tcp        已安装", self.run_cli("list").stdout)
 
+    def test_socks5_dispatch_and_status_use_toolbox_copy(self):
+        self.assertIn("socks5     未安装", self.run_cli("list").stdout)
+        self.mock("socks5.sh", 'printf "<%s>\\n" "$@"; exit 17')
+        result = self.run_cli("run", "socks5", "export-client", "--output", "two words.zip")
+        self.assertEqual(result.stdout, "<export-client>\n<--output>\n<two words.zip>\n")
+        self.assertEqual(result.returncode, 17)
+        self.assertIn("socks5     已安装", self.run_cli("list").stdout)
+
+    def test_socks5_menu_returns_to_services_after_failure(self):
+        self.mock("socks5.sh", "echo SOCKS5_CHILD; exit 7")
+        text = self.run_menu("4\n2\n0\n0\n")
+        self.assertIn("SOCKS5_CHILD", text)
+        self.assertEqual(text.count("VPS Tools > 服务管理"), 2)
+
+    def test_socks5_can_deploy_without_conflicting_toolbox_command(self):
+        script = self.base / "socks5.sh"
+        script.write_bytes((ROOT / "socks5/socks5.sh").read_bytes())
+        script.chmod(0o755)
+        result = self.run_cli("run", "socks5", "install", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--mode", result.stdout)
+        self.assertFalse((self.base / "socks5").exists())
+
     def test_missing_tool_and_unknown_command(self):
         self.assertEqual(self.run_cli("run", "dns").returncode, 1)
         self.assertEqual(self.run_cli("run", "unknown").returncode, 2)
@@ -218,6 +241,20 @@ class ToolboxTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("本地", result.stdout)
 
+    def test_socks5_embedded_python_is_checked_before_install(self):
+        (self.base / "vpstools.sh").touch()
+        (self.base / "safe-ssh-port").mkdir()
+        (self.base / "safe-ssh-port/safe-ssh-port.sh").touch()
+        script = self.base / "socks5/socks5.sh"
+        script.parent.mkdir()
+        script.write_text("#!/usr/bin/env bash\ncat <<'PY_SOCKS5'\ndef broken(\nPY_SOCKS5\n")
+        result = subprocess.run(["bash", "-c", 'source "$1/install.sh"; SOURCE_DIR="$2"; '
+                                 'FILES=(socks5/socks5.sh); prepare_sources; echo MUST_NOT_INSTALL',
+                                 "test", str(ROOT), str(self.base)], text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("内嵌 Python 语法检查失败", result.stderr)
+        self.assertNotIn("MUST_NOT_INSTALL", result.stdout)
+
     def test_bad_remote_payload_rejected_before_install(self):
         # 不联网，不调用系统安装器：模拟有效提交信息和被替换为 HTML 的下载文件。
         result = subprocess.run(["bash", "-c", '''
@@ -263,6 +300,8 @@ install_tools
         self.assertIn("tcp-tool ", result.stdout)
         self.assertIn("ssh-key ", result.stdout)
         self.assertIn("ssh-password ", result.stdout)
+        self.assertIn("/usr/local/lib/vpstools/socks5.sh", result.stdout)
+        self.assertNotIn("/usr/local/bin/socks5", result.stdout)
 
     def test_sshkey_dispatch_preserves_authentication_environment(self):
         self.mock("sshkeytool", 'printf "%s\\n" "$@" "$SSH_CONNECTION" "$SSH_USER_AUTH"; exit 17')

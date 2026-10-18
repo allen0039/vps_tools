@@ -1,9 +1,9 @@
 name: VPS Toolbox Checks
 on:
   push:
-    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", "iperf3_tool/**", "Fail2ban/**", "system_tool/**", "tcp-tool/**", "ssh-key/**", "ssh-password/**", ".github/workflows/toolbox.yml"]
+    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", "iperf3_tool/**", "Fail2ban/**", "system_tool/**", "tcp-tool/**", "ssh-key/**", "ssh-password/**", "socks5/**", ".github/workflows/toolbox.yml"]
   pull_request:
-    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", "iperf3_tool/**", "Fail2ban/**", "system_tool/**", "tcp-tool/**", "ssh-key/**", "ssh-password/**", ".github/workflows/toolbox.yml"]
+    paths: ["vpstools.sh", "install.sh", "tests/**", "web_tool/**", "iperf3_tool/**", "Fail2ban/**", "system_tool/**", "tcp-tool/**", "ssh-key/**", "ssh-password/**", "socks5/**", ".github/workflows/toolbox.yml"]
 permissions:
   contents: read
 jobs:
@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate shell syntax
-        run: bash -n install.sh && bash -n vpstools.sh && bash -n Fail2ban/install.sh && bash -n web_tool/install.sh && bash -n iperf3_tool/iperf3-tool.sh && bash -n system_tool/install.sh && bash -n tcp-tool/install.sh && bash -n ssh-key/install.sh && bash -n ssh-password/install.sh
+        run: bash -n install.sh && bash -n vpstools.sh && bash -n Fail2ban/install.sh && bash -n web_tool/install.sh && bash -n iperf3_tool/iperf3-tool.sh && bash -n system_tool/install.sh && bash -n tcp-tool/install.sh && bash -n ssh-key/install.sh && bash -n ssh-password/install.sh && bash -n socks5/socks5.sh
       - name: Check toolbox routing and installation
         run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Check Fail2ban configuration and firewall compatibility
@@ -32,6 +32,17 @@ jobs:
         run: python3 -m unittest discover -s system_tool/tests -p 'test_*.py' -v
       - name: Check TCP parameter import and recovery
         run: python3 -m unittest discover -s tcp-tool/tests -p 'test_*.py' -v
+      - name: Download verified GOST for isolated SOCKS5 tests
+        run: |
+          python3 - <<'PY_GOST'
+          import os, pathlib, runpy
+          manager = runpy.run_path("socks5/tests/test_socks5.py")["load_manager"]()
+          manager.download_gost(pathlib.Path(os.environ["RUNNER_TEMP"]) / "vpstools-test-gost")
+          PY_GOST
+      - name: Check SOCKS5 protocols and lifecycle with local services
+        env:
+          GOST_TEST_BINARY: ${{ runner.temp }}/vpstools-test-gost
+        run: python3 -m unittest discover -s socks5/tests -p 'test_*.py' -v
       - name: Install iperf3 for bounded loopback tests
         run: |
           echo 'iperf3 iperf3/start_daemon boolean false' | sudo debconf-set-selections
