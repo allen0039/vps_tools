@@ -47,7 +47,7 @@ EOF
             firewall_menu <<< $'12\\n\\n0\\n'
         """))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("12. 查看已占用端口", result.stdout)
+        self.assertIn("12. 查看端口使用情况", result.stdout)
         self.assertIn("请选择 [0-12]", result.stdout)
         self.assertIn("22/tcp", result.stdout)
         self.assertIn("22/udp", result.stdout)
@@ -58,10 +58,71 @@ EOF
         self.assertIn("未知", result.stdout)
         self.assertLess(result.stdout.index("22/tcp"), result.stdout.index("5432/tcp"))
 
+    def test_udp_forwarding_bindings_are_separate_from_tcp_listeners(self):
+        result = self.run_bash(textwrap.dedent("""
+            SS_BIN=mock_ss
+            mock_ss() {
+                case "$*" in
+                    '-H -ltnp') cat <<'EOF'
+LISTEN 0 128 0.0.0.0:443 0.0.0.0:* users:(("mmw-agent",pid=12,fd=3))
+EOF
+                        ;;
+                    '-H -lunp') cat <<'EOF'
+UNCONN 0 0 0.0.0.0:49152 0.0.0.0:* users:(("mmw-agent",pid=12,fd=4))
+UNCONN 0 0 [::]:51820 [::]:* users:(("wireguard-go",pid=20,fd=5))
+UNCONN 0 0 0.0.0.0:443 0.0.0.0:* users:(("mmw-agent",pid=12,fd=6))
+EOF
+                        ;;
+                    *) return 1 ;;
+                esac
+            }
+            show_occupied_ports
+        """))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        tcp_section, udp_section = result.stdout.split("UDP 已绑定端口", 1)
+        self.assertIn("TCP 监听端口", tcp_section)
+        self.assertIn("443/tcp", tcp_section)
+        self.assertNotIn("/udp", tcp_section)
+        self.assertIn("49152/udp", udp_section)
+        self.assertIn("443/udp", udp_section)
+        self.assertIn("51820/udp", udp_section)
+        self.assertIn("wireguard-go (PID 20)", udp_section)
+        self.assertIn("mmw-agent (PID 12)", udp_section)
+        self.assertIn("当前绑定不代表长期占用", udp_section)
+        self.assertIn("UDP 绑定不会阻止同号 TCP 监听", udp_section)
+        self.assertNotIn("已占用的监听端口", result.stdout)
+        self.assertLess(udp_section.index("443/udp"), udp_section.index("49152/udp"))
+
+    def test_udp_only_binding_does_not_report_tcp_listener_or_block_ssh_port(self):
+        result = self.run_bash(textwrap.dedent("""
+            SS_BIN=mock_ss
+            mock_ss() {
+                case "$*" in
+                    '-H -ltnp'|'-H -ltn') return 0 ;;
+                    '-H -lunp') cat <<'EOF'
+UNCONN 0 0 0.0.0.0:49152 0.0.0.0:* users:(("mmw-agent",pid=12,fd=4))
+EOF
+                        ;;
+                    *) return 1 ;;
+                esac
+            }
+            show_occupied_ports
+            if port_is_listening 49152; then
+                exit 1
+            fi
+        """))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("未发现 TCP 监听端口", result.stdout)
+        self.assertIn("49152/udp", result.stdout)
+
     def test_results_stay_visible_until_enter_then_menu_returns(self):
         body = textwrap.dedent("""
             SS_BIN=mock_ss
-            mock_ss() { printf 'LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\\n'; }
+            mock_ss() {
+                if [[ $* == '-H -ltnp' ]]; then
+                    printf 'LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\\n'
+                fi
+            }
             prepare_iptables_for_firewall_menu() { :; }
             show_firewall_port_overview() { :; }
             show_access_control_overview() { :; }
@@ -99,8 +160,8 @@ EOF
 
     def test_empty_and_failed_reads_can_return_to_menu(self):
         for command, expected in (
-            (":", "未发现 TCP/UDP 监听端口"),
-            ("return 1", "无法读取监听端口"),
+            (":", "未发现 TCP 监听端口"),
+            ("return 1", "无法读取端口使用情况"),
         ):
             with self.subTest(command=command):
                 result = self.run_bash(textwrap.dedent(f"""
@@ -124,8 +185,8 @@ EOF
             show_occupied_ports
         """))
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("无法读取监听端口", result.stderr)
-        self.assertNotIn("未发现 TCP/UDP", result.stdout)
+        self.assertIn("无法读取端口使用情况", result.stderr)
+        self.assertNotIn("未发现", result.stdout)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
-ALLENTOOL_VERSION=0.1.15
+ALLENTOOL_VERSION=0.1.16
 INSTALL_ASSUME_YES=no
 INSTALL_PATH=${SAFE_SSH_PORT_INSTALL_PATH:-/usr/local/sbin/safe-ssh-port}
 ALLENTOOL_PATH=${ALLENTOOL_PATH:-/usr/local/bin/allentool}
@@ -1229,30 +1229,46 @@ occupied_port_records() {
 }
 
 show_occupied_ports() {
-    local tcp_snapshot udp_snapshot records
-    printf '\n已占用的监听端口（含本机回环地址）\n'
+    local tcp_snapshot udp_snapshot protocol snapshot records address_label
+    printf '\n当前端口使用情况（含本机回环地址）\n'
     printf '%s\n' '----------------------------------------'
     if ! tcp_snapshot=$("$SS_BIN" -H -ltnp 2>/dev/null) ||
        ! udp_snapshot=$("$SS_BIN" -H -lunp 2>/dev/null); then
-        warn '无法读取监听端口，请检查 ss 命令是否可用。'
+        warn '无法读取端口使用情况，请检查 ss 命令是否可用。'
         return 1
     fi
 
-    records=$(
-        {
-            printf '%s\n' "$tcp_snapshot" | occupied_port_records tcp
-            printf '%s\n' "$udp_snapshot" | occupied_port_records udp
-        } | sort -t $'\t' -k1,1n -k2,2 -k3,3 -u
-    )
-    if [[ -z $records ]]; then
-        printf '  （未发现 TCP/UDP 监听端口）\n'
-        return 0
-    fi
-    printf '  %-9s %-30s %s\n' '端口/协议' '监听地址' '进程'
-    printf '%s\n' "$records" | awk -F '\t' '{
-        printf "  %-9s %-30s %s\n", $1 "/" $2, $3, $4
-    }'
-    printf '同一端口号可分别由 TCP 和 UDP 使用；“未知”表示 ss 未提供进程信息。\n'
+    for protocol in tcp udp; do
+        if [[ $protocol == tcp ]]; then
+            snapshot=$tcp_snapshot
+            address_label=监听地址
+            printf '\nTCP 监听端口\n'
+        else
+            snapshot=$udp_snapshot
+            address_label=绑定地址
+            printf '\nUDP 已绑定端口（可能含临时通信/转发端口）\n'
+            printf 'UDP 的 UNCONN 仅表示未连接，无法据此区分固定服务和临时用途。\n'
+            printf 'mmw-agent 等转发程序可能临时绑定 UDP 端口，当前绑定不代表长期占用。\n'
+        fi
+        records=$(
+            printf '%s\n' "$snapshot" | occupied_port_records "$protocol" |
+                sort -t $'\t' -k1,1n -k2,2 -k3,3 -u
+        )
+        if [[ -z $records ]]; then
+            if [[ $protocol == tcp ]]; then
+                printf '  （未发现 TCP 监听端口）\n'
+            else
+                printf '  （未发现 UDP 绑定端口）\n'
+            fi
+            continue
+        fi
+        printf '  %-9s %-30s %s\n' '端口/协议' "$address_label" '进程'
+        printf '%s\n' "$records" | awk -F '\t' '{
+            printf "  %-9s %-30s %s\n", $1 "/" $2, $3, $4
+        }'
+    done
+    printf '\n同号 TCP 和 UDP 可以独立使用；UDP 绑定不会阻止同号 TCP 监听。\n'
+    printf '以上为当前套接字状态，与防火墙是否放行无关；“未知”表示 ss 未提供进程信息。\n'
 }
 
 iptables_rule_records_for_command() {
@@ -2816,7 +2832,7 @@ firewall_menu() {
         printf '  7. 安装/修复防火墙持久化\n'
         printf '  8. IP 黑白名单         9. 国家黑白名单\n'
         printf ' 10. 查看最近端口操作   11. 放行所有端口\n'
-        printf ' 12. 查看已占用端口\n'
+        printf ' 12. 查看端口使用情况\n'
         printf '%s\n' '----------------------------------------'
         printf '  0. 返回上一级菜单\n'
         printf '请选择 [0-12]: '
