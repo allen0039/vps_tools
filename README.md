@@ -10,7 +10,7 @@
 | --- | --- | --- | --- |
 | SSH 管理 | 切换 SSH 单端口、查看状态、从历史备份恢复配置 | `allentool` / `safe-ssh-port` | [SSH 使用指南](safe-ssh-port/README.md) |
 | SSH 密钥登录 | 准确识别认证状态、导入或生成密钥、两阶段切换和定时回退 | `sshkeytool` | [密钥登录指南](ssh-key/README.md) |
-| SSH 密码登录管理 | 指定用户定时、直到重启或永久开放密码，手动关闭，继续允许密钥 | `sshpasswdtool` | [使用指南](ssh-password/README.md) |
+| SSH 密码登录管理 | 临时或永久开放指定用户密码；一键禁止系统所有 SSH 密码、仅保留密钥 | `sshpasswdtool` | [使用指南](ssh-password/README.md) |
 | 防火墙管理 | 管理 TCP/UDP 端口、保护 SSH、配置 IP 与国家黑白名单 | `allentool` 内的防火墙菜单 | [防火墙说明](safe-ssh-port/README.md#交互式防火墙管理) |
 | Fail2ban 防护 | 配置 SSH 防暴力破解、白名单和解封，与 iptables 防火墙联动 | `f2btool` | [Fail2ban 使用指南](Fail2ban/README.md) |
 | DNS 切换 | 切换公共或自定义 IPv4/IPv6 DNS，恢复首次安装前的配置 | `dnstool` | [DNS 使用指南](dns_tool/README.md) |
@@ -139,6 +139,8 @@ sudo vpstools run sshpass close --yes
 # SSH 永久密码：重启后保留，直到手动关闭
 sudo vpstools run sshpass enable --permanent --yes
 sudo vpstools run sshpass close --yes
+# 永久禁止系统所有 SSH 密码登录；先确认密钥新连接可用
+sudo vpstools run sshpass disable
 
 # SSH 防暴力破解菜单
 vpstools run fail2ban

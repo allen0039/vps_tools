@@ -218,6 +218,99 @@ def prepare_restart(password):
     print("READY: restart the disposable container to clear its /run tmpfs", flush=True)
 
 
+def disable_tests(password):
+    configure(password="yes", permit="yes")
+    # 原系统允许密码、工具没有活动窗口；close 不会禁止这条原始路径。
+    assert_login(True, password)
+    cli("close", "--yes")
+    assert_login(True, password)
+    provider = Path("/etc/ssh/sshd_config.d/98-disable-fixture.conf")
+    nested = Path("/etc/ssh/disable-fixture-nested.conf")
+    nested.write_text("ChallengeResponseAuthentication yes\n")
+    provider.write_text("Include " + str(nested) + "\nPasswordAuthentication yes\nAuthenticationMethods any\n")
+    # 避免 OpenSSH 9.2 的重复 any 限制，保留 provider 中的一份 any。
+    CONFIG.write_text(CONFIG.read_text().replace("AuthenticationMethods any\n", "") +
+                      "Match Address 192.0.2.0/24\n PasswordAuthentication yes\n KbdInteractiveAuthentication yes\n")
+    run(["/usr/sbin/sshd", "-t"])
+    run(["systemctl", "reload", "ssh.service"])
+    assert_login(True, password)
+    assert_login(True, password, ACCOUNT)
+    assert_login(True)
+    authorized = Path("/root/.ssh/authorized_keys").read_bytes()
+    shadow = Path("/etc/shadow").read_bytes()
+    cli("disable", "--yes")
+    assert_login(False, password)
+    assert_login(False, password, ACCOUNT)
+    assert_login(True)
+    assert_login(True, user=ACCOUNT)
+    assert Path("/root/.ssh/authorized_keys").read_bytes() == authorized
+    assert Path("/etc/shadow").read_bytes() == shadow
+    assert "ChallengeResponseAuthentication no" in nested.read_text()
+    for user in ("root", ACCOUNT):
+        for address in ("127.0.0.1", "192.0.2.9", "2001:db8::1"):
+            context = {"addr": address, "host": address, "laddr": "127.0.0.1", "lport": "22"}
+            actual = module.Backend().effective(user, context)
+            assert actual["passwordauthentication"] == "no"
+            assert actual["kbdinteractiveauthentication"] == "no"
+            assert module.authentication_mode(actual) == "publickey"
+    before = {path: path.read_bytes() for path in (CONFIG, provider, nested)}
+    cli("disable", "--yes")
+    assert all(path.read_bytes() == data for path, data in before.items())
+    cli("enable", "--minutes", "1", "--yes")
+    manager = module.PasswordTool()
+    token = manager.load_state()["token"]
+    assert_login(True, password)
+    assert_login(False, password, ACCOUNT)
+    cli("disable", "--yes")
+    cli("expire", "--token", token)
+    assert_login(False, password)
+    assert_login(True)
+    assert not manager.has_auth()
+    assert manager.load_state()["phase"] == "closed"
+    provider.unlink()
+    nested.unlink()
+    block = ("# BEGIN sshkeytool root\nMatch User root\n    PubkeyAuthentication yes\n"
+             "    ExposeAuthInfo yes\n    AuthenticationMethods publickey\n"
+             "    PasswordAuthentication no\n    KbdInteractiveAuthentication no\n"
+             "    PermitRootLogin prohibit-password\n# END sshkeytool root\n")
+    configure(password="yes", match=block)
+    cli("disable", "--yes")
+    assert block in CONFIG.read_text()
+    cli("enable", "--until-reboot", "--yes")
+    assert_login(True, password)
+    cli("close", "--yes")
+    assert_login(False, password)
+    assert_login(True)
+    assert block in CONFIG.read_text()
+    print("PASS: disable blocks existing system passwords for all users and sources, preserves keys/accounts, closes windows", flush=True)
+
+
+def prepare_disabled_restart():
+    password = json.loads((FIXTURE / "credentials.json").read_text())["password"]
+    configure(password="yes", permit="yes")
+    assert_login(True, password)
+    cli("disable", "--yes")
+    assert_login(False, password)
+    assert_login(True)
+    print("READY: restart to verify the permanent system key-only policy", flush=True)
+
+
+def check_disabled_restart():
+    password = json.loads((FIXTURE / "credentials.json").read_text())["password"]
+    assert CONFIG.read_bytes().startswith(module.KEY_ONLY_POLICY)
+    assert_login(False, password)
+    assert_login(False, password, ACCOUNT)
+    assert_login(True)
+    assert_login(True, user=ACCOUNT)
+    cli("enable", "--until-reboot", "--yes")
+    assert_login(True, password)
+    assert_login(False, password, ACCOUNT)
+    cli("close", "--yes")
+    assert_login(False, password)
+    assert_login(True)
+    print("PASS: system key-only policy survives restart; temporary password exception restores to key-only", flush=True)
+
+
 def check_restart():
     password = json.loads((FIXTURE / "credentials.json").read_text())["password"]
     assert not Path("/run/sshpasswdtool/auth.conf").exists()
@@ -285,6 +378,8 @@ def main():
     mode.add_argument("--check-restart", action="store_true")
     mode.add_argument("--prepare-permanent-restart", action="store_true")
     mode.add_argument("--check-permanent-restart", action="store_true")
+    mode.add_argument("--prepare-disabled-restart", action="store_true")
+    mode.add_argument("--check-disabled-restart", action="store_true")
     args = parser.parse_args()
     check_guard()
     if args.check_restart:
@@ -296,12 +391,19 @@ def main():
     if args.check_permanent_restart:
         check_permanent_restart()
         return
+    if args.prepare_disabled_restart:
+        prepare_disabled_restart()
+        return
+    if args.check_disabled_restart:
+        check_disabled_restart()
+        return
     original = CONFIG.read_bytes()
     run(["bash", str(ROOT / "install.sh")])
     assert CONFIG.read_bytes() == original
     password = setup()
     timed_test(password)
     remaining_tests(password)
+    disable_tests(password)
     prepare_restart(password)
 
 

@@ -36,6 +36,8 @@ class FakeBackend:
 
     def effective(self, user, context, config=None):
         result = dict(self.options)
+        if tool.KEY_ONLY_POLICY in Path(config or self.config).read_bytes() and not self.match_conflict:
+            result.update(passwordauthentication="no", kbdinteractiveauthentication="no", authenticationmethods="publickey")
         if not self.match_conflict:
             for path in self.auth_paths:
                 if not path.exists():
@@ -467,6 +469,182 @@ class TemporaryPasswordTests(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), original)
         self.assertFalse(self.manager.persistent_auth_file.exists())
 
+    def test_disable_system_passwords_without_managed_window_and_preserves_root_keys(self):
+        self.backend.options.update(permitrootlogin="yes", kbdinteractiveauthentication="yes")
+        self.assertIsNone(self.manager.load_state())
+        result = self.manager.disable()
+        actual = self.backend.effective("root", tool.connection_context())
+        self.assertEqual(actual["passwordauthentication"], "no")
+        self.assertEqual(actual["kbdinteractiveauthentication"], "no")
+        self.assertEqual(actual["authenticationmethods"], "publickey")
+        self.assertEqual(actual["pubkeyauthentication"], "yes")
+        self.assertIn(b"Port 21919\n", self.config.read_bytes())
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o640)
+        self.assertTrue(Path(result["backup"]).exists())
+        self.assertEqual(list(self.unit_dir.iterdir()), [])
+        self.boot.write_text("boot-two")
+        self.assertFalse(tool.password_available(self.backend.effective("root", tool.connection_context()), "root"))
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.manager.status()
+        self.assertIn("全局仅密钥基线：已配置", output.getvalue())
+
+    def test_disable_rewrites_nested_includes_and_all_conditional_password_paths(self):
+        directory = self.base / "config.d"
+        directory.mkdir()
+        nested = directory / "nested.conf"
+        nested.write_text("Match Address 192.0.2.0/24\n PasswordAuthentication yes\n ChallengeResponseAuthentication yes\n")
+        provider = directory / "provider.conf"
+        provider.write_text('Include "' + str(nested) + '"\nMatch User bob\n AuthenticationMethods any\n'
+                            ' PasswordAuthentication yes\n PubkeyAuthentication no\n')
+        self.config.write_bytes(b'Include "' + str(provider).encode() + b'"\n' + self.original)
+        before = {path: path.read_bytes() for path in (self.config, provider, nested)}
+        result = self.manager.disable()
+        self.assertIn("PasswordAuthentication no", provider.read_text())
+        self.assertIn("ChallengeResponseAuthentication no", nested.read_text())
+        self.assertIn("PubkeyAuthentication no", provider.read_text())
+        saved = json.loads(Path(result["backup"]).read_text())
+        self.assertEqual(len(saved["files"]), 3)
+        for item in saved["files"]:
+            data = tool.base64.b64decode(item["data"])
+            self.assertEqual(data, before[Path(item["path"])])
+            self.assertEqual(tool.digest(data), item["sha256"])
+        self.assertEqual(Path(result["backup"]).stat().st_mode & 0o777, 0o600)
+
+    def test_disable_is_idempotent_without_duplicate_markers_or_extra_backups(self):
+        self.manager.disable()
+        before = self.config.read_bytes()
+        result = self.manager.disable()
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertIsNone(result["backup"])
+        self.assertEqual(len(list((self.manager.state_dir / "backups").glob("key-only-*.json"))), 1)
+
+    def test_disable_preserves_known_key_tool_block_for_future_password_exceptions(self):
+        block = (b"# BEGIN sshkeytool root\nMatch User root\n    PubkeyAuthentication yes\n"
+                 b"    ExposeAuthInfo yes\n    AuthenticationMethods publickey\n"
+                 b"    PasswordAuthentication no\n    KbdInteractiveAuthentication no\n"
+                 b"    PermitRootLogin prohibit-password\n# END sshkeytool root\n")
+        self.config.write_bytes(self.original + block)
+        self.backend.options["authenticationmethods"] = "publickey"
+        self.manager.disable()
+        self.assertIn(block, self.config.read_bytes())
+        self.manager.enable(until_reboot=True)
+        self.manager.close()
+        self.assertIn(block, self.config.read_bytes())
+
+    def test_disable_closes_managed_password_window_and_old_worker_cannot_undo_policy(self):
+        for permanent in (False, True):
+            state = self.manager.enable(permanent=permanent)
+            self.manager.disable()
+            self.assertFalse(self.manager.has_auth())
+            self.assertEqual(self.manager.load_state()["phase"], "closed")
+            self.assertEqual(list(self.unit_dir.iterdir()), [])
+            self.manager.close(state["token"])
+            self.assertFalse(tool.password_available(self.backend.effective("root", state["context"]), "root"))
+
+    def test_temporary_password_exception_after_disable_returns_to_key_only(self):
+        self.backend.options["permitrootlogin"] = "yes"
+        self.manager.disable()
+        for reboot in (False, True):
+            state = self.manager.enable(until_reboot=reboot)
+            self.assertTrue(tool.password_available(self.backend.effective("root", state["context"]), "root"))
+            self.manager.close()
+            self.assertFalse(tool.password_available(self.backend.effective("root", state["context"]), "root"))
+        self.assertTrue(self.config.read_bytes().startswith(tool.KEY_ONLY_POLICY))
+
+    def test_disable_reload_failure_rolls_back_all_files(self):
+        provider = self.base / "provider.conf"
+        provider.write_text("PasswordAuthentication yes\n")
+        self.config.write_bytes(b'Include "' + str(provider).encode() + b'"\n' + self.original)
+        before = self.config.read_bytes(), provider.read_bytes()
+        calls = []
+        original_reload = self.backend.reload
+
+        def fail_once(unit):
+            calls.append(unit)
+            if len(calls) == 1:
+                raise tool.ToolError("disable reload failed")
+            original_reload(unit)
+
+        self.backend.reload = fail_once
+        with self.assertRaisesRegex(tool.ToolError, "disable reload failed"):
+            self.manager.disable()
+        self.assertEqual((self.config.read_bytes(), provider.read_bytes()), before)
+        self.assertEqual(len(calls), 2)
+
+    def test_disable_effective_policy_conflict_rolls_back_before_reload(self):
+        self.backend.match_conflict = True
+        with self.assertRaisesRegex(tool.ToolError, "未实际生效"):
+            self.manager.disable()
+        self.assertEqual(self.config.read_bytes(), self.original)
+
+    def test_disable_refuses_missing_key_policy_mfa_root_ban_and_pending_key_operation(self):
+        for key, value in (("pubkeyauthentication", "no"), ("authenticationmethods", "publickey,password"),
+                           ("permitrootlogin", "no")):
+            original = dict(self.backend.options)
+            self.backend.options[key] = value
+            with self.assertRaises(tool.ToolError):
+                self.manager.disable()
+            self.assertEqual(self.config.read_bytes(), self.original)
+            self.backend.options = original
+        self.manager.key_active.write_text("pending")
+        with self.assertRaisesRegex(tool.ToolError, "待确认或待恢复"):
+            self.manager.disable()
+
+    def test_disable_refuses_mfa_in_other_users_include_without_modifying_files(self):
+        provider = self.base / "mfa.conf"
+        provider.write_text("Match User alice\n AuthenticationMethods publickey,keyboard-interactive\n")
+        self.config.write_bytes(self.original + b'Include "' + str(provider).encode() + b'"\n')
+        before = self.config.read_bytes()
+        with self.assertRaisesRegex(tool.ToolError, "多因素或特殊"):
+            self.manager.disable()
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertNotIn("# sshpasswdtool", provider.read_text())
+
+    def test_disable_refuses_symlink_include_and_unregistered_auth(self):
+        provider = self.base / "provider.conf"
+        target = self.base / "unrelated.conf"
+        target.write_text("PasswordAuthentication yes\n")
+        provider.symlink_to(target)
+        self.config.write_bytes(self.original + b'Include "' + str(provider).encode() + b'"\n')
+        before = self.config.read_bytes()
+        with self.assertRaisesRegex(tool.ToolError, "非普通文件"):
+            self.manager.disable()
+        self.assertEqual(self.config.read_bytes(), before)
+        self.config.write_bytes(self.original)
+        with self.manager.lock():
+            self.manager.persistent_auth_file.write_text("unrelated")
+        with self.assertRaisesRegex(tool.ToolError, "未登记"):
+            self.manager.disable()
+        self.assertEqual(self.config.read_bytes(), self.original)
+
+    def test_disable_handles_equals_case_and_quoted_include_paths(self):
+        provider = self.base / "with spaces.conf"
+        provider.write_text("pAsSwOrDaUtHeNtIcAtIoN = yes\nKbdInteractiveAuthentication=yes\nAuthenticationMethods any\n")
+        self.config.write_bytes(b'Include="' + str(provider).encode() + b'"\n' + self.original)
+        self.manager.disable()
+        self.assertIn("pAsSwOrDaUtHeNtIcAtIoN no", provider.read_text())
+        self.assertIn("KbdInteractiveAuthentication no", provider.read_text())
+        self.assertIn("# sshpasswdtool key-only: AuthenticationMethods any", provider.read_text())
+
+    def test_disable_preserves_external_edits_during_failed_rollback(self):
+        external = b"# external edit\n"
+
+        def fail_reload(unit):
+            self.config.write_bytes(self.config.read_bytes() + external)
+            raise tool.ToolError("reload failed")
+
+        self.backend.reload = fail_reload
+        with self.assertRaisesRegex(tool.ToolError, "恢复未完成.*外部修改"):
+            self.manager.disable()
+        self.assertIn(external, self.config.read_bytes())
+
+    def test_disable_rejects_modified_policy_marker(self):
+        self.config.write_bytes(tool.KEY_ONLY_POLICY.replace(b"PasswordAuthentication no", b"PasswordAuthentication yes") + self.original)
+        before = self.config.read_bytes()
+        with self.assertRaisesRegex(tool.ToolError, "标记被修改"):
+            self.manager.disable()
+        self.assertEqual(self.config.read_bytes(), before)
+
 
 class CommandTests(unittest.TestCase):
     def test_help_version_and_mutually_exclusive_modes(self):
@@ -481,6 +659,9 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
         args = tool.build_parser().parse_args(["enable", "--permanent", "--yes"])
         self.assertTrue(args.permanent)
+        args = tool.build_parser().parse_args(["disable", "--user", "alice", "--yes"])
+        self.assertEqual(args.user, "alice")
+        self.assertTrue(args.yes)
 
     def test_connection_context_uses_ipv6_and_rejects_malformed_environment(self):
         with patch.dict(os.environ, SSH_CONNECTION="2001:db8::1 34567 2001:db8::2 21919"):

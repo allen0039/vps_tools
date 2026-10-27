@@ -1,6 +1,8 @@
-# SSH 密码登录管理 v0.1.0
+# SSH 密码登录管理 v0.1.1
 
 日常使用密钥，为指定用户开放密码登录。独立命令 `sshpasswdtool`，默认用户 `root`、默认 30 分钟；也可选择直到服务器重启或永久开启。永久模式在服务器重启、SSH 服务重启及密钥登录后继续有效，直到手动关闭。三种模式都继续允许密钥认证。
+
+v0.1.1 增加“永久禁止所有 SSH 密码登录（仅密钥）”。它会禁用系统原来配置的密码登录，重启后保留；`close` 则仅撤销本工具的开放窗口，恢复原策略。状态中的“本工具的密码开放：未开启”不代表系统已禁用密码，应查看上面的实际解析结果。
 
 kejilion 的 `add_sshpasswd()` 会调用 `passwd`、永久设置 `PasswordAuthentication yes`，root 还会设置 `PermitRootLogin yes`；`sshkey_on()` 会永久关闭密码。单次通过密钥登录本身不会改变认证模式。这里使用独立实现，参考的是功能行为，不执行或复制其清理 SSH 配置目录的操作。[参考源码](https://github.com/kejilion/sh/blob/main/kejilion.sh)
 
@@ -22,10 +24,11 @@ SSH 密码登录管理  目标用户：root
 1. 查看状态
 2. 临时开启（定时，默认 30 分钟）
 3. 临时开启（直到重启）
-4. 关闭密码登录（临时 / 永久）
+4. 撤销本工具的密码开放（恢复原策略）
 5. 设置/修改用户密码
 6. 切换目标用户
 7. 永久开启（直到手动关闭）
+8. 永久禁止所有 SSH 密码登录（仅密钥）
 0. 返回
 ```
 
@@ -44,6 +47,24 @@ sudo sshpasswdtool close --yes
 
 目标账户需要已有可用密码；锁定账户、无密码账户、`nologin`/`false` shell 会拒绝开启。使用菜单第 5 项或 `sudo sshpasswdtool passwd --user root` 调用系统 `passwd`。密码通过系统交互输入，不进入工具参数、状态、备份或日志。设置/修改的是系统用户密码，关闭密码登录不会还原或删除它，也不影响它在控制台或 sudo 中的用途。
 
+## 系统原来允许密码时，一键改为仅密钥
+
+先保留当前 SSH 会话，并确认电脑能用密钥建立一个独立的新连接。在菜单选择第 8 项，或在交互终端执行：
+
+```bash
+sudo sshpasswdtool disable
+```
+
+自动化时可用 `sudo sshpasswdtool disable --user root --yes`。`--yes` 表示你已确认该用户能用密钥新连接登录；工具只能核验配置，不能证明你持有可用私钥。`--user` 选择公钥配置检查的账户，默认 root，**禁止范围始终是所有 SSH 用户**。不会禁用控制台、sudo 等用途的系统账户密码，也不会修改公钥或 SSH 端口。已登录会话保持连接。
+
+该操作先结束本工具已有的密码开放窗口，保存需修改文件的完整备份，再设置全局 `PasswordAuthentication no`、`KbdInteractiveAuthentication no`、`AuthenticationMethods publickey`。递归展开主配置与 `Include` 中的文件（包括其他用户、来源的 `Match` 分支），禁用已有密码、键盘交互及 `ChallengeResponseAuthentication` 兼容开关，避免条件块重新开放密码。原有 `AuthenticationMethods any` 留为注释，已有公钥要求保留。文件权限和属主保留。只允许公钥认证，不会主动把其他条件下原本禁用的公钥认证或 root 登录重新打开。
+
+写入后用 `sshd -t` 校验，并用 `sshd -T -C` 回读所选用户当前连接上下文；只有密码、键盘交互均关闭且公钥仍允许时才 reload。失败会撤回本次已写入内容并重新加载；若外部程序同时改动了文件，会保留外部改动并明确报告恢复未完成。备份位于 `/var/lib/sshpasswdtool/backups/key-only-<操作编号>.json`，包含每个修改文件的原文、哈希、权限和属主。重复禁用不会叠加标记或生成无变化备份。
+
+发现公钥未启用、检查账户禁止登录、多因素或特殊 `AuthenticationMethods`、符号链接配置、动态 Include 路径、无法安全解析的续行或配置冲突时，会停止并说明原因。正在等待公钥确认的 `sshkeytool` 操作必须先完成。之后其他工具修改认证配置仍可能改变结果，应重新查看状态并验证新连接。
+
+以后需要临时使用密码时，仍可使用原来的开启功能，例如 `sudo sshpasswdtool enable --minutes 30 --yes`，结束后恢复到仅密钥基线。其他更早的 `Match` 限制可能阻止临时例外，工具会检查结果并拒绝未生效的开启。
+
 ## 到期、重启与手动关闭
 
 | 模式 | 定时结束 | 服务器重启 | 菜单退出 / SSH 断开 |
@@ -56,7 +77,7 @@ sudo sshpasswdtool close --yes
 
 临时恢复任务位于 `/run/systemd/system/sshpasswdtool-<操作编号>.service/.timer`，定时模式使用 `OnActiveSec` 的单调时间，不会因手动调整墙上时钟延长窗口。预计截止时间以服务器时区展示。创建并验证定时器运行成功后才写入密码许可；不依赖菜单进程或后台 `sleep`。每次操作使用不同编号，过期的旧任务不能关闭新窗口；内部恢复任务也不能关闭永久模式。临时恢复服务失败后每 30 秒重试，成功前状态会记录“恢复失败”，不会报告已关闭。永久模式没有自动恢复任务，手动关闭失败后需修复原因并再次 `close`。
 
-三种模式均使用菜单第 4 项或 `sudo sshpasswdtool close --yes` 关闭。关闭会先删除本工具当前操作的认证文件，再校验完整 SSH 配置、reload 并检查密码路径已恢复为禁止。已完成认证的 SSH/SFTP 会话、连接复用通道不会被强制断开；关闭控制的是之后的新认证。测试时请建立独立连接，避免复用已有 SSH 连接。
+三种开放模式均使用菜单第 4 项或 `sudo sshpasswdtool close --yes` 撤销本工具的许可。关闭会先删除本工具当前操作的认证文件，再校验完整 SSH 配置、reload 并检查密码路径已恢复为禁止。没有本工具的开放窗口时，`close` 不会修改系统原有密码策略；需使用第 8 项或 `disable` 禁止。已完成认证的 SSH/SFTP 会话、连接复用通道不会被强制断开；关闭控制的是之后的新认证。测试时请建立独立连接，避免复用已有 SSH 连接。
 
 ## 认证范围与配置兼容
 
@@ -102,7 +123,11 @@ docker exec sshpasswdtool-test python3 /opt/ssh-password/tests/integration_syste
 docker restart -t 15 sshpasswdtool-test
 # 再等 ssh.service active 后执行：
 docker exec sshpasswdtool-test python3 /opt/ssh-password/tests/integration_systemd.py --check-permanent-restart
+docker exec sshpasswdtool-test python3 /opt/ssh-password/tests/integration_systemd.py --prepare-disabled-restart
+docker restart -t 15 sshpasswdtool-test
+# 再等 ssh.service active 后执行：
+docker exec sshpasswdtool-test python3 /opt/ssh-password/tests/integration_systemd.py --check-disabled-restart
 docker rm -f sshpasswdtool-test
 ```
 
-真实验证覆盖 60 秒定时关闭、key/password 新连接、变更端口保留、root 原策略、普通用户范围、provider Include 保留、显式仅公钥策略、已识别 `sshkeytool` 配置块和锁定账户。第一次容器重启验证临时模式 `/run` 清空后密码登录被拒绝、密钥仍可登录；第二次重启验证永久模式密码和密钥均可登录，手动关闭后恢复仅密钥并保留新端口。还验证旧入口升级和内部恢复任务不会撤销永久模式。容器与宿主机共享内核 boot_id，真实服务器 boot_id 变化分支由单元测试模拟。CI 使用相同流程。不在开发电脑或已有 VPS 上修改认证配置。
+真实验证覆盖 60 秒定时关闭、key/password 新连接、变更端口保留、root 原策略、普通用户范围、provider Include 保留、显式仅公钥策略、已识别 `sshkeytool` 配置块和锁定账户。新增覆盖系统原有密码及键盘交互许可、递归 Include、其他来源的 Match、全部用户禁止、账户密码与公钥不变、重复操作和已有开放窗口撤销。第一次容器重启验证临时模式 `/run` 清空后密码登录被拒绝、密钥仍可登录；第二次重启验证永久模式密码和密钥均可登录，手动关闭后恢复仅密钥并保留新端口；第三次验证全局仅密钥基线重启后保留，临时开放结束后仍恢复到仅密钥。还验证旧入口升级和内部恢复任务不会撤销永久模式。容器与宿主机共享内核 boot_id，真实服务器 boot_id 变化分支由单元测试模拟。CI 使用相同流程。不在开发电脑或已有 VPS 上修改认证配置。

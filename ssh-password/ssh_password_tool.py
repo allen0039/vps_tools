@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""指定用户启用 SSH 密码认证；支持定时、直到重启和永久开启。"""
+"""SSH 密码认证管理；支持临时/永久开放及永久切换系统为仅公钥认证。"""
 
 import argparse
 import base64
 import contextlib
 import datetime
 import fcntl
+import glob
 import hashlib
 import ipaddress
 import json
@@ -25,10 +26,14 @@ import time
 import uuid
 
 TOOL_ID = "vps-tools-sshpasswdtool"
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 BEGIN = "# BEGIN sshpasswdtool runtime include"
 END = "# END sshpasswdtool runtime include"
 ACTIVE_PHASES = {"preparing", "active", "restore_failed"}
+KEY_ONLY_BEGIN = b"# BEGIN sshpasswdtool key-only policy\n"
+KEY_ONLY_END = b"# END sshpasswdtool key-only policy\n"
+KEY_ONLY_POLICY = (KEY_ONLY_BEGIN + b"PasswordAuthentication no\nKbdInteractiveAuthentication no\n"
+                   b"AuthenticationMethods publickey\n" + KEY_ONLY_END)
 
 
 def operation_mode(state):
@@ -133,13 +138,26 @@ def password_available(options, user):
                 options.get("kbdinteractiveauthentication") == "yes") for method in methods)
 
 
-def check_baseline(options, user):
+def authentication_mode(options):
+    methods = options.get("authenticationmethods", "any").split()
+    if methods == ["any"]:
+        return "any"
+    if methods and all(method == "publickey" for method in methods):
+        return "publickey"
+    return None
+
+
+def check_key_login(options, user):
     if options.get("pubkeyauthentication") != "yes":
         raise ToolError("目标用户未允许公钥认证；请先配置并验证密钥登录。")
     if user == "root" and options.get("permitrootlogin") not in {"yes", "prohibit-password", "without-password"}:
         raise ToolError("root 当前被禁止登录或限制为强制命令；不自动解除该限制。")
-    if options.get("authenticationmethods", "any") not in {"any", "publickey"}:
+    if authentication_mode(options) is None:
         raise ToolError("发现多因素或其他 AuthenticationMethods 策略，不能自动切换。")
+
+
+def check_baseline(options, user):
+    check_key_login(options, user)
     if password_available(options, user):
         raise ToolError("该用户当前仍有密码/键盘交互登录路径；请先设置并验证日常仅密钥策略，再开启密码。")
 
@@ -357,7 +375,7 @@ class PasswordTool:
                 "\n    PasswordAuthentication yes\n    KbdInteractiveAuthentication no\n")
         # OpenSSH 9.2 在读取已有 any 后，再遇到任何块中的 any 会拒绝完整配置。
         # any 基线直接继承；显式 publickey 才在开启期间增加独立 password 选项。
-        if state["baseline"].get("authenticationmethods", "any") == "publickey":
+        if authentication_mode(state["baseline"]) == "publickey":
             text += "    AuthenticationMethods publickey password\n"
         if state["user"] == "root":
             text += "    PermitRootLogin yes\n"
@@ -577,6 +595,146 @@ class PasswordTool:
                         self.backend.ctl("start", "--no-block", service.name, check=False)
                 raise
 
+    def configuration_files(self):
+        """展开全部 Include，包括其他来源才会命中的 Match 内的文件。"""
+        records = {}
+
+        def visit(path):
+            path = Path(os.path.abspath(path))
+            regular_file(path)
+            if path in records:
+                return
+            data = path.read_bytes()
+            records[path] = (data, path.stat())
+            for line in data.splitlines(keepends=True):
+                fields = self.config_fields(line)
+                if fields and fields[0].lower() == "include":
+                    for pattern in fields[1:]:
+                        if any(token in pattern for token in ("%", "$", "~")):
+                            raise ToolError("Include 含有动态路径，停止自动修改：" + pattern)
+                        pattern = Path(pattern)
+                        if not pattern.is_absolute():
+                            pattern = self.config.parent / pattern
+                        for included in sorted(glob.glob(str(pattern))):
+                            visit(Path(included))
+
+        visit(self.config)
+        return records
+
+    @staticmethod
+    def config_fields(line):
+        text = line.decode("utf-8", errors="surrogateescape")
+        text = re.sub(r"^(\s*[A-Za-z][A-Za-z0-9]*)\s*=\s*", r"\1 ", text)
+        try:
+            return shlex.split(text, comments=True)
+        except ValueError as exc:
+            raise ToolError("SSH 配置存在无法安全解析的引号或续行，停止修改。") from exc
+
+    def key_only_configuration(self, records):
+        result = {}
+        password_fields = {"passwordauthentication", "kbdinteractiveauthentication", "challengeresponseauthentication"}
+        for path, (original, metadata) in records.items():
+            data = original
+            if path == self.config and (KEY_ONLY_BEGIN in data or KEY_ONLY_END in data):
+                if (not data.startswith(KEY_ONLY_POLICY) or data.count(KEY_ONLY_BEGIN) != 1 or
+                        data.count(KEY_ONLY_END) != 1):
+                    raise ToolError("全局仅密钥策略标记被修改，请先检查主配置。")
+                data = data[len(KEY_ONLY_POLICY):]
+            lines = []
+            for line in data.splitlines(keepends=True):
+                fields = self.config_fields(line)
+                keyword = fields[0].lower() if fields else ""
+                indent = line[:len(line) - len(line.lstrip())]
+                ending = b"\r\n" if line.endswith(b"\r\n") else b"\n" if line.endswith(b"\n") else b""
+                if keyword in password_fields and fields[1:] != ["no"]:
+                    line = indent + fields[0].encode() + b" no # sshpasswdtool key-only" + ending
+                elif keyword == "authenticationmethods":
+                    mode = authentication_mode({"authenticationmethods": " ".join(fields[1:])})
+                    if mode is None:
+                        raise ToolError("配置包含多因素或特殊 AuthenticationMethods，停止自动修改：" + str(path))
+                    if mode == "any":
+                        # any 不能与全局 publickey 重复出现；原始行保留为注释并另有完整备份。
+                        line = indent + b"# sshpasswdtool key-only: " + line.lstrip()
+                lines.append(line)
+            result[path] = (KEY_ONLY_POLICY if path == self.config else b"") + b"".join(lines)
+        return result
+
+    def disable(self, user="root"):
+        """永久禁止全部 SSH 用户密码认证；user 仅指定公钥可用性检查的账户。"""
+        validate_user(user)
+        with self.lock():
+            regular_file(self.key_active)
+            if self.key_active.exists():
+                raise ToolError("SSH 密钥工具有待确认或待恢复的操作；请先完成该操作。")
+            state = self.load_state()
+            warnings = []
+            if state and state["phase"] in ACTIVE_PHASES:
+                warnings = self.finish(state)
+            if self.has_auth():
+                raise ToolError("存在未登记的密码许可文件，停止修改；请先检查当前状态。")
+            service = self.backend.service()
+            self.backend.validate()
+            context = connection_context()
+            check_key_login(self.backend.effective(user, context), user)
+            records = self.configuration_files()
+            candidate = self.key_only_configuration(records)
+            changes = {path: data for path, data in candidate.items() if data != records[path][0]}
+            backup = None
+            if changes:
+                directory = self.state_dir / "backups"
+                private_dir(directory)
+                backup = directory / ("key-only-" + uuid.uuid4().hex + ".json")
+                value = {"tool": TOOL_ID, "operation": "disable", "created_at": time.time(), "files": []}
+                for path in changes:
+                    data, metadata = records[path]
+                    value["files"].append({"path": str(path), "data": base64.b64encode(data).decode(),
+                                           "sha256": digest(data), "mode": stat.S_IMODE(metadata.st_mode),
+                                           "uid": metadata.st_uid, "gid": metadata.st_gid})
+                atomic_write(backup, canonical(value))
+                saved = json.loads(backup.read_text())
+                if saved != value or any(digest(base64.b64decode(item["data"], validate=True)) != item["sha256"]
+                                         for item in saved["files"]):
+                    raise ToolError("配置备份校验失败，尚未修改认证策略。")
+            written = []
+            try:
+                for path, data in changes.items():
+                    original, metadata = records[path]
+                    regular_file(path)
+                    if path.read_bytes() != original:
+                        raise ToolError("SSH 配置在准备期间改变：" + str(path))
+                    written.append(path)
+                    atomic_write(path, data, stat.S_IMODE(metadata.st_mode), (metadata.st_uid, metadata.st_gid))
+                self.backend.validate()
+                actual = self.backend.effective(user, context)
+                if (authentication_mode(actual) != "publickey" or actual.get("pubkeyauthentication") != "yes" or
+                        actual.get("passwordauthentication") != "no" or actual.get("kbdinteractiveauthentication") != "no"):
+                    raise ToolError("仅密钥策略未实际生效，停止修改。")
+                check_key_login(actual, user)
+                self.backend.reload(service)
+            except BaseException as exc:
+                failures = []
+                for path in reversed(written):
+                    try:
+                        original, metadata = records[path]
+                        regular_file(path)
+                        current = path.read_bytes()
+                        if current == changes[path]:
+                            atomic_write(path, original, stat.S_IMODE(metadata.st_mode), (metadata.st_uid, metadata.st_gid))
+                        elif current != original:
+                            raise ToolError("文件被外部修改，未覆盖：" + str(path))
+                    except (ToolError, OSError) as restore_error:
+                        failures.append(str(restore_error))
+                try:
+                    self.backend.validate()
+                    self.backend.reload(service)
+                except (ToolError, OSError) as restore_error:
+                    failures.append(str(restore_error))
+                if failures:
+                    raise ToolError("禁止密码登录失败：" + str(exc) + "\n恢复未完成：" + "; ".join(failures) +
+                                    "\n请保留当前 SSH 会话；备份：" + str(backup)) from exc
+                raise
+            return {"user": user, "backup": str(backup) if backup else None, "warnings": warnings}
+
     def status(self, user="root"):
         validate_user(user)
         options = self.backend.effective(user, connection_context())
@@ -587,9 +745,12 @@ class PasswordTool:
             print("  " + key + ": " + options.get(key, "未知"))
         print("密码登录路径：" + ("配置允许（仍受账户、PAM、Allow/Deny 等规则限制）" if password_available(options, user)
                                   else "配置禁止"))
+        regular_file(self.config)
+        if KEY_ONLY_BEGIN in self.config.read_bytes():
+            print("全局仅密钥基线：已配置；当前用户以以上解析结果为准（可能存在临时密码例外）。")
         state = self.load_state()
         if not state or state["phase"] == "closed":
-            print("密码登录管理：未开启")
+            print("本工具的密码开放：未开启（不代表系统已禁止密码；以以上解析结果为准）")
             if self.has_auth():
                 print("警告：存在未登记的认证文件，请检查 /run/sshpasswdtool 和 /var/lib/sshpasswdtool。")
             return
@@ -647,14 +808,28 @@ def enabled_message(state):
     print("请另开一个新连接测试密码登录；立即结束：sudo sshpasswdtool close")
 
 
+def disabled_message(result):
+    for warning in result["warnings"]:
+        print(warning, file=sys.stderr)
+    print("已永久禁止所有 SSH 用户的密码及键盘交互认证，只允许公钥认证；重启后继续生效。")
+    print("系统账户密码、公钥、SSH 端口和现有会话保留。请保留当前会话，另开密钥连接验证。")
+    if result["backup"]:
+        print("原配置备份：" + result["backup"])
+
+
+def disable_confirmation(user):
+    return ("已确认 " + user + " 的独立密钥新连接可用，并永久禁止所有 SSH 用户密码登录？"
+            "（同时关闭键盘交互认证，仅保留公钥认证）")
+
+
 def menu(tool, user):
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise ToolError("菜单需要交互终端；使用 sshpasswdtool --help 查看命令。")
     while True:
         print("\nSSH 密码登录管理 v" + VERSION + "  目标用户：" + user)
         print("1. 查看状态\n2. 临时开启（定时，默认 30 分钟）\n3. 临时开启（直到重启）\n"
-              "4. 关闭密码登录（临时 / 永久）\n5. 设置/修改用户密码\n6. 切换目标用户\n"
-              "7. 永久开启（直到手动关闭）\n0. 返回")
+              "4. 撤销本工具的密码开放（恢复原策略）\n5. 设置/修改用户密码\n6. 切换目标用户\n"
+              "7. 永久开启（直到手动关闭）\n8. 永久禁止所有 SSH 密码登录（仅密钥）\n0. 返回")
         try:
             choice = input("请选择：").strip()
             if choice == "0":
@@ -684,6 +859,9 @@ def menu(tool, user):
             elif choice == "7":
                 if confirm("为 " + user + " 永久开启密码登录，重启后保留，直到手动关闭？"):
                     enabled_message(tool.enable(user, permanent=True))
+            elif choice == "8":
+                if confirm(disable_confirmation(user)):
+                    disabled_message(tool.disable(user))
             else:
                 print("无效选项。")
         except (ToolError, OSError) as exc:
@@ -693,7 +871,7 @@ def menu(tool, user):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="指定用户开启 SSH 密码登录；支持定时、直到重启或永久模式。")
+    parser = argparse.ArgumentParser(description="开启 SSH 密码登录，或永久禁止所有 SSH 用户密码登录、仅允许密钥。")
     parser.add_argument("--version", action="version", version="sshpasswdtool " + VERSION)
     sub = parser.add_subparsers(dest="command")
     for command in ("status", "menu", "passwd"):
@@ -706,8 +884,11 @@ def build_parser():
     mode.add_argument("--until-reboot", action="store_true")
     mode.add_argument("--permanent", action="store_true", help="重启后保留，直到手动 close")
     child.add_argument("--yes", action="store_true")
-    child = sub.add_parser("close", help="关闭本工具开启的密码登录（临时 / 永久）")
+    child = sub.add_parser("close", help="只撤销本工具的密码开放，恢复原策略；系统原有密码登录请用 disable 禁止")
     child.add_argument("--yes", action="store_true")
+    child = sub.add_parser("disable", help="永久禁止所有 SSH 用户密码和键盘交互认证，只允许公钥")
+    child.add_argument("--user", default="root", help="验证其公钥配置仍可用的账户，默认 root；禁止范围始终为全部 SSH 用户")
+    child.add_argument("--yes", action="store_true", help="已确认该账户能用密钥新连接登录，跳过交互确认")
     child = sub.add_parser("expire", help="内部恢复任务")
     child.add_argument("--token", required=True)
     return parser
@@ -741,6 +922,9 @@ def main(argv=None):
                 for warning in tool.close():
                     print(warning, file=sys.stderr)
                 print("本工具的密码许可已关闭；已登录会话仍保持连接。")
+        elif args.command == "disable":
+            if confirm(disable_confirmation(args.user), args.yes):
+                disabled_message(tool.disable(args.user))
         elif args.command == "expire":
             for warning in tool.close(args.token):
                 print(warning, file=sys.stderr)

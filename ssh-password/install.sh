@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 仅部署程序；SSH 认证配置在 enable 时才修改。
+# 仅部署程序；SSH 认证配置只在用户执行管理操作时修改。
 set -Eeuo pipefail
 SOURCE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DEST_DIR=${1:-/usr/local/sbin}
