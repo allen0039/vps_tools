@@ -1,6 +1,6 @@
 # SSH 密钥登录管理
 
-`sshkeytool` v0.1.1，提供中文菜单、公钥导入、自动生成公私钥、指定用户的仅密钥登录切换和独立定时回退。接入工具箱「系统管理 → SSH 密钥登录管理」，也可使用 `vpstools run sshkey`。
+`sshkeytool` v0.1.2，提供中文菜单、公钥导入、自动生成公私钥、指定用户的仅密钥登录切换和独立定时回退。接入工具箱「系统管理 → SSH 密钥登录管理」，也可使用 `vpstools run sshkey`。
 
 第一版的自动修改支持 **Debian/Ubuntu、OpenSSH、systemd**，默认管理 root。安装不会生成密钥或改变认证配置。需要 Python 3.8+、OpenSSH 的 `sshd` / `ssh-keygen`；无需第三方 Python 包。
 
@@ -18,12 +18,12 @@ vpstools run sshkey
 独立安装器将程序安装到 `/usr/local/sbin/sshkeytool`，拒绝覆盖同名的其他程序。也可下载固定版本的独立发布包：
 
 ```bash
-curl -fsSL https://github.com/allen0039/vps_tools/releases/download/sshkeytool-v0.1.1/sshkeytool-0.1.1.tar.gz -o sshkeytool-0.1.1.tar.gz
-tar -xzf sshkeytool-0.1.1.tar.gz
-sudo bash sshkeytool-0.1.1/install.sh
+curl -fsSL https://github.com/allen0039/vps_tools/releases/download/sshkeytool-v0.1.2/sshkeytool-0.1.2.tar.gz -o sshkeytool-0.1.2.tar.gz
+tar -xzf sshkeytool-0.1.2.tar.gz
+sudo bash sshkeytool-0.1.2/install.sh
 ```
 
-[发布页](https://github.com/allen0039/vps_tools/releases/tag/sshkeytool-v0.1.1) 提供 SHA256 校验文件；统一安装器可从 GitHub/Gitee 获取仓库中的当前版本。
+[发布页](https://github.com/allen0039/vps_tools/releases/tag/sshkeytool-v0.1.2) 提供 SHA256 校验文件；统一安装器可从 GitHub/Gitee 获取仓库中的当前版本。
 
 ```text
 1. 查看状态与判断依据
@@ -130,9 +130,9 @@ FinalShell 可以下载私钥并创建**独立的私钥认证连接**，随后�
 
 ### 更直接的确认入口（v0.1.1）
 
-有待确认操作时，菜单顶部会持续显示带当前操作编号的完整命令，例如 `sshkeytool confirm 具体操作编号`。在 FinalShell 刚用密钥登录的新窗口直接粘贴执行即可，不用再次进入菜单。普通用户的完整命令会自动带上 sudo 和需保留的认证环境。菜单第 9 项输入编号时，也可直接回车使用当前待处理操作。
+有待确认操作时，菜单顶部会持续显示带当前操作编号的完整命令，例如 `sshkeytool confirm 具体操作编号`。在 FinalShell 刚用密钥登录的新窗口直接粘贴执行即可，不用再次进入菜单。普通用户的完整命令会自动带上 sudo 和需保留的认证环境。
 
-若已自行确认密钥能登录，也可以留在原窗口选择第 **10 项**，回车选中当前操作，再按提示输入对应的确认文字。独立命令也支持：
+若已自行确认密钥能登录，也可以留在原窗口选择第 **10 项**，从操作列表选择后，按提示输入对应的确认文字。独立命令也支持：
 
 ```bash
 sshkeytool confirm 操作编号 --manual
@@ -141,6 +141,12 @@ sshkeytool confirm 操作编号 --manual
 手动确认要求交互输入，不提供 `--yes` 自动跳过。它允许原连接提交，但不会伪称已读取新连接的认证方式或指纹；状态和记录会标注“用户已手动确认”。生成或导入密钥时，需声明已用**新密钥**登录；删除密钥时，需声明已用保留密钥登录。生成操作提交会删除服务器临时私钥，确认前应已下载保存。
 
 切换为仅密钥登录时，第一次手动确认立即应用策略并继续保留回退 timer；切换后重新登录，再进行第二次确认才会最终提交。第二次也可以手动确认。超时、外部配置变化和备份保护与自动核验流程相同。混合使用手动和自动确认时，也会标明包含手动确认步骤。
+
+### 按列表选择操作（v0.1.2）
+
+第 9、10 项自动列出可以确认或延期的操作，显示操作类型、目标用户、创建时间、当前阶段与剩余时间。输入 `1`、`2` 等序号选择，输入 `0` 返回；只有一个选项时也可直接回车。无需抄写操作编号。没有可选操作时直接提示并返回，不再询问编号；已过期、已提交或回退失败的记录不会出现在确认列表。
+
+第 5 项恢复也按列表选择，记录按时间从新到旧排列，已经恢复的操作不再列出。内部编号仍用于关联备份、定时任务和命令行接口；从列表选择不会跳过配置冲突、时限或认证检查。
 
 ## 导入、删除和恢复
 

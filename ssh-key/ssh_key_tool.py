@@ -27,7 +27,7 @@ import urllib.request
 import uuid
 
 TOOL_ID = "vps-tools-sshkeytool"
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 PENDING = {"generating", "preparing", "await_key", "await_before", "await_after", "rollback_failed"}
 FINISHED = {"committed", "rolled_back"}
 MAX_INPUT = 1024 * 1024
@@ -1080,6 +1080,44 @@ def manual_confirm(manager, ident):
     return manager.confirm(ident, manual=True, acknowledgement=acknowledgement)
 
 
+def select_operation(manager, purpose):
+    actions = {"generate": "生成新密钥", "add": "添加公钥", "remove": "删除公钥", "switch": "切换仅密钥登录"}
+    phases = {"generating": "正在生成", "preparing": "正在准备", "await_key": "等待密钥登录确认",
+              "await_before": "等待切换前确认", "await_after": "等待切换后确认",
+              "committed": "已提交", "rollback_failed": "回退未完成"}
+    if purpose == "restore":
+        candidates = [s for s in manager.history() if s["phase"] != "rolled_back"]
+    else:
+        active = manager.active()
+        allowed = {"await_key", "await_before", "await_after"} if purpose == "confirm" else PENDING - {"rollback_failed"}
+        candidates = [active] if active and active["phase"] in allowed and manager.clock() < active["deadline"] else []
+    if not candidates:
+        print({"confirm": "当前没有可以确认的操作。", "extend": "当前没有可以延期的操作。",
+               "restore": "当前没有可以恢复的操作记录。"}[purpose])
+        if purpose != "restore" and active:
+            print("当前操作已过期或尚不能执行此动作；可在第 5 项查看可恢复操作。")
+        return None
+    print({"confirm": "请选择要确认的操作：", "extend": "请选择要延期的操作：",
+           "restore": "请选择要恢复的操作（按时间从新到旧）："}[purpose])
+    for index, state in enumerate(candidates, 1):
+        created = datetime.datetime.fromtimestamp(state["created"]).astimezone().strftime("%m-%d %H:%M:%S")
+        remaining = ("；剩余 %d 秒" % max(0, int(state["deadline"] - manager.clock()))
+                     if state["phase"] in PENDING else "")
+        print("%d. %s｜用户 %s｜%s｜%s%s" %
+              (index, actions.get(state["action"], state["action"]), state["user"], created,
+               phases.get(state["phase"], state["phase"]), remaining))
+    print("0. 返回")
+    while True:
+        choice = input("请选择操作序号%s：" % ("（回车选择 1）" if len(candidates) == 1 else "")).strip()
+        if choice == "0":
+            return None
+        if not choice and len(candidates) == 1:
+            choice = "1"
+        if choice.isascii() and choice.isdigit() and 1 <= int(choice) <= len(candidates):
+            return candidates[int(choice) - 1]["id"]
+        print("请输入列表中的序号，或输入 0 返回。")
+
+
 def menu(manager, user="root"):
     if not sys.stdin.isatty():
         raise ToolError("菜单需要交互终端；可使用 status --json 或命令模式。")
@@ -1129,8 +1167,8 @@ def menu(manager, user="root"):
                 if fingerprint and ask("删除该指纹并验证另一把保留密钥？"):
                     show_operation(manager.remove(user, fingerprint))
             elif choice == "5":
-                ident = input("需要恢复的操作编号：").strip()
-                if ask("恢复这个操作修改前的文件与认证策略？"):
+                ident = select_operation(manager, "restore")
+                if ident and ask("恢复这个操作修改前的文件与认证策略？"):
                     show_operation(manager.rollback(ident))
             elif choice == "6":
                 print(json.dumps(manager.history(), ensure_ascii=False, indent=2))
@@ -1147,16 +1185,18 @@ def menu(manager, user="root"):
                 if ask("生成新密钥并开始下载验证？原密钥保留"):
                     show_operation(manager.generate(user, kind, not encrypted, pem))
             elif choice in ("9", "10"):
-                active = manager.active()
-                default = active["id"] if active else ""
-                ident = input("操作编号%s：" % ("（回车使用 " + default + "）" if default else "")).strip() or default
                 if choice == "10":
-                    show_operation(manual_confirm(manager, ident))
+                    ident = select_operation(manager, "confirm")
+                    if ident:
+                        show_operation(manual_confirm(manager, ident))
                     continue
-                if input("1. 从新连接确认  2. 延期 5 分钟：").strip() == "2":
-                    show_operation(manager.extend(ident, 300))
-                else:
-                    show_operation(manager.confirm(ident))
+                action = input("1. 从新连接确认  2. 延期 5 分钟  0. 返回：").strip()
+                if action in ("1", "2"):
+                    ident = select_operation(manager, "extend" if action == "2" else "confirm")
+                    if ident:
+                        show_operation(manager.extend(ident, 300) if action == "2" else manager.confirm(ident))
+                elif action != "0":
+                    print("无效选项。")
             else:
                 print("无效选项。")
         except (ToolError, OSError, ValueError) as exc:

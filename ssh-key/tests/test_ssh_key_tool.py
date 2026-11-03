@@ -463,8 +463,74 @@ class SSHKeyTests(unittest.TestCase):
         command = tool.confirmation_command(state)
         self.assertEqual(command, "sudo --preserve-env=SSH_CONNECTION,SSH_USER_AUTH sshkeytool confirm " + state["id"])
 
+    def test_menu_without_pending_operation_returns_instead_of_asking_for_id(self):
+        for answers in (["10", "0"], ["9", "1", "0"]):
+            out = io.StringIO()
+            with mock.patch("sys.stdin.isatty", return_value=True), mock.patch("sys.stdout", out), \
+                    mock.patch("sys.stderr", out), mock.patch("builtins.input", side_effect=answers):
+                tool.menu(self.m)
+            self.assertIn("当前没有可以确认的操作", out.getvalue())
+            self.assertNotIn("操作未完成", out.getvalue())
+
 
 class CLITests(unittest.TestCase):
+    def operation(self, ident="a" * 32, **fields):
+        return dict({"id": ident, "action": "add", "user": "root", "created": 100,
+                     "deadline": 400, "phase": "await_key"}, **fields)
+
+    def selector(self, purpose, active=None, history=None, answers=()):
+        manager = mock.Mock()
+        manager.active.return_value = active
+        manager.history.return_value = history or []
+        manager.clock.return_value = 200
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output), mock.patch("builtins.input", side_effect=answers) as prompt:
+            result = tool.select_operation(manager, purpose)
+        return result, output.getvalue(), prompt.call_count
+
+    def test_no_pending_operation_returns_without_requesting_identifier(self):
+        for purpose in ("confirm", "extend", "restore"):
+            result, output, count = self.selector(purpose)
+            self.assertIsNone(result)
+            self.assertIn("当前没有", output)
+            self.assertEqual(count, 0)
+
+    def test_pending_operation_is_selected_by_number_or_enter(self):
+        state = self.operation()
+        for answer in ("1", ""):
+            result, output, _ = self.selector("confirm", active=state, answers=[answer])
+            self.assertEqual(result, state["id"])
+            self.assertIn("添加公钥", output)
+            self.assertIn("用户 root", output)
+            self.assertIn("剩余 200 秒", output)
+            self.assertNotIn(state["id"], output)
+
+    def test_expired_or_finished_operations_cannot_be_selected_for_confirmation(self):
+        for state in (self.operation(deadline=199), self.operation(phase="committed"),
+                      self.operation(phase="rollback_failed"), self.operation(phase="generating")):
+            result, _, count = self.selector("confirm", active=state)
+            self.assertIsNone(result)
+            self.assertEqual(count, 0)
+
+    def test_preparing_operation_can_only_be_selected_for_extension(self):
+        state = self.operation(phase="preparing")
+        result, _, _ = self.selector("extend", active=state, answers=["1"])
+        self.assertEqual(result, state["id"])
+
+    def test_restore_selection_maps_to_correct_record_and_excludes_rolled_back(self):
+        history = [self.operation("b" * 32, phase="committed", user="alice"),
+                   self.operation("c" * 32, phase="rolled_back"), self.operation("d" * 32)]
+        result, output, _ = self.selector("restore", history=history, answers=["2"])
+        self.assertEqual(result, "d" * 32)
+        self.assertIn("用户 alice", output)
+        self.assertNotIn("3.", output)
+
+    def test_invalid_selection_reprompts_without_accepting_raw_identifier(self):
+        result, output, count = self.selector("confirm", active=self.operation(), answers=["a" * 32, "9", "0"])
+        self.assertIsNone(result)
+        self.assertEqual(count, 3)
+        self.assertIn("请输入列表中的序号", output)
+
     def test_manual_confirmation_requires_interactive_input(self):
         with mock.patch("sys.stdin.isatty", return_value=False):
             with self.assertRaisesRegex(tool.ToolError, "交互终端"):
