@@ -1,6 +1,6 @@
 # SSH 密钥登录管理
 
-`sshkeytool` v0.1.0，提供中文菜单、公钥导入、自动生成公私钥、指定用户的仅密钥登录切换和独立定时回退。接入工具箱「系统管理 → SSH 密钥登录管理」，也可使用 `vpstools run sshkey`。
+`sshkeytool` v0.1.1，提供中文菜单、公钥导入、自动生成公私钥、指定用户的仅密钥登录切换和独立定时回退。接入工具箱「系统管理 → SSH 密钥登录管理」，也可使用 `vpstools run sshkey`。
 
 第一版的自动修改支持 **Debian/Ubuntu、OpenSSH、systemd**，默认管理 root。安装不会生成密钥或改变认证配置。需要 Python 3.8+、OpenSSH 的 `sshd` / `ssh-keygen`；无需第三方 Python 包。
 
@@ -18,12 +18,12 @@ vpstools run sshkey
 独立安装器将程序安装到 `/usr/local/sbin/sshkeytool`，拒绝覆盖同名的其他程序。也可下载固定版本的独立发布包：
 
 ```bash
-curl -fsSL https://github.com/allen0039/vps_tools/releases/download/sshkeytool-v0.1.0/sshkeytool-0.1.0.tar.gz -o sshkeytool-0.1.0.tar.gz
-tar -xzf sshkeytool-0.1.0.tar.gz
-sudo bash sshkeytool-0.1.0/install.sh
+curl -fsSL https://github.com/allen0039/vps_tools/releases/download/sshkeytool-v0.1.1/sshkeytool-0.1.1.tar.gz -o sshkeytool-0.1.1.tar.gz
+tar -xzf sshkeytool-0.1.1.tar.gz
+sudo bash sshkeytool-0.1.1/install.sh
 ```
 
-[发布页](https://github.com/allen0039/vps_tools/releases/tag/sshkeytool-v0.1.0) 提供 SHA256 校验文件；统一安装器可从 GitHub/Gitee 获取仓库中的当前版本。
+[发布页](https://github.com/allen0039/vps_tools/releases/tag/sshkeytool-v0.1.1) 提供 SHA256 校验文件；统一安装器可从 GitHub/Gitee 获取仓库中的当前版本。
 
 ```text
 1. 查看状态与判断依据
@@ -35,6 +35,7 @@ sudo bash sshkeytool-0.1.0/install.sh
 7. 切换目标用户
 8. 自动生成新密钥对
 9. 确认新连接 / 延期
+10. 手动确认已用密钥登录
 0. 返回
 ```
 
@@ -44,7 +45,7 @@ sudo bash sshkeytool-0.1.0/install.sh
 sudo --preserve-env=SSH_CONNECTION,SSH_USER_AUTH sshkeytool
 ```
 
-从工具箱菜单启动时会保留这些环境；命令模式请显式使用 sudo。root 可以省略 sudo。普通用户的确认必须从**该用户的新连接**执行 sudo。
+从工具箱菜单启动时会保留这些环境；命令模式请显式使用 sudo。root 可以省略 sudo。自动核验普通用户的连接时，必须从**该用户的新连接**执行 sudo；手动确认入口见下文。
 
 ## 为什么已有密钥不会显示“未设置”
 
@@ -125,7 +126,21 @@ ssh -S none -o PreferredAuthentications=publickey \
 
 端口、地址和用户名以实际值为准；主机指纹按现有 OpenSSH 信任配置检查，跳板可使用 SSH 别名或 `-J`。普通用户的远程命令改为 `sudo --preserve-env=SSH_CONNECTION,SSH_USER_AUTH sshkeytool confirm 操作编号`。
 
-FinalShell 可以下载私钥并创建**独立的私钥认证连接**，随后从新窗口确认；已有窗口仍在线不能代替新连接验证。工具会拒绝原连接、上一阶段复用连接、缺少认证凭据的连接和错误用户。当前配置已符合仅密钥策略时会如实显示；若继续选择切换，则仍执行两次验证并登记工具策略。
+FinalShell 可以下载私钥并创建**独立的私钥认证连接**，随后从新窗口确认；已有窗口仍在线不能代替新连接验证。自动核验方式会拒绝原连接、上一阶段复用连接、缺少认证凭据的连接和错误用户。当前配置已符合仅密钥策略时会如实显示；若继续选择切换，则仍执行两次验证并登记工具策略。
+
+### 更直接的确认入口（v0.1.1）
+
+有待确认操作时，菜单顶部会持续显示带当前操作编号的完整命令，例如 `sshkeytool confirm 具体操作编号`。在 FinalShell 刚用密钥登录的新窗口直接粘贴执行即可，不用再次进入菜单。普通用户的完整命令会自动带上 sudo 和需保留的认证环境。菜单第 9 项输入编号时，也可直接回车使用当前待处理操作。
+
+若已自行确认密钥能登录，也可以留在原窗口选择第 **10 项**，回车选中当前操作，再按提示输入对应的确认文字。独立命令也支持：
+
+```bash
+sshkeytool confirm 操作编号 --manual
+```
+
+手动确认要求交互输入，不提供 `--yes` 自动跳过。它允许原连接提交，但不会伪称已读取新连接的认证方式或指纹；状态和记录会标注“用户已手动确认”。生成或导入密钥时，需声明已用**新密钥**登录；删除密钥时，需声明已用保留密钥登录。生成操作提交会删除服务器临时私钥，确认前应已下载保存。
+
+切换为仅密钥登录时，第一次手动确认立即应用策略并继续保留回退 timer；切换后重新登录，再进行第二次确认才会最终提交。第二次也可以手动确认。超时、外部配置变化和备份保护与自动核验流程相同。混合使用手动和自动确认时，也会标明包含手动确认步骤。
 
 ## 导入、删除和恢复
 

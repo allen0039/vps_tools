@@ -27,7 +27,7 @@ import urllib.request
 import uuid
 
 TOOL_ID = "vps-tools-sshkeytool"
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 PENDING = {"generating", "preparing", "await_key", "await_before", "await_after", "rollback_failed"}
 FINISHED = {"committed", "rolled_back"}
 MAX_INPUT = 1024 * 1024
@@ -426,7 +426,9 @@ class Manager:
                     except (ToolError, OSError) as exc:
                         valid = False
                         issues.append(str(exc))
-                    verification = {"id": state["id"], "valid": valid, **proof}
+                    verification = {"id": state["id"], "valid": valid, **proof,
+                                    "has_manual_step": any(p.get("evidence") == "user attestation"
+                                                           for p in state["verified"])}
                     break
         return {"user": name, "effective": {k: settings.get(k, "未知") for k in AUTH_FIELDS},
                 "pubkey_allowed": settings.get("pubkeyauthentication") == "yes" and
@@ -762,7 +764,16 @@ class Manager:
         return {"connection": joined, "fingerprints": fingerprints, "time": self.clock(),
                 "evidence": "sshd ExposeAuthInfo"}
 
-    def confirm(self, ident):
+    def manual_confirmation_text(self, state):
+        if state["phase"] == "await_after":
+            return "我已在切换后使用密钥重新登录"
+        if state["action"] in ("generate", "add"):
+            return "我已使用新密钥登录"
+        if state["action"] == "remove":
+            return "我已使用保留密钥登录"
+        return "我已使用密钥登录"
+
+    def confirm(self, ident, manual=False, acknowledgement=None):
         with self.locked():
             state = self.load(ident)
             if state["phase"] not in ("await_key", "await_before", "await_after"):
@@ -777,7 +788,13 @@ class Manager:
             for record in state["changes"]:
                 if not same_snapshot(snapshot(Path(record["path"])), record["after"]):
                     raise ToolError("修改对象已被外部改变，不能确认。")
-            proof = self.auth_proof(state)
+            if manual:
+                if acknowledgement != self.manual_confirmation_text(state):
+                    raise ToolError("手动确认文字不匹配，未提交。")
+                proof = {"connection": " ".join(connection()), "fingerprints": [], "time": self.clock(),
+                         "evidence": "user attestation", "expected_fingerprints": state["expected_fingerprints"]}
+            else:
+                proof = self.auth_proof(state)
             state["verified"].append(proof)
             state["last_connection"] = proof["connection"]
             if state["phase"] == "await_before":
@@ -977,15 +994,41 @@ def show_status(info):
     print("键盘交互认证：" + ("允许" if info["keyboard_allowed"] else "已禁止"))
     print("当前磁盘策略：" + ("仅密钥" if info["key_only"] else "混合或自定义认证"))
     verified = info.get("verification")
-    print("新连接验证：" + ("尚未由本工具登记" if verified is None else
-          "已通过公钥验证（仅代表登记的来源和当时配置）" if verified["valid"] else
-          "配置或公钥已变化，需要重新验证"))
+    if verified is None:
+        verification_text = "尚未登记（登录后还需执行确认命令）"
+    elif not verified["valid"]:
+        verification_text = "配置或公钥已变化，需要重新验证"
+    elif verified.get("evidence") == "user attestation" or verified.get("has_manual_step"):
+        verification_text = "用户已手动确认可登录（未自动核验认证方式与指纹）"
+    else:
+        verification_text = "已通过公钥验证（仅代表登记的来源和当时配置）"
+    print("新连接验证：" + verification_text)
     print("适用连接：" + info["scope"])
     if info["active"]:
         a = info["active"]
         print("待处理：%s %s，剩余 %d 秒" % (a["id"], a["phase"], max(0, int(a["deadline"] - time.time()))))
     for issue in info["issues"]:
         print("需要检查：" + issue)
+
+
+def confirmation_command(state):
+    remote = "sshkeytool confirm " + state["id"]
+    if state["user"] != "root":
+        remote = "sudo --preserve-env=SSH_CONNECTION,SSH_USER_AUTH " + remote
+    return remote
+
+
+def show_confirmation_commands(state):
+    if state["phase"] not in ("await_key", "await_before", "await_after"):
+        return
+    print("【请复制到刚用密钥登录的新终端执行；不要在原窗口执行】")
+    print("目标用户：" + state["user"])
+    print(confirmation_command(state))
+    if state["phase"] == "await_after":
+        print("仅密钥策略已应用；请在切换后再建立一次连接确认。超时仍会回退。")
+    else:
+        print("手动登录不会自动登记；执行上面的命令后才会确认。")
+    print("也可在原窗口选择 10 手动确认；此方式仅记录你的声明，不核验登录指纹。")
 
 
 def show_operation(state):
@@ -996,10 +1039,10 @@ def show_operation(state):
         if state["action"] == "generate":
             print("下载私钥：/var/lib/sshkeytool/pending-keys/%s/identity" % state["id"])
             print("通过现有 SSH/SFTP 连接下载到电脑；私钥不会显示在终端或进入备份。")
+        show_confirmation_commands(state)
         conn = connection(state["origin"])
         target = state["user"] + "@" + conn[2]
-        remote = ("sshkeytool confirm " + state["id"] if state["user"] == "root" else
-                  "sudo --preserve-env=SSH_CONNECTION,SSH_USER_AUTH sshkeytool confirm " + state["id"])
+        remote = confirmation_command(state)
         args = ["ssh", "-S", "none", "-o", "PreferredAuthentications=publickey", "-o",
                 "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no", "-o", "IdentitiesOnly=yes",
                 "-i", "<电脑上的私钥路径>", "-p", conn[3], target, remote]
@@ -1007,7 +1050,9 @@ def show_operation(state):
         print(shlex.join(args))
         print("取消并恢复：sudo sshkeytool rollback " + state["id"])
     elif state["phase"] == "committed":
-        print("已通过新连接公钥验证并提交；临时私钥已清理，备份已保留。")
+        manual = any(p.get("evidence") == "user attestation" for p in state["verified"])
+        print(("已按用户手动确认提交；未自动核验全部登录步骤。" if manual else "已通过新连接公钥验证并提交。") +
+              "临时私钥已清理，备份已保留。")
     elif state["phase"] == "rolled_back":
         print("已恢复修改前配置。")
 
@@ -1016,16 +1061,38 @@ def ask(prompt):
     return input(prompt + " [y/N] ").strip().lower() == "y"
 
 
+def manual_confirm(manager, ident):
+    if not sys.stdin.isatty():
+        raise ToolError("手动确认需要交互终端；不能通过非交互参数跳过确认。")
+    state = manager.load(ident)
+    if state["phase"] not in ("await_key", "await_before", "await_after"):
+        raise ToolError("这个操作当前不能确认：" + state["phase"])
+    print("目标用户：%s；操作：%s；阶段：%s" % (state["user"], ident, state["phase"]))
+    print("此方式不检查新终端是否真的使用密钥登录，请先完成实际登录测试。")
+    if state["action"] == "generate":
+        print("提交后服务器临时私钥将被删除，请确认已下载并保存到电脑。")
+    if state["phase"] == "await_before":
+        print("本次确认将立即应用仅密钥策略；之后仍需重新登录并确认，超时回退。")
+    for fingerprint in state["expected_fingerprints"]:
+        print("待验证公钥指纹：" + fingerprint)
+    phrase = manager.manual_confirmation_text(state)
+    acknowledgement = input("确认无误请输入“%s”（其他输入取消）：" % phrase).strip()
+    return manager.confirm(ident, manual=True, acknowledgement=acknowledgement)
+
+
 def menu(manager, user="root"):
     if not sys.stdin.isatty():
         raise ToolError("菜单需要交互终端；可使用 status --json 或命令模式。")
     while True:
         try:
             print()
-            show_status(manager.status(user))
+            info = manager.status(user)
+            show_status(info)
+            if info["active"]:
+                show_confirmation_commands(manager.load(info["active"]["id"]))
             print("1. 查看状态与判断依据\n2. 添加公钥\n3. 切换为仅密钥登录\n4. 查看 / 删除公钥\n"
                   "5. 恢复修改前配置\n6. 备份与操作记录\n7. 切换目标用户\n8. 自动生成新密钥对\n"
-                  "9. 确认新连接 / 延期\n0. 返回")
+                  "9. 确认新连接 / 延期\n10. 手动确认已用密钥登录\n0. 返回")
             choice = input("请选择：").strip()
             if choice == "0":
                 return
@@ -1079,8 +1146,13 @@ def menu(manager, user="root"):
                 pem = kind == "rsa" and ask("使用传统 PEM 私钥格式？")
                 if ask("生成新密钥并开始下载验证？原密钥保留"):
                     show_operation(manager.generate(user, kind, not encrypted, pem))
-            elif choice == "9":
-                ident = input("操作编号：").strip()
+            elif choice in ("9", "10"):
+                active = manager.active()
+                default = active["id"] if active else ""
+                ident = input("操作编号%s：" % ("（回车使用 " + default + "）" if default else "")).strip() or default
+                if choice == "10":
+                    show_operation(manual_confirm(manager, ident))
+                    continue
                 if input("1. 从新连接确认  2. 延期 5 分钟：").strip() == "2":
                     show_operation(manager.extend(ident, 300))
                 else:
@@ -1125,6 +1197,8 @@ def parser():
     for command in ("confirm", "rollback", "extend", "_timeout"):
         c = sub.add_parser(command)
         c.add_argument("id")
+        if command == "confirm":
+            c.add_argument("--manual", action="store_true", help="交互式手动确认，不自动核验登录方式或指纹")
         if command == "extend":
             c.add_argument("--seconds", type=int, default=300)
     sub.add_parser("history")
@@ -1143,6 +1217,8 @@ def main(argv=None):
                 print(json.dumps(result, ensure_ascii=False, indent=2))
             else:
                 show_status(result)
+                if result["active"]:
+                    show_confirmation_commands(manager.load(result["active"]["id"]))
         elif args.command == "history":
             print(json.dumps(manager.history(), ensure_ascii=False, indent=2))
         else:
@@ -1178,7 +1254,7 @@ def main(argv=None):
                         return 0
                     result = manager.start(args.user, "add", data, args.timeout)
             elif args.command == "confirm":
-                result = manager.confirm(args.id)
+                result = manual_confirm(manager, args.id) if args.manual else manager.confirm(args.id)
             elif args.command == "extend":
                 result = manager.extend(args.id, args.seconds)
             else:

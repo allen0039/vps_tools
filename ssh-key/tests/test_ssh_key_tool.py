@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import datetime
 import json
 import os
@@ -389,7 +390,88 @@ class SSHKeyTests(unittest.TestCase):
         self.assertEqual(self.m.load(state["id"])["phase"], "committed")
 
 
+    def test_manual_generated_key_commit_cleans_private_and_marks_attestation(self):
+        state = self.m.generate("root", no_passphrase=True)
+        private = self.m.pending_keys / state["id"] / "identity"
+        self.assertTrue(private.exists())
+        with self.assertRaisesRegex(tool.ToolError, "文字不匹配"):
+            self.m.confirm(state["id"], manual=True, acknowledgement="y")
+        committed = self.m.confirm(state["id"], manual=True, acknowledgement="我已使用新密钥登录")
+        self.assertEqual(committed["phase"], "committed")
+        self.assertFalse(private.exists())
+        self.assertEqual(committed["verified"][0]["fingerprints"], [])
+        self.assertEqual(committed["verified"][0]["evidence"], "user attestation")
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            tool.show_status(self.m.status("root"))
+            tool.show_operation(committed)
+        self.assertIn("未自动核验", out.getvalue())
+        self.assertNotIn("已通过新连接公钥验证", out.getvalue())
+
+    def test_manual_switch_still_requires_post_policy_confirmation_or_rolls_back(self):
+        state = self.m.start("root")
+        first = self.m.confirm(state["id"], manual=True, acknowledgement="我已使用密钥登录")
+        self.assertEqual(first["phase"], "await_after")
+        self.assertIsNotNone(self.m.active())
+        with self.assertRaisesRegex(tool.ToolError, "文字不匹配"):
+            self.m.confirm(state["id"], manual=True, acknowledgement="我已使用密钥登录")
+        self.now = first["deadline"] + 1
+        with self.assertRaisesRegex(tool.ToolError, "超时"):
+            self.m.confirm(state["id"], manual=True, acknowledgement="我已在切换后使用密钥重新登录")
+        self.assertEqual(self.m.config.read_bytes(), self.original)
+
+    def test_manual_switch_commits_after_second_acknowledgement(self):
+        state = self.m.start("root")
+        self.m.confirm(state["id"], manual=True, acknowledgement="我已使用密钥登录")
+        result = self.m.confirm(state["id"], manual=True, acknowledgement="我已在切换后使用密钥重新登录")
+        self.assertEqual(result["phase"], "committed")
+        self.assertTrue(self.m.status("root")["key_only"])
+        self.assertIsNone(self.m.active())
+
+    def test_mixed_confirmations_keep_manual_classification(self):
+        state = self.m.start("root")
+        self.m.confirm(state["id"], manual=True, acknowledgement="我已使用密钥登录")
+        self.new_proof()
+        self.m.confirm(state["id"])
+        info = self.m.status("root")
+        self.assertTrue(info["verification"]["has_manual_step"])
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            tool.show_status(info)
+        self.assertIn("用户已手动确认", out.getvalue())
+
+    def test_manual_confirmation_does_not_bypass_external_change_checks(self):
+        state = self.m.start("root")
+        self.m.config.write_bytes(self.m.config.read_bytes() + b"# another editor\n")
+        with self.assertRaisesRegex(tool.ToolError, "SSH 配置已经变化"):
+            self.m.confirm(state["id"], manual=True, acknowledgement="我已使用密钥登录")
+        self.assertEqual(self.m.load(state["id"])["phase"], "await_before")
+
+    def test_menu_shows_copyable_command_and_manual_option_uses_pending_id(self):
+        state = self.m.start("root", "add", self.material[1])
+        out = io.StringIO()
+        with mock.patch("sys.stdin.isatty", return_value=True), mock.patch("sys.stdout", out), \
+                mock.patch("builtins.input", side_effect=["10", "", "我已使用新密钥登录", "0"]):
+            tool.menu(self.m)
+        self.assertIn("sshkeytool confirm " + state["id"], out.getvalue())
+        self.assertIn("10. 手动确认已用密钥登录", out.getvalue())
+        self.assertEqual(self.m.load(state["id"])["phase"], "committed")
+
+    def test_confirmation_command_retains_sudo_auth_environment(self):
+        state = self.m.start("root")
+        state["user"] = "alice"
+        command = tool.confirmation_command(state)
+        self.assertEqual(command, "sudo --preserve-env=SSH_CONNECTION,SSH_USER_AUTH sshkeytool confirm " + state["id"])
+
+
 class CLITests(unittest.TestCase):
+    def test_manual_confirmation_requires_interactive_input(self):
+        with mock.patch("sys.stdin.isatty", return_value=False):
+            with self.assertRaisesRegex(tool.ToolError, "交互终端"):
+                tool.manual_confirm(mock.Mock(), "a" * 32)
+        args = tool.parser().parse_args(["confirm", "a" * 32, "--manual"])
+        self.assertTrue(args.manual)
+
     def test_noninteractive_menu_fails_without_modification(self):
         p = subprocess.run(["python3", str(SOURCE)], stdin=subprocess.DEVNULL, capture_output=True, text=True)
         self.assertNotEqual(p.returncode, 0)
