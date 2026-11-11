@@ -697,15 +697,15 @@ class Manager:
             try:
                 if len(parts) != 3:
                     raise ValueError("invalid precedence")
-                prefix = str(ipaddress.IPv6Network(parts[1], strict=False))
+                prefix = ipaddress.IPv6Network(parts[1], strict=False)
                 value = int(parts[2])
                 if value < 0 or prefix in values:
                     raise ValueError("invalid precedence")
             except ValueError:
                 return "自定义策略（无法判断统一优先级）"
             values[prefix] = value
-        ipv4 = values.get("::ffff:0:0/96", 0)
-        ipv6 = values.get("::/0", 0)
+        ipv4 = values.get(ipaddress.IPv6Network("::ffff:0:0/96"), 0)
+        ipv6 = values.get(ipaddress.IPv6Network("::/0"), 0)
         if ipv4 > ipv6:
             return "IPv4 优先（gai.conf 自定义策略）"
         if ipv6 > ipv4:

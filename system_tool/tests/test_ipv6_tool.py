@@ -548,6 +548,19 @@ class ManagerTests(unittest.TestCase):
         self.manager.gai.write_text("# changed by another program\n")
         self.assertIn("实际优先级待确认", self.manager.priority_description())
 
+    def test_priority_description_accepts_equivalent_mapped_prefixes(self):
+        for prefix in ("::ffff:0:0/96", "::ffff:0.0.0.0/96"):
+            with self.subTest(prefix=prefix):
+                self.manager.gai.write_text("precedence %s 100\nprecedence ::/0 40\n" % prefix)
+                self.assertEqual(self.manager.priority_description(),
+                                 "IPv4 优先（gai.conf 自定义策略）")
+
+    def test_priority_description_rejects_duplicate_mapped_prefixes(self):
+        self.manager.gai.write_text("precedence ::ffff:0:0/96 100\n"
+                                    "precedence ::ffff:0.0.0.0/96 10\n")
+        self.assertEqual(self.manager.priority_description(),
+                         "自定义策略（无法判断统一优先级）")
+
     def test_priority_color_only_in_interactive_terminal(self):
         output = io.StringIO()
         output.isatty = lambda: True
