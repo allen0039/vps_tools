@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # VPS Tools 的统一入口；具体操作交给独立工具。
 set -Eeuo pipefail
-VERSION=0.3.1
+VERSION=0.3.2
 BIN_DIR=${VPS_TOOLS_BIN_DIR:-/usr/local/bin}
 SBIN_DIR=${VPS_TOOLS_SBIN_DIR:-/usr/local/sbin}
 LIB_DIR=${VPS_TOOLS_LIB_DIR:-/usr/local/lib/vpstools}
@@ -124,7 +124,7 @@ category_menu() {
             menu_item "$((index + 1))" "${ids[index]}" "${labels[index]}"
         done
         printf '\n    0. 返回主菜单\n'
-        read -r -p '请选择：' choice || return 1
+        read -e -r -p '请选择：' choice || return 1
         [[ $choice != 0 ]] || return 0
         # 先校验字符，再转十进制，避免把输入当作 Bash 算术表达式。
         if [[ ! $choice =~ ^[1-9][0-9]?$ ]]; then
@@ -143,7 +143,7 @@ category_menu() {
             continue
         fi
         if [[ $id == agent ]]; then
-            read -r -p '重启会短暂中断代理连接，确认继续？[y/N] ' choice || return 1
+            read -e -r -p '重启会短暂中断代理连接，确认继续？[y/N] ' choice || return 1
             [[ $choice == y || $choice == Y ]] || continue
         fi
         run_tool "$id" || printf '%s已取消、有项目未通过或执行失败，请查看上方输出。\n' "$label"
@@ -156,7 +156,7 @@ menu() {
     while :; do
         printf '\nVPS Tools 工具箱 v%s\n\n' "$VERSION"
         printf '%s\n' '  1. 系统管理' '  2. 网络检测与测速' '  3. 网络调优' '  4. 服务管理' '' '  5. 查看工具安装状态' '  6. 安装 / 更新工具箱' '  0. 退出'
-        read -r -p '请选择：' choice || return 0
+        read -e -r -p '请选择：' choice || return 0
         case $choice in
             1) category_menu system || return 0 ;;
             2) category_menu network || return 0 ;;
@@ -165,7 +165,7 @@ menu() {
             5) list_tools ;;
             # 更新始终放在所有其他功能下方、退出上方。
             6)
-                read -r -p '下载渠道：1. GitHub（默认）  2. Gitee：' channel || return 0
+                read -e -r -p '下载渠道：1. GitHub（默认）  2. Gitee：' channel || return 0
                 case $channel in
                     1|'') channel=github ;;
                     2) channel=gitee ;;

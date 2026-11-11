@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
-ALLENTOOL_VERSION=0.1.16
+ALLENTOOL_VERSION=0.1.17
 INSTALL_ASSUME_YES=no
 INSTALL_PATH=${SAFE_SSH_PORT_INSTALL_PATH:-/usr/local/sbin/safe-ssh-port}
 ALLENTOOL_PATH=${ALLENTOOL_PATH:-/usr/local/bin/allentool}
@@ -122,8 +122,8 @@ usage() {
 入站保护、IP/国家黑白名单和 iptables/ipset 持久化。防火墙修改直接生效，
 不创建快照备份。国家规则同时使用经完整校验的 IPv4 和 IPv6 HTTPS 数据。
 原生自定义 nftables 仅显示状态。
-interactive 会检测主配置中的 PasswordAuthentication no，并询问是否改为 yes；
-需要密码登录时直接回车采用推荐的 yes，输入 n 则保持原认证配置。
+交互模式会显示密码登录是否开启；关闭时会询问是否开启。
+使用密钥登录时选择“否”（默认），需要密码登录时选择“是”。
 脚本不会删除 /etc/ssh/sshd_config.d 中的云厂商配置。
 Debian/Ubuntu 缺少持久化工具时会自动安装 iptables-persistent 并保存规则。
 安装或保存失败不会中断端口切换，但会明确警告重启后规则可能失效。
@@ -248,22 +248,35 @@ main_password_setting() {
     ' "$SSHD_CONFIG"
 }
 
+password_setting_label() {
+    case ${1:-} in
+        yes) printf '已开启' ;;
+        no) printf '已关闭（不影响密钥登录）' ;;
+        '') printf '%s' "${2:-未知}" ;;
+        *) printf '未知' ;;
+    esac
+}
+
 prompt_yes_no() {
     local prompt=$1 default=${2:-no} answer suffix
     [[ $default == yes || $default == no ]] || die "无效的默认选项：$default"
-    if [[ $default == yes ]]; then suffix='[Y/n]'; else suffix='[y/N]'; fi
+    if [[ $default == yes ]]; then
+        suffix='[是/否，默认：是；输入 y/n 或 是/否]'
+    else
+        suffix='[是/否，默认：否；输入 y/n 或 是/否]'
+    fi
     while true; do
         printf '%s %s: ' "$prompt" "$suffix"
         if ! IFS= read -r answer; then
             return 1
         fi
         case $answer in
-            y|Y) return 0 ;;
-            n|N) return 1 ;;
+            y|Y|是) return 0 ;;
+            n|N|否) return 1 ;;
             '')
                 if [[ $default == yes ]]; then return 0; else return 1; fi
                 ;;
-            *) printf '请输入 y、n，或直接按回车使用默认选项。\n' ;;
+            *) printf '请输入“是”或“否”（也支持 y/n），或直接按回车使用默认选项。\n' ;;
         esac
     done
 }
@@ -1228,8 +1241,46 @@ occupied_port_records() {
     '
 }
 
+# Read nftables NAT/redirect rules as a separate kind of port usage.  These
+# ports do not have a listening process, so they must not be mixed into ss
+# listener output.
+nft_forward_records() {
+    local nft_command=${NFT_BIN:-nft}
+    command -v "$nft_command" >/dev/null 2>&1 || return 0
+    "$nft_command" -a list ruleset 2>/dev/null | awk '
+        {
+            protocol=""
+            if ($0 ~ /(^|[[:space:]])tcp([[:space:]]|$)/) protocol="tcp"
+            else if ($0 ~ /(^|[[:space:]])udp([[:space:]]|$)/) protocol="udp"
+            if (protocol == "") next
+            if ($0 !~ /(^|[[:space:]])(dnat|redirect)([[:space:]]|$)/) next
+            if ($0 !~ /(^|[[:space:]])dport[[:space:]]+[0-9]+([[:space:]]|$)/ &&
+                $0 !~ /(^|[[:space:]])redirect([[:space:]]|$)/) next
+            port=""
+            if (match($0, /dport[[:space:]]+[0-9]+/)) {
+                token=substr($0, RSTART, RLENGTH)
+                sub(/^dport[[:space:]]+/, "", token)
+                port=token
+            } else if (match($0, /redirect([[:space:]]+to)?[[:space:]]*:?[0-9]+/)) {
+                token=substr($0, RSTART, RLENGTH)
+                sub(/^redirect([[:space:]]+to)?[[:space:]]*:?[[:space:]]*/, "", token)
+                port=token
+            }
+            if (port !~ /^[0-9]+$/) next
+            port += 0
+            if (port < 1 || port > 65535) next
+            target=""
+            if (match($0, /(dnat|redirect)[[:space:]]+to[[:space:]]+[^[:space:];]+/)) {
+                target=substr($0, RSTART, RLENGTH)
+                sub(/^(dnat|redirect)[[:space:]]+to[[:space:]]+/, "", target)
+            } else if ($0 ~ /(^|[[:space:]])redirect([[:space:]]|$)/) target="本机重定向"
+            printf "%d\t%s\t%s\n", port, protocol, target
+        }
+    ' | sort -t $'\t' -k1,1n -k2,2 -k3,3 -u
+}
+
 show_occupied_ports() {
-    local tcp_snapshot udp_snapshot protocol snapshot records address_label
+    local tcp_snapshot udp_snapshot protocol snapshot records address_label forward_records
     printf '\n当前端口使用情况（含本机回环地址）\n'
     printf '%s\n' '----------------------------------------'
     if ! tcp_snapshot=$("$SS_BIN" -H -ltnp 2>/dev/null) ||
@@ -1267,8 +1318,18 @@ show_occupied_ports() {
             printf "  %-9s %-30s %s\n", $1 "/" $2, $3, $4
         }'
     done
+    forward_records=$(nft_forward_records || true)
+    printf '\nnftables 转发端口（无本机监听进程）\n'
+    if [[ -z $forward_records ]]; then
+        printf '  （未发现 DNAT/redirect 转发规则）\n'
+    else
+        printf '  %-9s %-24s %s\n' '入口端口' '协议' '目标'
+        printf '%s\n' "$forward_records" | awk -F '\t' '{
+            printf "  %-9s %-24s %s\n", $1, $2, ($3 == "" ? "（目标未显示）" : $3)
+        }'
+    fi
     printf '\n同号 TCP 和 UDP 可以独立使用；UDP 绑定不会阻止同号 TCP 监听。\n'
-    printf '以上为当前套接字状态，与防火墙是否放行无关；“未知”表示 ss 未提供进程信息。\n'
+    printf '以上同时包含当前套接字和 nftables 转发规则；“未知”表示 ss 未提供进程信息。\n'
 }
 
 iptables_rule_records_for_command() {
@@ -2911,7 +2972,7 @@ switch_port() {
 
     comment_active_ports
     if [[ $enable_main_password == yes ]]; then
-        set_main_password_yes || rollback_after_failure '无法把主配置 PasswordAuthentication 改为 yes'
+        set_main_password_yes || rollback_after_failure '无法在主配置中开启密码登录'
     fi
     write_main_port "$new_port" || rollback_after_failure '无法把新端口写入 SSH 主配置'
 
@@ -2923,7 +2984,7 @@ switch_port() {
         [[ $(auth_fingerprint_without_password) == "$auth_without_password_before" ]] ||
             rollback_after_failure '除密码登录外的认证配置发生意外变化'
         [[ $(effective_password_setting) == yes ]] ||
-            rollback_after_failure 'PasswordAuthentication 未实际生效为 yes'
+            rollback_after_failure '密码登录未实际开启'
     else
         [[ $auth_after == "$auth_before" ]] || rollback_after_failure '认证配置发生意外变化'
     fi
@@ -2986,16 +3047,17 @@ interactive_mode() {
     main_setting=$(main_password_setting)
     effective_setting=$(effective_password_setting)
 
-    printf '主配置 PasswordAuthentication: %s\n' "${main_setting:-未显式设置}"
-    printf '当前实际生效 PasswordAuthentication: %s\n' "${effective_setting:-未知}"
+    printf '主配置中的密码登录：%s\n' "$(password_setting_label "$main_setting" '未明确设置')"
+    printf '当前实际生效的密码登录：%s\n' "$(password_setting_label "$effective_setting")"
     if [[ $main_setting == no ]]; then
-        if prompt_yes_no '检测到主配置为 PasswordAuthentication no，是否改为 yes（需要密码登录时推荐）？' yes; then
+        if prompt_yes_no '是否开启密码登录？使用密钥登录请选择“否”，需要密码登录请选择“是”。' no; then
             enable_main_password=yes
         else
-            warn '选择了 n；主配置将保持 no。端口迁移不会删除 cloud-init 配置。'
+            log '已选择“否”，保持主配置中的密码登录关闭，不影响密钥登录。'
+            log '修改端口时会保留云厂商初始化配置。'
         fi
     else
-        log '主配置不是 PasswordAuthentication no，无需修改。'
+        log '主配置未明确关闭密码登录，保持当前认证设置。'
     fi
 
     current_ports=()

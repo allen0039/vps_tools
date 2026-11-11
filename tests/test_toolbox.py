@@ -4,6 +4,7 @@ import pty
 import select
 import subprocess
 import tempfile
+import termios
 import time
 import unittest
 
@@ -136,24 +137,46 @@ class ToolboxTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "INSTALL_ARGS <--channel>\nINSTALL_ARGS <gitee>\n")
 
-    def run_menu(self, choices):
+    def run_menu(self, choices, terminal_erase=None):
         self.mock("sudo", 'while [[ ${1:-} == --* ]]; do shift; done; exec "$@"')
         self.env["PATH"] = str(self.base) + os.pathsep + os.environ["PATH"]
         master, slave = pty.openpty()
+        if terminal_erase is not None:
+            attributes = termios.tcgetattr(slave)
+            attributes[6][termios.VERASE] = terminal_erase
+            termios.tcsetattr(slave, termios.TCSANOW, attributes)
         proc = subprocess.Popen(["bash", str(ROOT / "vpstools.sh")], env=self.env,
                                 stdin=slave, stdout=slave, stderr=slave)
         os.close(slave)
         output = b""
         try:
-            os.write(master, choices.encode())
+            if isinstance(choices, str):
+                os.write(master, choices.encode())
+            else:
+                offset = 0
+                for prompt, reply in choices:
+                    expected = prompt.encode()
+                    deadline = time.monotonic() + 8
+                    while expected not in output[offset:]:
+                        self.assertLess(time.monotonic(), deadline, output.decode())
+                        ready, _, _ = select.select([master], [], [], 0.1)
+                        if ready:
+                            chunk = os.read(master, 65536)
+                            self.assertTrue(chunk, output.decode())
+                            output += chunk
+                    offset = output.index(expected, offset) + len(expected)
+                    os.write(master, reply.encode())
             deadline = time.monotonic() + 8
             while time.monotonic() < deadline:
                 ready, _, _ = select.select([master], [], [], 0.1)
                 if ready:
                     try:
-                        output += os.read(master, 65536)
+                        chunk = os.read(master, 65536)
                     except OSError:
                         break
+                    if not chunk:
+                        break
+                    output += chunk
                 elif proc.poll() is not None:
                     break
             proc.wait(timeout=2)
@@ -165,6 +188,47 @@ class ToolboxTests(unittest.TestCase):
         text = output.decode()
         self.assertEqual(proc.returncode, 0, text)
         return text
+
+    def test_homepage_accepts_both_backspace_codes_with_mismatched_terminal(self):
+        for erase, key in ((b"\x7f", "\x08"), (b"\x08", "\x7f")):
+            with self.subTest(erase=erase):
+                text = self.run_menu([("请选择：", "9" + key + "0\n")],
+                                     terminal_erase=erase)
+                self.assertNotIn("无效选项", text)
+                self.assertNotIn("^H", text)
+                self.assertEqual(text.count("VPS Tools 工具箱"), 1)
+
+    def test_category_accepts_backspace_and_dispatches_corrected_choice(self):
+        self.mock("netcheck", "echo EDITED_NETWORK_CHILD")
+        text = self.run_menu([
+            ("请选择：", "2\n"),
+            ("请选择：", "9\x081\n"),
+            ("请选择：", "0\n"),
+            ("请选择：", "0\n"),
+        ], terminal_erase=b"\x7f")
+        self.assertIn("EDITED_NETWORK_CHILD", text)
+        self.assertNotIn("无效选项", text)
+
+    def test_restart_confirmation_accepts_backspace(self):
+        self.mock("restart-mmw-agent", "echo EDITED_AGENT_CHILD")
+        text = self.run_menu([
+            ("请选择：", "4\n"),
+            ("请选择：", "1\n"),
+            ("[y/N] ", "n\x08y\n"),
+            ("请选择：", "0\n"),
+            ("请选择：", "0\n"),
+        ], terminal_erase=b"\x7f")
+        self.assertEqual(text.count("EDITED_AGENT_CHILD"), 1)
+
+    def test_update_channel_accepts_backspace(self):
+        self.mock("install.sh", 'printf "CHANNEL %s\\n" "$*"')
+        self.mock("vpstools", 'printf "REOPENED %s\\n" "$*"')
+        text = self.run_menu([
+            ("请选择：", "6\n"),
+            ("Gitee：", "1\x082\n"),
+        ], terminal_erase=b"\x7f")
+        self.assertIn("CHANNEL --channel gitee", text)
+        self.assertIn("REOPENED menu", text)
 
     def test_homepage_has_categories_and_fixed_maintenance_entries(self):
         text = self.run_menu("0\n")

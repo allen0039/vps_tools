@@ -115,6 +115,36 @@ EOF
         self.assertIn("未发现 TCP 监听端口", result.stdout)
         self.assertIn("49152/udp", result.stdout)
 
+    def test_nftables_forward_rules_are_displayed_separately(self):
+        result = self.run_bash(textwrap.dedent("""
+            SS_BIN=mock_ss
+            NFT_BIN=mock_nft
+            mock_ss() { return 0; }
+            mock_nft() {
+                cat <<'EOF'
+table ip nat {
+ chain prerouting { type nat hook prerouting priority dstnat; policy accept;
+  tcp dport 53636 dnat to 192.0.2.10:3389
+  udp dport 53535 dnat to 192.0.2.11:5353
+  tcp dport 443 accept
+  udp dport 123 drop
+  tcp dport 8080 redirect to :80
+ }
+}
+EOF
+            }
+            show_occupied_ports
+        """))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("nftables 转发端口（无本机监听进程）", result.stdout)
+        self.assertIn("53636", result.stdout)
+        self.assertIn("53535", result.stdout)
+        self.assertIn("192.0.2.10:3389", result.stdout)
+        self.assertNotIn("53636/tcp", result.stdout)
+        self.assertNotIn("443", result.stdout)
+        self.assertNotIn("123", result.stdout)
+        self.assertIn("8080", result.stdout)
+
     def test_results_stay_visible_until_enter_then_menu_returns(self):
         body = textwrap.dedent("""
             SS_BIN=mock_ss
