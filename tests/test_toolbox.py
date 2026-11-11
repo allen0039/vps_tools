@@ -277,7 +277,10 @@ class ToolboxTests(unittest.TestCase):
         self.assertEqual(text.count("VPS Tools 工具箱"), 2)
 
     def test_eof_in_category_exits_without_reopening_homepage(self):
-        text = self.run_menu("1\n\x04")
+        text = self.run_menu([
+            ("请选择：", "1\n"),
+            ("请选择：", "\x04"),
+        ])
         self.assertEqual(text.count("VPS Tools 工具箱"), 1)
         self.assertEqual(text.count("VPS Tools > 系统管理"), 1)
 
