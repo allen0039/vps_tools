@@ -553,6 +553,8 @@ def uninstall_tool(
     lock_timeout: float = 15.0,
 ) -> Dict[str, Any]:
     """Coordinated, ownership-verified uninstall touching ONLY leikwan_tools owned resources."""
+    from .routing import uninstall_routing
+
     manifest = load_install_manifest(manifest_path)
 
     if manifest is not None:
@@ -641,6 +643,8 @@ def uninstall_tool(
                 except OwnershipError as exc:
                     skipped_items.append(f"跳过越界或符号链接文件 {p}: {exc}")
             removed_rules.append(rname)
+
+        removed_files.extend(uninstall_routing(str(st_dir)))
 
         # Remove owned state metadata files item-by-item (NEVER rm -rf st_dir).
         reg_p = registry_path_for_state_dir(str(st_dir))

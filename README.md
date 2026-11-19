@@ -1,6 +1,6 @@
 # VPS Tools
 
-面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、Fail2ban、DNS、Swap、TCP / BBR 调优、妙妙屋 Agent 重启、网址检测、iperf3 测速、TCP 参数导入和“Ipv4和ipv6管理”整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
+面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、Fail2ban、DNS、Swap、TCP / BBR 调优、妙妙屋 Agent 重启、利群助手、网址检测、iperf3 测速、TCP 参数导入和“Ipv4/ipv6管理工具”整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
 
 [GitHub 仓库](https://github.com/allen0039/vps_tools) · [Gitee 镜像](https://gitee.com/allen0039/vps_tools)
 
@@ -18,12 +18,13 @@
 | TCP / BBR 调优 | 测试 TCP 参数、管理出口队列、应用历史参数与回滚 | `bbrtcp` / `bbr-tune` | [BBR 使用指南](bbr-tune/README.md) |
 | SOCKS5 / TLS 代理 | 部署认证代理、TLS 隧道，管理凭据、端口与服务 | `socks5`（代理部署后） | [SOCKS5 使用指南](socks5/README.md) |
 | 妙妙屋 Agent 重启 | 重启并验证 `mmw-agent.service`，展示 PID、内存与 TCP 连接变化 | `restart-mmw-agent` | [Agent 使用指南](restart-mmw-agent/README.md) |
+| 利群助手 | 基于 Realm 的 IPv4 TCP 转发部署、规则管理与连通性诊断 | `leikwan_tools` | [利群助手指南](leikwan_tools/README.md) |
 | 网址与网络检测 | 解析域名 IP，检测 Ping 延迟、丢包、TCP 端口和 HTTP / HTTPS | `netcheck` | [检测使用指南](web_tool/README.md) |
 | iperf3 测速 | 本地与 VPS 双向测速，1 / 4 / 8 连接、随机端口与自动清理 | `iperfprobe` | [测速使用指南](iperf3_tool/README.md) |
 | TCP 参数导入 | 粘贴或导入 sysctl 参数，预检查、备份、应用与回滚 | `tcptool` | [TCP 使用指南](tcp-tool/README.md) |
-| Ipv4和ipv6管理 | 设置 IPv4/IPv6 优先级、临时禁用或备份后彻底关闭 IPv6、恢复配置 | `ipv6tool` | [使用指南](system_tool/README.md) |
+| Ipv4/ipv6管理工具 | 设置 IPv4/IPv6 优先级、临时禁用或备份后彻底关闭 IPv6、恢复配置 | `ipv6tool` | [使用指南](system_tool/README.md) |
 
-“Ipv4和ipv6管理”已接入统一安装器和菜单；安装仅部署程序，网络与引导配置在子工具中按需修改。
+“Ipv4/ipv6管理工具”已接入统一安装器和菜单；安装仅部署程序，网络与引导配置在子工具中按需修改。
 
 ## 快速安装
 
@@ -51,7 +52,7 @@ vpstools
 
 只需 SSH 的 Fail2ban 防护时，可以使用 [Fail2ban 一键部署脚本](Fail2ban/README.md#一键部署)，安装并配置 Fail2ban 与配套防火墙工具，无需安装整个工具箱。
 
-统一安装会部署全部 13 个独立工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或认证方式、生成密钥、切换 DNS、创建 Swap、应用 TCP 调优参数、重启 Agent、修改 IPv6 / GRUB 配置或创建 SOCKS5 服务。BBR 安装器可能通过系统包管理器补齐基础依赖；iperf3 测速启动时会自动检测并安装缺失的 iperf3，Debian/Ubuntu 会选择不启动常驻服务。Fail2ban 系统包和防护规则在子菜单中按需安装与启用。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
+统一安装会部署全部独立工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或认证方式、生成密钥、切换 DNS、创建 Swap、应用 TCP 调优参数、重启 Agent、修改 IPv6 / GRUB 配置或创建 SOCKS5 服务，也不会启用利群助手的示例转发规则。利群助手安装会保留已有 Realm，并在未找到 Realm 时跳过自动下载，后续可按其文档单独执行 `leikwan_tools install-realm`。BBR 安装器可能通过系统包管理器补齐基础依赖；iperf3 测速启动时会自动检测并安装缺失的 iperf3，Debian/Ubuntu 会选择不启动常驻服务。Fail2ban 系统包和防护规则在子菜单中按需安装与启用。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
 
 也可以克隆仓库后安装本地文件：
 
@@ -92,7 +93,7 @@ VPS Tools > 系统管理
 
   网络基础配置
     6. DNS 设置与恢复
-    7. IPv4 / IPv6 管理
+    7. Ipv4/ipv6管理工具
 
   系统资源
     8. Swap 管理
@@ -102,11 +103,11 @@ VPS Tools > 系统管理
 
 其他分类的入口：
 
-| 分类 | 第 1 项 | 第 2 项 |
-| --- | --- | --- |
-| 网络检测与测速 | 网址与网络检测 | iperf3 带宽测速 |
-| 网络调优 | TCP / BBR 调优 | TCP 参数导入与回滚 |
-| 服务管理 | 妙妙屋 Agent 重启 | SOCKS5 / TLS 代理管理 |
+| 分类 | 第 1 项 | 第 2 项 | 第 3 项 |
+| --- | --- | --- | --- |
+| 网络检测与测速 | 网址与网络检测 | iperf3 带宽测速 | — |
+| 网络调优 | TCP / BBR 调优 | TCP 参数导入与回滚 | — |
+| 服务管理 | 妙妙屋 Agent 重启 | SOCKS5 / TLS 代理管理 | 利群助手 |
 
 退出子工具后回到所属分类，分类页选择 `0` 返回主菜单，首页选择 `0` 退出。分类页展示当前位置；未安装的工具标注 `[未安装]`，选择后提示返回首页安装，不自动启动安装。Agent 重启仍需单独确认，直接回车默认取消。其他系统修改遵循各工具自己的权限检查、备份及确认流程。
 
@@ -164,6 +165,10 @@ vpstools run bbr status
 vpstools run socks5
 sudo vpstools run socks5 status
 
+# 利群助手（统一安装会部署程序，但不启用示例转发规则）
+sudo vpstools run leikwan
+sudo vpstools run leikwan_tools status
+
 # 查看 Agent 帮助，不执行重启
 vpstools run agent --help
 
@@ -175,7 +180,7 @@ vpstools run netcheck dns example.com --json
 vpstools run iperf --host 203.0.113.10 --streams 1,4,8 --direction both
 ```
 
-`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`sshkey`、`sshpass`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`、`iperf`、`fail2ban`、`ipv6`、`tcp`（别名 `tcptool`）、`socks5`。直接执行 `vpstools run agent` 会重启服务；服务管理菜单中的额外确认只适用于菜单操作。
+`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`sshkey`、`sshpass`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`、`iperf`、`fail2ban`、`ipv6`、`tcp`（别名 `tcptool`）、`socks5`、`leikwan`（别名 `leikwan_tools`）。直接执行 `vpstools run agent` 会重启服务；服务管理菜单中的额外确认只适用于菜单操作。
 
 也可使用独立命令，例如：
 
@@ -251,7 +256,8 @@ vps_tools/
 ├── web_tool/             # SSH 终端网址与网络检测
 ├── iperf3_tool/          # 本地与 VPS 的逐轮 iperf3 测速
 ├── tcp-tool/             # TCP 参数导入与回滚
-├── system_tool/          # Ipv4和ipv6管理
+├── system_tool/          # Ipv4/ipv6管理工具
+├── leikwan_tools/         # 利群助手：Realm IPv4 TCP 转发部署与管理
 └── tests/                # 工具箱测试
 ```
 

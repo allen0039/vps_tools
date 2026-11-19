@@ -75,6 +75,16 @@ class ToolboxTests(unittest.TestCase):
         self.assertEqual(result.returncode, 17)
         self.assertIn("socks5     已安装", self.run_cli("list").stdout)
 
+    def test_leikwan_dispatch_alias_and_status(self):
+        self.mock("leikwan_tools", 'printf "<%s>\\n" "$@"; exit 17')
+        self.mock("sudo", '[[ ${1:-} != -- ]] || shift; exec "$@"')
+        self.env["PATH"] = str(self.base) + os.pathsep + os.environ["PATH"]
+        for name in ("leikwan", "leikwan_tools"):
+            result = self.run_cli("run", name, "status", "two words")
+            self.assertEqual(result.stdout, "<status>\n<two words>\n")
+            self.assertEqual(result.returncode, 17)
+        self.assertIn("leikwan    已安装", self.run_cli("list").stdout)
+
     def test_socks5_menu_returns_to_services_after_failure(self):
         self.mock("socks5.sh", "echo SOCKS5_CHILD; exit 7")
         text = self.run_menu("4\n2\n0\n0\n")
@@ -268,6 +278,13 @@ class ToolboxTests(unittest.TestCase):
         self.assertEqual(text.count("AGENT_CHILD"), 1)
         self.assertEqual(text.count("VPS Tools > 服务管理"), 4)
 
+    def test_service_category_routes_leikwan_helper(self):
+        self.mock("leikwan_tools", "echo LEIKWAN_CHILD")
+        text = self.run_menu("4\n3\n0\n0\n")
+        self.assertIn("利群助手", text)
+        self.assertIn("LEIKWAN_CHILD", text)
+        self.assertEqual(text.count("VPS Tools > 服务管理"), 2)
+
     def test_missing_tools_and_invalid_choices_stay_in_category(self):
         text = self.run_menu("1\n6\n9\n01\n-1\nabc\n1+1\n0\n0\n")
         self.assertIn("DNS 设置与恢复 [未安装]", text)
@@ -349,6 +366,9 @@ printf INSTALL_MUST_NOT_START
             path = self.base / folder / file
             path.parent.mkdir()
             path.write_text('#!/usr/bin/env bash\nprintf "%s %s\\n" "' + folder + '" "$*"\n')
+        helper = self.base / "leikwan_tools/install.sh"
+        helper.parent.mkdir()
+        helper.write_text('#!/usr/bin/env bash\nprintf "leikwan_tools %s\\n" "$*"\n')
         # 拦截 install，避免写入系统；其余文件只作为部署来源，绝不能执行。
         result = subprocess.run(["bash", "-c", '''
 source "$1/install.sh"
@@ -367,6 +387,7 @@ install_tools
         self.assertIn("tcp-tool ", result.stdout)
         self.assertIn("ssh-key ", result.stdout)
         self.assertIn("ssh-password ", result.stdout)
+        self.assertIn("leikwan_tools --skip-realm-install", result.stdout)
         self.assertIn("/usr/local/lib/vpstools/socks5.sh", result.stdout)
         self.assertNotIn("/usr/local/bin/socks5", result.stdout)
 

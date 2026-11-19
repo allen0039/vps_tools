@@ -43,6 +43,10 @@ fi
 # Reconcile main route via GW_9929 (replacing Docker's .254 default gw).
 ip -4 route replace default via "${GW_9929}" dev eth0
 
+if [[ -f /etc/liqun-lab-main-only ]]; then
+    exit 0
+fi
+
 # Optional simulated boot delay BEFORE policy routing rules/tables are installed (for R1 reboot race testing).
 if [[ -f /etc/liqun-lab-delay-pbr ]]; then
     DELAY_SEC="$(cat /etc/liqun-lab-delay-pbr | tr -d '[:space:]')"

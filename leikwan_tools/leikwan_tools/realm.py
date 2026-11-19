@@ -44,6 +44,7 @@ class RealmBinaryInfo:
     version_tuple: Tuple[int, int, int]
     sha256: str
     origin: str  # "managed" | "reused" | "configured"
+    supports_listen_interface: bool = False
 
 
 def sha256_file(path: Path) -> str:
@@ -119,6 +120,7 @@ def inspect_realm_binary(path: str, origin: str = "reused") -> RealmBinaryInfo:
         version_tuple=version_tuple,
         sha256=sha256_file(bin_path),
         origin=origin,
+        supports_listen_interface="--listen-interface" in help_out,
     )
 
 

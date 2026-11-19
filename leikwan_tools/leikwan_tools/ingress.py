@@ -175,17 +175,27 @@ def parse_dns_a_response(packet: bytes, expected_txid: int) -> List[DnsRecord]:
 
 
 def query_dns_a_via_server(domain: str, dns_server: str, timeout: float = 3.0) -> List[DnsRecord]:
-    """Query all IPv4 A records directly from a specific DNS server over UDP/53."""
+    """Query IPv4 A records, retrying a truncated response over TCP."""
     txid = int.from_bytes(os.urandom(2), "big")
     query = build_dns_a_query(domain, txid)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(timeout)
-    try:
-        sock.sendto(query, (dns_server, 53))
-        data, _ = sock.recvfrom(4096)
-        return parse_dns_a_response(data, txid)
-    finally:
-        sock.close()
+    endpoint = (dns_server, 53)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(timeout)
+        sock.connect(endpoint)
+        sock.send(query)
+        data = sock.recv(65535)
+    if len(data) >= 12 and data[:2] == query[:2] and data[2] & 0x02:
+        with socket.create_connection(endpoint, timeout=timeout) as sock:
+            sock.sendall(struct.pack("!H", len(query)) + query)
+            with sock.makefile("rb") as response:
+                size = response.read(2)
+                if len(size) != 2:
+                    raise IngressError("DNS TCP 响应缺少长度")
+                length = struct.unpack("!H", size)[0]
+                data = response.read(length)
+                if len(data) != length or (len(data) >= 12 and data[2] & 0x02):
+                    raise IngressError("DNS TCP 响应截断")
+    return parse_dns_a_response(data, txid)
 
 
 def _system_ipv4_nameservers() -> List[str]:
@@ -487,7 +497,8 @@ def probe_candidate(
 
     base_stage = STATUS_DNS_CANDIDATE if in_dns else STATUS_NON_DNS
     start = time.monotonic()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
     sock.settimeout(timeout)
 
     try:

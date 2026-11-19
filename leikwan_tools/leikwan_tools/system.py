@@ -12,9 +12,11 @@ import subprocess
 import time
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from .config import LineConfig
+from .config import LineConfig, format_endpoint
 
 SYS_ENV = {**os.environ, "LANG": "C", "LC_ALL": "C"}
+PUBLIC_ROUTE_PROBE_IP = "203.0.113.254"
+PUBLIC_ROUTE_PROBE_IPV6 = "2606:4700:4700::1111"
 
 
 class SystemErrorBase(RuntimeError):
@@ -206,6 +208,17 @@ def get_local_network_state() -> Tuple[Dict[str, Tuple[str, List[str]]], Dict[st
 
 def verify_local_listen_ip(listen_ip: str, addr_map: Dict[str, List[str]]) -> str:
     """Verify listen_ip is assigned on a local interface; returns owning interface name."""
+    if ":" in listen_ip:
+        result = run_cmd(["ip", "-6", "-o", "addr", "show", "scope", "global"])
+        if result.returncode:
+            raise PreflightError(f"查询本机 IPv6 地址失败: {result.stderr.strip()}")
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) < 4 or fields[2] != "inet6" or {"tentative", "dadfailed"}.intersection(fields[4:]):
+                continue
+            if str(ipaddress.IPv6Interface(fields[3]).ip) == listen_ip:
+                return fields[1].split("@", 1)[0]
+        raise PreflightError(f"本机没有可用的公网 IPv6 地址 {listen_ip}")
     for iface, ips in addr_map.items():
         if listen_ip in ips:
             return iface
@@ -416,9 +429,14 @@ def verify_egress_route(line: LineConfig, remote_ip: str) -> RouteGetResult:
             command=oif_cmd,
             rt_tables=rt_tables,
         )
-        if oif_parsed.dev != line.interface or oif_parsed.via != line.gateway:
+        if (
+            oif_parsed.dev != line.interface
+            or oif_parsed.via != line.gateway
+            or (line.table != 254 and oif_parsed.table != expected_table_str)
+        ):
             mismatches.append(
-                f"指定网卡 oif={line.interface} 路由结果不符: dev={oif_parsed.dev}, via={oif_parsed.via}"
+                f"指定网卡 oif={line.interface} 路由结果不符: "
+                f"dev={oif_parsed.dev}, via={oif_parsed.via}, table={oif_parsed.table}"
             )
 
     if mismatches:
@@ -447,6 +465,8 @@ def _parse_local_addr_port(local_str: str) -> Tuple[str, int]:
         ip_part = raw[:idx]
         port_part = raw[idx + 1 :]
     ip_clean = ip_part.split("%", 1)[0]
+    if ":" in ip_clean and not ip_clean.startswith("::ffff:"):
+        ip_clean = str(ipaddress.IPv6Address(ip_clean))
     return ip_clean, int(port_part)
 
 
@@ -519,6 +539,7 @@ def find_port_conflicts(
     """Detect exact-address and wildcard TCP listening collisions."""
     allowed = allowed_pids or set()
     v6_only = read_bindv6only() if bindv6only is None else bindv6only
+    ipv6 = ":" in listen_ip
     conflicts: List[PortConflict] = []
 
     for item in listeners:
@@ -526,7 +547,12 @@ def find_port_conflicts(
             continue
 
         conflict_type: Optional[str] = None
-        if item.family == "ipv4":
+        if ipv6:
+            if item.family == "ipv6" and item.ip == listen_ip:
+                conflict_type = "精确地址冲突"
+            elif item.family == "ipv6" and item.ip in ("::", "*"):
+                conflict_type = "通配端口冲突(IPv6 [::])"
+        elif item.family == "ipv4":
             if item.ip == listen_ip:
                 conflict_type = "精确地址冲突"
             elif item.ip in ("0.0.0.0", "*"):
@@ -550,7 +576,7 @@ def find_port_conflicts(
 
 def format_port_conflict_error(listen_ip: str, listen_port: int, conflicts: List[PortConflict]) -> str:
     """Build clear human-readable port conflict message without killing occupying processes."""
-    lines = [f"监听端口 {listen_ip}:{listen_port} 已被占用，已停止应用（不会终止现有占用进程）:"]
+    lines = [f"监听端口 {format_endpoint(listen_ip, listen_port)} 已被占用，已停止应用（不会终止现有占用进程）:"]
     for c in conflicts:
         if c.listener.procs:
             proc_desc = ", ".join(f"{p.name}(pid={p.pid})" for p in c.listener.procs)

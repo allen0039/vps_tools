@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+from contextlib import redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 import os
 import subprocess
@@ -24,6 +26,8 @@ from leikwan_tools.cli import main  # noqa: E402
 from leikwan_tools.config import (  # noqa: E402
     ConfigError,
     LineConfig,
+    load_global_config,
+    load_rule_config,
     parse_global_config_dict,
     parse_rule_config_dict,
     render_realm_toml,
@@ -40,6 +44,7 @@ from leikwan_tools.ingress import (  # noqa: E402
     evaluate_fixed_ip_policy,
     parse_dns_a_response,
     probe_candidate,
+    query_dns_a_via_server,
 )
 from leikwan_tools.manager import ApplyError, PreflightReport, apply_rule  # noqa: E402
 from leikwan_tools.ownership import (  # noqa: E402
@@ -70,9 +75,45 @@ from leikwan_tools.system import (  # noqa: E402
     verify_egress_route,
 )
 from leikwan_tools.toml_compat import TomlParseError, _fallback_loads, loads_toml  # noqa: E402
+from leikwan_tools.updater import (  # noqa: E402
+    UpdateCheckInfo,
+    UpdateError,
+    UpdateResult,
+    _build_install_args,
+    _compare_versions,
+    _discover_remote_files,
+    _extract_version_from_init,
+    _filter_update_tree_paths,
+    _parse_commit_metadata,
+    _validate_staged_files,
+    perform_update,
+)
 
 
 class TestInteractiveShortcut(unittest.TestCase):
+    def test_menu_edit_preserves_rule_settings_and_uses_confirmed_snapshot(self) -> None:
+        cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))
+        old = replace(
+            load_rule_config(str(REPO_ROOT / "examples" / "rule-rfc-hk.example.toml")),
+            tcp_timeout=11,
+            ingress_fixed_ip="1.1.1.1",
+        )
+        answers = ["2", "3", old.name, "", "", "", "", "192.0.2.22", "", "9929", "y", "0", "0"]
+        with (
+            patch("builtins.input", side_effect=answers),
+            patch("leikwan_tools.cli.load_global_config", return_value=cfg),
+            patch("leikwan_tools.cli.list_managed_rules", return_value=[old]),
+            patch("leikwan_tools.cli.plan_rule") as plan,
+            patch("leikwan_tools.cli.apply_rule") as apply,
+            patch("leikwan_tools.cli._print_plan"),
+            patch("leikwan_tools.cli._print_apply"),
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(main(["menu"]), 0)
+        desired = replace(old, remote_ip="192.0.2.22", line="9929")
+        plan.assert_called_once_with(cfg, desired)
+        apply.assert_called_once_with(cfg, desired, expected_rule=old, create_only=False)
+
     def test_shortcut_opens_menu_and_accepts_cli_arguments(self) -> None:
         launcher = REPO_ROOT / "bin" / "leikwan_tools"
         with tempfile.TemporaryDirectory() as td:
@@ -87,7 +128,10 @@ class TestInteractiveShortcut(unittest.TestCase):
                 env=env,
                 check=True,
             )
-            self.assertIn("leikwan_tools 管理菜单", menu.stdout)
+            self.assertIn("leikwan_tools 利群转发助手 v0.1.2", menu.stdout)
+            self.assertIn("转发规则管理", menu.stdout)
+            self.assertNotIn("预览规则部署", menu.stdout)
+            self.assertNotIn("应用规则文件", menu.stdout)
             self.assertIn("无效选项", menu.stdout)
             version = subprocess.run(
                 [sys.executable, str(shortcut), "--version"],
@@ -96,11 +140,17 @@ class TestInteractiveShortcut(unittest.TestCase):
                 env=env,
                 check=True,
             )
-            self.assertTrue(version.stdout.startswith("leikwan_tools "))
+            self.assertEqual(version.stdout.strip(), "leikwan_tools 0.1.2")
 
-    def test_menu_requires_confirmation_and_returns_after_command(self) -> None:
-        with patch("builtins.input", side_effect=["6", "rule-one", "", "6", "rule-two", "y", "0"]), patch(
-            "leikwan_tools.cli.load_global_config"
+    def test_menu_delete_lists_rules_requires_confirmation_and_returns_after_error(self) -> None:
+        cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))
+        r1 = replace(load_rule_config(str(REPO_ROOT / "examples" / "rule-rfc-hk.example.toml")), name="rule-one")
+        r2 = replace(r1, name="rule-two")
+        answers = ["2", "5", "", "5", "rule-two", "y", "0", "0"]
+        with patch("builtins.input", side_effect=answers), patch(
+            "leikwan_tools.cli.load_global_config", return_value=cfg
+        ), patch(
+            "leikwan_tools.cli.list_managed_rules", return_value=[r1, r2]
         ), patch(
             "leikwan_tools.cli.delete_rule", side_effect=ApplyError("test failure")
         ) as delete, patch(
@@ -112,6 +162,111 @@ class TestInteractiveShortcut(unittest.TestCase):
         self.assertEqual(delete.call_count, 1)
         self.assertEqual(delete.call_args.args[1], "rule-two")
         self.assertIn("test failure", stderr.getvalue())
+
+    def test_menu_toggle_pause_and_resume(self) -> None:
+        cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))
+        rule = load_rule_config(str(REPO_ROOT / "examples" / "rule-rfc-hk.example.toml"))
+        answers = ["2", "4", "1", "y", "4", "1", "y", "0", "0"]
+        with (
+            patch("builtins.input", side_effect=answers),
+            patch("leikwan_tools.cli.load_global_config", return_value=cfg),
+            patch("leikwan_tools.cli.list_managed_rules", return_value=[rule]),
+            patch("leikwan_tools.cli.systemd_is_active", side_effect=[True, False]),
+            patch(
+                "leikwan_tools.cli.disable_rule",
+                return_value={"rule_name": rule.name, "unit_name": f"leikwan_tools-realm@{rule.name}.service"},
+            ) as disable,
+            patch("leikwan_tools.cli.plan_rule") as plan,
+            patch("leikwan_tools.cli.apply_rule") as apply,
+            patch("leikwan_tools.cli._print_plan"),
+            patch("leikwan_tools.cli._print_apply"),
+            redirect_stdout(io.StringIO()) as stdout,
+        ):
+            self.assertEqual(main(["menu"]), 0)
+        disable.assert_called_once_with(cfg, rule.name)
+        plan.assert_called_once_with(cfg, rule)
+        apply.assert_called_once_with(cfg, rule, expected_rule=rule, create_only=False)
+        self.assertIn("已暂停", stdout.getvalue())
+
+    def test_menu_system_submenu_navigation(self) -> None:
+        cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))
+        with (
+            patch("builtins.input", side_effect=["5", "2", "0", "0"]),
+            patch("leikwan_tools.cli.load_global_config", return_value=cfg),
+            patch(
+                "leikwan_tools.cli.check_prereqs",
+                return_value={"ok": True, "realm_ok": True, "realm": "/usr/local/bin/realm", "lines": []},
+            ) as check,
+            redirect_stdout(io.StringIO()) as stdout,
+        ):
+            self.assertEqual(main(["--config", "/tmp/test-leikwan.toml", "menu"]), 0)
+        check.assert_called_once()
+        self.assertIn("初始化与环境排查", stdout.getvalue())
+        self.assertIn("Realm 检查: 通过", stdout.getvalue())
+
+    def test_menu_list_forwards_shows_egress_name(self) -> None:
+        cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))
+        rule = load_rule_config(str(REPO_ROOT / "examples" / "rule-rfc-hk.example.toml"))
+        with (
+            patch("builtins.input", side_effect=["2", "1", "0", "0"]),
+            patch("leikwan_tools.cli.load_global_config", return_value=cfg),
+            patch("leikwan_tools.cli.list_managed_rules", return_value=[rule]),
+            patch("leikwan_tools.cli.systemd_is_active", return_value=True),
+            redirect_stdout(io.StringIO()) as stdout,
+        ):
+            self.assertEqual(main(["menu"]), 0)
+        out = stdout.getvalue()
+        self.assertIn("当前共有 1 条已配置转发", out)
+        self.assertIn("[运行中] rfc-hk", out)
+        self.assertIn("cn2（CN2 GIA 出口线路 | eth1 / 10.8.0.146）", out)
+        self.assertIn("客户端入口", out)
+        self.assertIn("本机监听", out)
+        self.assertIn("落地目标", out)
+
+    def test_menu_update_check_cancel_and_apply(self) -> None:
+        info = UpdateCheckInfo(
+            channel="gitee",
+            channel_label="Gitee",
+            repo="allen0039/vps_tools",
+            branch="main",
+            current_version="0.1.2",
+            remote_version="0.1.3",
+            commit_sha="a" * 40,
+            short_sha="aaaaaaa",
+            tree_sha="b" * 40,
+            commit_message="Release v0.1.3",
+            status="upgrade",
+            update_available=True,
+        )
+        res = UpdateResult(
+            channel="gitee",
+            channel_label="Gitee",
+            repo="allen0039/vps_tools",
+            branch="main",
+            commit_sha="a" * 40,
+            short_sha="aaaaaaa",
+            previous_version="0.1.2",
+            remote_version="0.1.3",
+            installed_version="0.1.3",
+            files_updated=12,
+            install_args=["--skip-realm-install"],
+            version_changed=True,
+        )
+        # First cancel on "n", then confirm on "y"
+        answers = ["6", "2", "n", "6", "2", "y", "0"]
+        with (
+            patch("builtins.input", side_effect=answers),
+            patch("leikwan_tools.cli.check_for_update", return_value=info) as m_check,
+            patch("leikwan_tools.cli.perform_update", return_value=res) as m_upd,
+            redirect_stdout(io.StringIO()) as stdout,
+        ):
+            self.assertEqual(main(["menu"]), 0)
+        self.assertEqual(m_check.call_count, 2)
+        m_upd.assert_called_once_with(channel="gitee", prechecked=info)
+        out = stdout.getvalue()
+        self.assertIn("6. 从仓库检查并更新工具", out)
+        self.assertIn("发现新版本 v0.1.3", out)
+        self.assertIn("已从 v0.1.2 更新到 v0.1.3", out)
 
 
 class TestTomlCompat(unittest.TestCase):
@@ -204,6 +359,29 @@ class TestConfigValidation(unittest.TestCase):
         bad["forward"]["listen_port"] = 70000
         with self.assertRaises(ConfigError):
             parse_rule_config_dict(bad)
+
+    def test_public_ipv6_listens_directly_and_preserves_ipv4_egress(self) -> None:
+        data = loads_toml(self.example_rule)
+        data["ingress"] = {"public_port": 54141}
+        data["forward"].update(listen_ip="2408:820c:7508:34d4:0:0:0:10", listen_port=54141)
+        rule = parse_rule_config_dict(data)
+        self.assertTrue(rule.direct_ipv6)
+        self.assertEqual(rule.dial_addr, "2408:820c:7508:34d4::10")
+        self.assertEqual(rule, parse_rule_config_dict(loads_toml(render_rule_toml(rule))))
+
+        cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))
+        endpoint = loads_toml(render_realm_toml(rule, cfg.lines["9929"], "eth0"))["endpoints"][0]
+        self.assertEqual(endpoint["listen"], "[2408:820c:7508:34d4::10]:54141")
+        self.assertEqual(endpoint["through"], "10.7.0.146")
+        self.assertEqual(endpoint["interface"], "eth0")
+        self.assertNotIn("listen_interface", endpoint)
+
+        data["forward"]["listen_port"] = 10001
+        with self.assertRaises(ConfigError):
+            parse_rule_config_dict(data)
+        data["forward"].update(listen_ip="::ffff:10.7.0.146", listen_port=54141)
+        with self.assertRaises(ConfigError):
+            parse_rule_config_dict(data)
 
         # Reject path traversal in rule.name
         bad = loads_toml(self.example_rule)
@@ -379,6 +557,29 @@ class TestRealmAndLock(unittest.TestCase):
 
 
 class TestIngressDnsAndProbing(unittest.TestCase):
+    def test_truncated_udp_dns_retries_over_tcp(self) -> None:
+        txid = 0x1234
+        dns_query = build_dns_a_query("ingress.example.com", txid)
+        truncated = bytes.fromhex("123483800001000000000000")
+        header = bytes.fromhex("123481800001000100000000")
+        answer = bytes.fromhex("c00c000100010000003c000401010101")
+        dns_response = header + dns_query[12:] + answer
+        with (
+            patch("leikwan_tools.ingress.os.urandom", return_value=b"\x12\x34"),
+            patch("leikwan_tools.ingress.socket.socket") as open_udp,
+            patch("leikwan_tools.ingress.socket.create_connection") as open_tcp,
+        ):
+            udp = open_udp.return_value.__enter__.return_value
+            udp.recv.return_value = truncated
+            tcp = open_tcp.return_value.__enter__.return_value
+            tcp.makefile.return_value.__enter__.return_value = io.BytesIO(
+                len(dns_response).to_bytes(2, "big") + dns_response
+            )
+            records = query_dns_a_via_server("ingress.example.com", "127.0.0.1")
+        self.assertEqual(records, [DnsRecord("1.1.1.1", 60)])
+        udp.connect.assert_called_once_with(("127.0.0.1", 53))
+        tcp.sendall.assert_called_once_with(len(dns_query).to_bytes(2, "big") + dns_query)
+
     def test_dns_wire_query_and_compressed_response(self) -> None:
         txid = 0x1234
         q = build_dns_a_query("paid-v4.bgp1.leikwanhost.com", txid)
@@ -822,6 +1023,264 @@ class TestR2TlsAndFixedIpPolicy(unittest.TestCase):
             r5 = evaluate_fixed_ip_policy("paid-v4.bgp1.leikwanhost.com", "203.0.113.10", "203.0.113.10")
             self.assertTrue(r5.allowed)
             self.assertIn("DNS 查询失败", r5.warning or "")
+
+
+class TestSelfUpdate(unittest.TestCase):
+    def test_parse_commit_metadata_github_and_gitee(self) -> None:
+        gh = {
+            "sha": "0123456789abcdef0123456789abcdef01234567",
+            "commit": {
+                "message": "Update menu\n\nDetails",
+                "tree": {"sha": "fedcba9876543210fedcba9876543210fedcba98"},
+            },
+        }
+        sha, tree_sha, msg = _parse_commit_metadata(gh)
+        self.assertEqual(sha, "0123456789abcdef0123456789abcdef01234567")
+        self.assertEqual(tree_sha, "fedcba9876543210fedcba9876543210fedcba98")
+        self.assertEqual(msg, "Update menu")
+
+        gitee = {
+            "name": "main",
+            "commit": {
+                "sha": "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+                "commit": {"message": "Gitee release"},
+            },
+        }
+        sha2, tree_sha2, msg2 = _parse_commit_metadata(gitee)
+        self.assertEqual(sha2, "abcdef0123456789abcdef0123456789abcdef01")
+        self.assertEqual(tree_sha2, sha2)
+        self.assertEqual(msg2, "Gitee release")
+
+        with self.assertRaises(UpdateError):
+            _parse_commit_metadata({"sha": "not-a-sha"})
+
+    def test_extract_version_and_compare(self) -> None:
+        self.assertEqual(_extract_version_from_init('"""doc"""\n__version__ = "0.1.3"\n'), "0.1.3")
+        with self.assertRaises(UpdateError):
+            _extract_version_from_init("x = 1\n")
+        with self.assertRaises(UpdateError):
+            _extract_version_from_init("def broken(:\n")
+
+        self.assertEqual(_compare_versions("0.1.2", "0.1.3"), ("upgrade", True))
+        self.assertEqual(_compare_versions("0.1.2", "0.1.10"), ("upgrade", True))
+        self.assertEqual(_compare_versions("0.1.2", "0.1.2"), ("same", False))
+        self.assertEqual(_compare_versions("0.1.3", "0.1.2"), ("ahead", False))
+        self.assertEqual(_compare_versions("0.1.2", "dev-snapshot"), ("unknown", True))
+
+    def test_tree_filter_and_truncated_fallback(self) -> None:
+        entries = [
+            {"path": "vpstools.sh", "type": "blob", "mode": "100755"},
+            {"path": "leikwan_tools/install.sh", "type": "blob", "mode": "100755"},
+            {"path": "leikwan_tools/bin/leikwan_tools", "type": "blob", "mode": "100755"},
+            {"path": "leikwan_tools/leikwan_tools/__init__.py", "type": "blob", "mode": "100644"},
+            {"path": "leikwan_tools/leikwan_tools/__pycache__/cli.cpython-311.pyc", "type": "blob", "mode": "100644"},
+            {"path": "leikwan_tools/tests/test_unit.py", "type": "blob", "mode": "100644"},
+            {"path": "leikwan_tools/docs/R2_FIX_REPORT.md", "type": "blob", "mode": "100644"},
+            {"path": "leikwan_tools/test-results/out.txt", "type": "blob", "mode": "100644"},
+            {"path": "leikwan_tools/bin/symlink_bin", "type": "blob", "mode": "120000"},
+        ]
+        filtered = _filter_update_tree_paths(entries)
+        self.assertEqual(
+            filtered,
+            [
+                ("bin/leikwan_tools", "100755"),
+                ("install.sh", "100755"),
+                ("leikwan_tools/__init__.py", "100644"),
+            ],
+        )
+
+        with self.assertRaises(UpdateError):
+            _filter_update_tree_paths([{"path": "leikwan_tools/../evil.py", "type": "blob", "mode": "100644"}])
+
+        sub_sha = "1" * 40
+        responses = iter(
+            [
+                {"truncated": True, "tree": []},
+                {"tree": [{"path": "leikwan_tools", "type": "tree", "sha": sub_sha}]},
+                {
+                    "truncated": False,
+                    "tree": [
+                        {"path": "install.sh", "type": "blob", "mode": "100755"},
+                        {"path": "bin/leikwan_tools", "type": "blob", "mode": "100755"},
+                        {"path": "leikwan_tools/__init__.py", "type": "blob", "mode": "100644"},
+                        {"path": "leikwan_tools/cli.py", "type": "blob", "mode": "100644"},
+                        {"path": "systemd/leikwan_tools-realm@.service", "type": "blob", "mode": "100644"},
+                    ],
+                },
+            ]
+        )
+        with patch("leikwan_tools.updater._http_get_json", side_effect=lambda *a, **kw: next(responses)):
+            discovered = _discover_remote_files("github", "2" * 40)
+        self.assertEqual(len(discovered), 5)
+        self.assertIn(("leikwan_tools/cli.py", "100644"), discovered)
+
+    def test_validate_staged_files_rejects_bad_syntax(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "leikwan_tools").mkdir()
+            (root / "install.sh").write_text("#!/usr/bin/env bash\necho ok\n", encoding="utf-8")
+            (root / "leikwan_tools" / "__init__.py").write_text('__version__ = "0.1.3"\n', encoding="utf-8")
+            _validate_staged_files(root, ["install.sh", "leikwan_tools/__init__.py"])
+
+            (root / "leikwan_tools" / "bad.py").write_text("def oops(:\n", encoding="utf-8")
+            with self.assertRaises(UpdateError):
+                _validate_staged_files(root, ["leikwan_tools/bad.py"])
+
+            (root / "bad.sh").write_text("#!/usr/bin/env bash\nif then fi\n", encoding="utf-8")
+            with self.assertRaises(UpdateError):
+                _validate_staged_files(root, ["bad.sh"])
+
+    def test_build_install_args_and_perform_update(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            realm_bin = Path(td) / "realm"
+            realm_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+            args_reused = _build_install_args(
+                {
+                    "config_dir": "/opt/cfg",
+                    "state_dir": "/opt/state",
+                    "realm": {"managed_install": False, "binary_path": str(realm_bin)},
+                }
+            )
+            self.assertEqual(
+                args_reused,
+                ["--config-dir", "/opt/cfg", "--state-dir", "/opt/state", "--realm-bin", str(realm_bin)],
+            )
+            args_skip = _build_install_args(
+                {
+                    "config_dir": "/etc/leikwan_tools",
+                    "state_dir": "/var/lib/leikwan_tools",
+                    "realm": {"managed_install": False, "binary_path": ""},
+                }
+            )
+            self.assertEqual(
+                args_skip,
+                ["--config-dir", "/etc/leikwan_tools", "--state-dir", "/var/lib/leikwan_tools", "--skip-realm-install"],
+            )
+
+        with patch("leikwan_tools.updater.platform.system", return_value="Linux"), patch(
+            "leikwan_tools.updater.os.geteuid", return_value=1000
+        ):
+            with self.assertRaises(UpdateError) as ctx:
+                perform_update()
+            self.assertIn("root 权限", str(ctx.exception))
+
+        info = UpdateCheckInfo(
+            channel="github",
+            channel_label="GitHub",
+            repo="allen0039/vps_tools",
+            branch="main",
+            current_version="0.1.2",
+            remote_version="0.1.3",
+            commit_sha="c" * 40,
+            short_sha="ccccccc",
+            tree_sha="d" * 40,
+            commit_message="Bump to 0.1.3",
+            status="upgrade",
+            update_available=True,
+        )
+        remote_blobs = {
+            "install.sh": b"#!/usr/bin/env bash\necho ok\n",
+            "bin/leikwan_tools": b"#!/usr/bin/env python3\nprint('ok')\n",
+            "leikwan_tools/__init__.py": b'__version__ = "0.1.3"\n',
+            "leikwan_tools/cli.py": b"def main():\n    return 0\n",
+            "systemd/leikwan_tools-realm@.service": b"[Unit]\nDescription=x\n[Service]\nExecStart=/bin/true\n",
+        }
+
+        def fake_get_bytes(url: str, timeout: float = 20.0, accept: str = "*/*", *, channel: str = "") -> bytes:
+            for rel, content in remote_blobs.items():
+                if f"/{rel}?" in url or url.endswith(f"/{rel}"):
+                    return content
+            raise AssertionError(f"unexpected url: {url}")
+
+        recorded_cmds = []
+
+        def fake_run(cmd, capture_output=True, text=True, timeout=15):
+            recorded_cmds.append(cmd)
+            class Proc:
+                def __init__(self, rc, out):
+                    self.returncode = rc
+                    self.stdout = out
+                    self.stderr = ""
+
+            if cmd[0] == "bash" and cmd[1] == "-n":
+                return Proc(0, "")
+            if cmd[0] == "bash" and cmd[1].endswith("install.sh"):
+                return Proc(0, "installed\n")
+            if cmd == ["/usr/local/bin/leikwan_tools", "--version"]:
+                return Proc(0, "leikwan_tools 0.1.3\n")
+            raise AssertionError(cmd)
+
+        manifest = {
+            "config_dir": "/opt/cfg",
+            "state_dir": "/opt/state",
+            "realm": {"managed_install": False, "binary_path": ""},
+        }
+        with (
+            patch("leikwan_tools.updater.platform.system", return_value="Linux"),
+            patch("leikwan_tools.updater.os.geteuid", return_value=0),
+            patch("leikwan_tools.updater.check_for_update", return_value=info),
+            patch(
+                "leikwan_tools.updater._discover_remote_files",
+                return_value=[(rel, "100755" if rel.endswith(".sh") or rel.startswith("bin/") else "100644") for rel in sorted(remote_blobs)],
+            ),
+            patch("leikwan_tools.updater._http_get_bytes", side_effect=fake_get_bytes),
+            patch("leikwan_tools.updater.load_install_manifest", return_value=manifest),
+            patch("leikwan_tools.updater.subprocess.run", side_effect=fake_run),
+        ):
+            res = perform_update(channel="github", current_version="0.1.2")
+
+        self.assertEqual(res.installed_version, "0.1.3")
+        self.assertTrue(res.version_changed)
+        self.assertEqual(res.files_updated, 5)
+        self.assertEqual(
+            res.install_args,
+            ["--config-dir", "/opt/cfg", "--state-dir", "/opt/state", "--skip-realm-install"],
+        )
+        install_cmd = [c for c in recorded_cmds if c[0] == "bash" and c[1].endswith("install.sh")][0]
+        self.assertEqual(install_cmd[2:], res.install_args)
+
+    def test_cli_update_check_and_apply(self) -> None:
+        info = UpdateCheckInfo(
+            channel="github",
+            channel_label="GitHub",
+            repo="allen0039/vps_tools",
+            branch="main",
+            current_version="0.1.2",
+            remote_version="0.1.3",
+            commit_sha="e" * 40,
+            short_sha="eeeeeee",
+            tree_sha="f" * 40,
+            commit_message="Add feature",
+            status="upgrade",
+            update_available=True,
+        )
+        buf = io.StringIO()
+        with patch("leikwan_tools.cli.check_for_update", return_value=info) as m_check, redirect_stdout(buf):
+            self.assertEqual(main(["--json", "update", "--check"]), 0)
+        m_check.assert_called_once_with(channel="github", timeout=20.0)
+        parsed = json.loads(buf.getvalue())
+        self.assertEqual(parsed["remote_version"], "0.1.3")
+        self.assertTrue(parsed["update_available"])
+
+        res = UpdateResult(
+            channel="gitee",
+            channel_label="Gitee",
+            repo="allen0039/vps_tools",
+            branch="main",
+            commit_sha="e" * 40,
+            short_sha="eeeeeee",
+            previous_version="0.1.2",
+            remote_version="0.1.3",
+            installed_version="0.1.3",
+            files_updated=10,
+            install_args=[],
+            version_changed=True,
+        )
+        buf2 = io.StringIO()
+        with patch("leikwan_tools.cli.perform_update", return_value=res) as m_upd, redirect_stdout(buf2):
+            self.assertEqual(main(["update", "--channel", "gitee"]), 0)
+        m_upd.assert_called_once_with(channel="gitee", timeout=20.0)
+        self.assertIn("已从 v0.1.2 更新到 v0.1.3", buf2.getvalue())
 
 
 if __name__ == "__main__":

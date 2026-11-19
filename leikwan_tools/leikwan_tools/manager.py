@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .config import (
     ConfigError,
     GlobalConfig,
     LineConfig,
     RuleConfig,
+    format_endpoint,
     load_rule_config,
     render_realm_toml,
     render_rule_toml,
@@ -44,6 +45,8 @@ from .ownership import (
 from .realm import RealmBinaryInfo, discover_realm_binary
 from .system import (
     FileLock,
+    PUBLIC_ROUTE_PROBE_IP,
+    PUBLIC_ROUTE_PROBE_IPV6,
     PreflightError,
     RouteGetResult,
     SystemdError,
@@ -52,6 +55,8 @@ from .system import (
     format_port_conflict_error,
     get_local_network_state,
     list_tcp_listeners,
+    parse_route_get_output,
+    run_cmd,
     systemd_disable,
     systemd_enable,
     systemd_is_active,
@@ -84,6 +89,7 @@ class PreflightReport:
     unit_name: str
     fixed_ip_check: Optional[FixedIpCheckResult] = None
     stale_ip_warning: Optional[str] = None
+    return_route: Optional[RouteGetResult] = None
 
 
 def _rule_paths(global_cfg: GlobalConfig, rule_name: str) -> Dict[str, Path]:
@@ -139,7 +145,7 @@ def _check_managed_rule_port_conflicts(global_cfg: GlobalConfig, target_rule: Ru
         if other.listen_ip == target_rule.listen_ip and other.listen_port == target_rule.listen_port:
             if _is_rule_enabled_record(global_cfg, other.name):
                 raise PreflightError(
-                    f"监听端口 {target_rule.listen_ip}:{target_rule.listen_port} 与已启用的托管规则 "
+                    f"监听端口 {target_rule.listen_endpoint} 与已启用的托管规则 "
                     f"{other.name!r} 冲突，请先停用或修改其中一条规则。"
                 )
 
@@ -165,6 +171,41 @@ def _assert_rule_owned_for_mutation(global_cfg: GlobalConfig, rule_name: str) ->
     if kind == "unowned":
         raise OwnershipError(f"拒绝操作非本工具管理的规则或服务 {rule_name!r}: {detail}")
     return kind
+
+
+def _verify_return_route(
+    global_cfg: GlobalConfig, listen_ip: str, listen_iface: str, link_states, addr_map
+) -> RouteGetResult:
+    if ":" in listen_ip:
+        command = ["ip", "-6", "route", "get", PUBLIC_ROUTE_PROBE_IPV6, "from", listen_ip]
+        result = run_cmd(command)
+        route = parse_route_get_output(PUBLIC_ROUTE_PROBE_IPV6, listen_ip, result.stdout, command)
+        if result.returncode or not route.dev:
+            raise PreflightError(f"公网 IPv6 {listen_ip} 无回程路由: {result.stderr.strip() or route.raw_output}")
+        return route
+
+    expected_iface = global_cfg.ingress.listen_interface or listen_iface
+    try:
+        if listen_iface != expected_iface:
+            raise PreflightError(f"监听 IPv4 {listen_ip} 位于 {listen_iface}，入口要求 {expected_iface}")
+        line = next((item for item in global_cfg.lines.values() if item.source_ip == listen_ip), None)
+        if line is None:
+            line = next((item for item in global_cfg.lines.values() if item.interface == listen_iface), None)
+        if line is not None:
+            if line.interface != listen_iface:
+                raise PreflightError(f"监听线配置为 {line.interface}，监听 IPv4 实际位于 {listen_iface}")
+            line = replace(line, source_ip=listen_ip)
+            verify_line_interface_and_source(line, link_states, addr_map)
+            return verify_egress_route(line, PUBLIC_ROUTE_PROBE_IP)
+
+        command = ["ip", "-4", "route", "get", PUBLIC_ROUTE_PROBE_IP, "from", listen_ip]
+        result = run_cmd(command)
+        route = parse_route_get_output(PUBLIC_ROUTE_PROBE_IP, listen_ip, result.stdout, command)
+        if result.returncode or route.dev != listen_iface:
+            raise PreflightError(result.stderr.strip() or route.raw_output or "无回程路由")
+        return route
+    except PreflightError as exc:
+        raise PreflightError(f"入口回程校验失败 ({listen_ip}@{expected_iface}): {exc}") from exc
 
 
 def preflight_rule(
@@ -203,7 +244,7 @@ def preflight_rule(
     fixed_check: Optional[FixedIpCheckResult] = None
     stale_warn: Optional[str] = None
     effective_dns = dns_server or global_cfg.ingress.dns_server
-    if rule.ingress_fixed_ip or check_dns:
+    if not rule.direct_ipv6 and (rule.ingress_fixed_ip or check_dns):
         fixed_check = evaluate_fixed_ip_policy(
             domain=rule.ingress_domain,
             new_fixed_ip=rule.ingress_fixed_ip,
@@ -216,10 +257,13 @@ def preflight_rule(
         stale_warn = fixed_check.warning
 
     realm_info = discover_realm_binary(global_cfg.tool.realm_bin)
+    if not rule.direct_ipv6 and global_cfg.ingress.listen_interface and not realm_info.supports_listen_interface:
+        raise PreflightError(f"Realm {realm_info.version_text} 不支持监听网卡绑定，请使用支持 --listen-interface 的版本")
     link_states, addr_map = get_local_network_state()
     listen_iface = verify_local_listen_ip(rule.listen_ip, addr_map)
     verify_line_interface_and_source(line, link_states, addr_map)
     route_res = verify_egress_route(line, rule.remote_ip)
+    return_route = _verify_return_route(global_cfg, rule.listen_ip, listen_iface, link_states, addr_map)
 
     _check_managed_rule_port_conflicts(global_cfg, rule)
 
@@ -251,6 +295,7 @@ def preflight_rule(
         unit_name=unit_name,
         fixed_ip_check=fixed_check,
         stale_ip_warning=stale_warn,
+        return_route=return_route,
     )
 
 
@@ -261,7 +306,7 @@ def _compute_plan_action(
 ) -> Tuple[str, Dict[str, str]]:
     paths = _rule_paths(global_cfg, rule.name)
     desired_rule_toml = render_rule_toml(rule)
-    desired_realm_toml = render_realm_toml(rule, global_cfg.lines[rule.line])
+    desired_realm_toml = render_realm_toml(rule, global_cfg.lines[rule.line], global_cfg.ingress.listen_interface)
     desired_realm_env = _render_realm_env(realm_info.path)
 
     if not paths["stored_rule"].exists():
@@ -292,13 +337,15 @@ def _compute_plan_action(
 
 def plan_rule(
     global_cfg: GlobalConfig,
-    rule_file: str,
+    rule_file: Union[str, RuleConfig],
     check_dns: bool = False,
     allow_non_dns: bool = False,
     dns_server: str = "",
 ) -> Dict[str, Any]:
     """Read-only preview and preflight verification of applying a rule file."""
-    rule = load_rule_config(rule_file, default_domain=global_cfg.ingress.default_domain)
+    rule = rule_file if isinstance(rule_file, RuleConfig) else load_rule_config(
+        rule_file, default_domain=global_cfg.ingress.default_domain
+    )
     report = preflight_rule(
         global_cfg,
         rule,
@@ -328,10 +375,11 @@ def plan_rule(
             "via": report.route_result.via,
             "table": report.route_result.table,
         },
+        "return_route": report.return_route.raw_output if report.return_route else "",
         "target_paths": {k: str(v) for k, v in paths.items()},
-        "dial_hint": rule.ingress_fixed_ip or rule.ingress_domain,
+        "dial_hint": rule.dial_addr,
         "public_port": rule.public_port,
-        "listen": f"{rule.listen_ip}:{rule.listen_port}",
+        "listen": rule.listen_endpoint,
         "remote": f"{rule.remote_ip}:{rule.remote_port}",
         "through": report.line.source_ip,
         "egress_interface": report.line.interface,
@@ -369,7 +417,7 @@ def _verify_unit_running_and_listening(
         if active == "active" and sub == "running" and main_pid > 0:
             listeners = list_tcp_listeners()
             for sock in listeners:
-                if sock.family == "ipv4" and sock.ip == listen_ip and sock.port == listen_port:
+                if sock.ip == listen_ip and sock.port == listen_port:
                     if any(proc.pid == main_pid for proc in sock.procs):
                         verified_pid = main_pid
                         break
@@ -379,7 +427,7 @@ def _verify_unit_running_and_listening(
 
     if not verified_pid:
         raise SystemdError(
-            f"在 {timeout:.1f}s 内未观察到 {unit_name} 监听 {listen_ip}:{listen_port} (状态: {last_props})"
+            f"在 {timeout:.1f}s 内未观察到 {unit_name} 监听 {format_endpoint(listen_ip, listen_port)} (状态: {last_props})"
         )
 
     time.sleep(0.35)
@@ -600,16 +648,29 @@ def _rollback_update_stage2(
 
 def apply_rule(
     global_cfg: GlobalConfig,
-    rule_file: str,
+    rule_file: Union[str, RuleConfig],
     lock_timeout: float = 15.0,
     allow_non_dns: bool = False,
     dns_server: str = "",
+    expected_rule: Optional[RuleConfig] = None,
+    create_only: bool = False,
 ) -> Dict[str, Any]:
     """Deploy or update a forwarding rule idempotently with staged commits and fault-tolerant rollback."""
     lock_file = resolve_lock_file(global_cfg=global_cfg)
     with FileLock(lock_file, timeout=lock_timeout):
         _assert_live_install_intact(global_cfg)
-        rule = load_rule_config(rule_file, default_domain=global_cfg.ingress.default_domain)
+        rule = rule_file if isinstance(rule_file, RuleConfig) else load_rule_config(
+            rule_file, default_domain=global_cfg.ingress.default_domain
+        )
+        paths = _rule_paths(global_cfg, rule.name)
+        stored = paths["stored_rule"]
+        if create_only and stored.exists():
+            raise ApplyError(f"规则 {rule.name!r} 已存在，请使用编辑")
+        if expected_rule is not None and (
+            not stored.is_file()
+            or load_rule_config(str(stored), default_domain=global_cfg.ingress.default_domain) != expected_rule
+        ):
+            raise ApplyError(f"规则 {rule.name!r} 已变更，请重新预览")
         report = preflight_rule(
             global_cfg,
             rule,
@@ -618,7 +679,6 @@ def apply_rule(
             dns_server=dns_server,
         )
         action, rendered = _compute_plan_action(global_cfg, rule, report.realm_info)
-        paths = _rule_paths(global_cfg, rule.name)
         unit_name = report.unit_name
 
         if action == "NOOP":
@@ -626,8 +686,7 @@ def apply_rule(
             main_pid = int(props.get("MainPID", "0") or "0")
             listeners = list_tcp_listeners()
             listening = any(
-                s.family == "ipv4"
-                and s.ip == rule.listen_ip
+                s.ip == rule.listen_ip
                 and s.port == rule.listen_port
                 and any(p.pid == main_pid for p in s.procs)
                 for s in listeners
@@ -641,11 +700,11 @@ def apply_rule(
                     "unit_name": unit_name,
                     "main_pid": main_pid,
                     "line": rule.line,
-                    "listen": f"{rule.listen_ip}:{rule.listen_port}",
+                    "listen": rule.listen_endpoint,
                     "remote": f"{rule.remote_ip}:{rule.remote_port}",
                     "through": report.line.source_ip,
                     "egress_interface": report.line.interface,
-                    "dial_addr": rule.ingress_fixed_ip or rule.ingress_domain,
+                    "dial_addr": rule.dial_addr,
                     "public_port": rule.public_port,
                     "realm_bin": report.realm_info.path,
                     "realm_version": report.realm_info.version_text,
@@ -669,7 +728,7 @@ def apply_rule(
             "realm_bin": report.realm_info.path,
             "realm_version": report.realm_info.version_text,
             "realm_origin": report.realm_info.origin,
-            "listen": f"{rule.listen_ip}:{rule.listen_port}",
+            "listen": rule.listen_endpoint,
             "remote": f"{rule.remote_ip}:{rule.remote_port}",
             "through": report.line.source_ip,
             "egress_interface": report.line.interface,
@@ -722,11 +781,11 @@ def apply_rule(
                 "interface": report.line.interface,
                 "gateway": report.line.gateway,
                 "table": report.line.table,
-                "listen": f"{rule.listen_ip}:{rule.listen_port}",
+                "listen": rule.listen_endpoint,
                 "remote": f"{rule.remote_ip}:{rule.remote_port}",
                 "through": report.line.source_ip,
                 "egress_interface": report.line.interface,
-                "dial_addr": rule.ingress_fixed_ip or rule.ingress_domain,
+                "dial_addr": rule.dial_addr,
                 "public_port": rule.public_port,
                 "realm_bin": report.realm_info.path,
                 "realm_version": report.realm_info.version_text,
@@ -822,11 +881,11 @@ def apply_rule(
             "interface": report.line.interface,
             "gateway": report.line.gateway,
             "table": report.line.table,
-            "listen": f"{rule.listen_ip}:{rule.listen_port}",
+            "listen": rule.listen_endpoint,
             "remote": f"{rule.remote_ip}:{rule.remote_port}",
             "through": report.line.source_ip,
             "egress_interface": report.line.interface,
-            "dial_addr": rule.ingress_fixed_ip or rule.ingress_domain,
+            "dial_addr": rule.dial_addr,
             "public_port": rule.public_port,
             "realm_bin": report.realm_info.path,
             "realm_version": report.realm_info.version_text,
@@ -854,13 +913,18 @@ def verify_startup_rule(
 
     if not paths["realm_toml"].is_file():
         raise ConfigError(f"启动前检查失败，缺少 Realm 运行配置: {paths['realm_toml']}")
-    realm_txt = paths["realm_toml"].read_text(encoding="utf-8", errors="replace")
+    realm_lines = paths["realm_toml"].read_text(encoding="utf-8", errors="replace").splitlines()
     expected_through = f'through = "{line.source_ip}"'
     expected_iface = f'interface = "{line.interface}"'
-    if expected_through not in realm_txt or expected_iface not in realm_txt:
+    if expected_through not in realm_lines or expected_iface not in realm_lines:
         raise PreflightError(
             f"Realm 运行配置 ({paths['realm_toml']}) 未同时绑定 {expected_through} 与 {expected_iface}，拒绝启动"
         )
+    ingress_iface = global_cfg.ingress.listen_interface
+    if rule.direct_ipv6 and f'listen = "{rule.listen_endpoint}"' not in realm_lines:
+        raise PreflightError(f"Realm 运行配置缺少公网监听 {rule.listen_endpoint}，请重新应用规则")
+    if not rule.direct_ipv6 and ingress_iface and f'listen_interface = "{ingress_iface}"' not in realm_lines:
+        raise PreflightError(f"Realm 运行配置缺少入口网卡绑定 {ingress_iface}，请重新应用规则")
 
     max_wait = float(
         global_cfg.tool.startup_route_wait_seconds if wait_timeout is None else max(0.0, wait_timeout)
@@ -870,9 +934,10 @@ def verify_startup_rule(
     while True:
         try:
             link_states, addr_map = get_local_network_state()
-            verify_local_listen_ip(rule.listen_ip, addr_map)
+            listen_iface = verify_local_listen_ip(rule.listen_ip, addr_map)
             verify_line_interface_and_source(line, link_states, addr_map)
             route_res = verify_egress_route(line, rule.remote_ip)
+            return_route = _verify_return_route(global_cfg, rule.listen_ip, listen_iface, link_states, addr_map)
             return {
                 "rule_name": rule.name,
                 "line": line.name,
@@ -881,6 +946,7 @@ def verify_startup_rule(
                 "gateway": line.gateway,
                 "table": line.table,
                 "route_output": route_res.raw_output,
+                "return_route": return_route.raw_output,
             }
         except Exception as exc:
             last_err = str(exc)
@@ -927,8 +993,7 @@ def _inspect_single_rule_status(
     restarts = int(props.get("NRestarts", "0") or "0")
 
     listening_ok = any(
-        s.family == "ipv4"
-        and s.ip == rule.listen_ip
+        s.ip == rule.listen_ip
         and s.port == rule.listen_port
         and main_pid > 0
         and any(p.pid == main_pid for p in s.procs)
@@ -959,6 +1024,7 @@ def _inspect_single_rule_status(
         "rule_name": rule.name,
         "description": rule.description,
         "line": rule.line,
+        "line_description": line_cfg.description if line_cfg else "",
         "unit_name": unit_name,
         "enabled": enabled,
         "active_state": active_state,
@@ -968,14 +1034,14 @@ def _inspect_single_rule_status(
         "listening_ok": listening_ok,
         "route_ok": route_ok,
         "route_detail": route_detail,
-        "listen": f"{rule.listen_ip}:{rule.listen_port}",
+        "listen": rule.listen_endpoint,
         "remote": f"{rule.remote_ip}:{rule.remote_port}",
         "through": line_cfg.source_ip if line_cfg else "",
         "egress_interface": line_cfg.interface if line_cfg else "",
         "public_port": rule.public_port,
         "ingress_domain": rule.ingress_domain,
         "ingress_fixed_ip": rule.ingress_fixed_ip,
-        "dial_addr": rule.ingress_fixed_ip or rule.ingress_domain,
+        "dial_addr": rule.dial_addr,
         "realm_bin": state_data.get("realm_bin", ""),
         "realm_version": state_data.get("realm_version", ""),
         "stale_ip_warning": stale_warning,
@@ -1064,6 +1130,30 @@ def delete_rule(
         }
 
 
+def _write_ingress_settings(paths: Dict[str, Path], rule: RuleConfig, selected_at: str = "") -> None:
+    state_path = paths["state_json"]
+    previous_state = _snapshot_file(state_path)
+    state = _load_state_json(state_path)
+    state["ingress_domain"] = rule.ingress_domain
+    state["ingress_fixed_ip"] = rule.ingress_fixed_ip
+    if selected_at:
+        state["ingress_selected_at_utc"] = selected_at
+    else:
+        state.pop("ingress_selected_at_utc", None)
+    state_text = json.dumps(state, ensure_ascii=False, indent=2) + "\n"
+    rule_text = render_rule_toml(rule)
+    try:
+        atomic_write_text(state_path, state_text)
+    except OSError as exc:
+        raise ApplyError(f"写入规则 {rule.name!r} 的入口状态失败: {exc}") from exc
+    try:
+        atomic_write_text(paths["stored_rule"], rule_text)
+    except OSError as exc:
+        error = _restore_file_safe(state_path, previous_state)
+        detail = f"；{error}" if error else ""
+        raise ApplyError(f"写入规则 {rule.name!r} 的入口配置失败: {exc}{detail}") from exc
+
+
 def select_rule_ingress_ip(
     global_cfg: GlobalConfig,
     rule_name: str,
@@ -1080,6 +1170,7 @@ def select_rule_ingress_ip(
     tls_insecure: bool = False,
     timeout: float = 3.0,
     lock_timeout: float = 15.0,
+    expected_rule: Optional[RuleConfig] = None,
 ) -> Dict[str, Any]:
     """Explicitly pin a public ingress IP using unified candidate validation without touching Realm listen/PID."""
     from .config import validate_ipv4
@@ -1095,6 +1186,10 @@ def select_rule_ingress_ip(
         old_rule = load_rule_config(
             str(paths["stored_rule"]), default_domain=global_cfg.ingress.default_domain
         )
+        if old_rule.direct_ipv6:
+            raise ConfigError("公网 IPv6 直连入口请通过编辑规则更改监听地址")
+        if expected_rule is not None and old_rule != expected_rule:
+            raise ApplyError(f"规则 {rule_name!r} 已变更，请重新预览")
         target_domain = domain.strip() if domain else old_rule.ingress_domain
         effective_dns = dns_server or global_cfg.ingress.dns_server
 
@@ -1125,29 +1220,8 @@ def select_rule_ingress_ip(
                 tls_cafile=tls_cafile,
             )
 
-        updated_rule = RuleConfig(
-            name=old_rule.name,
-            line=old_rule.line,
-            public_port=old_rule.public_port,
-            listen_ip=old_rule.listen_ip,
-            listen_port=old_rule.listen_port,
-            remote_ip=old_rule.remote_ip,
-            remote_port=old_rule.remote_port,
-            description=old_rule.description,
-            ingress_domain=target_domain,
-            ingress_fixed_ip=validated_ip,
-            log_level=old_rule.log_level,
-            tcp_timeout=old_rule.tcp_timeout,
-            tcp_keepalive=old_rule.tcp_keepalive,
-            tcp_keepalive_probe=old_rule.tcp_keepalive_probe,
-        )
-        atomic_write_text(paths["stored_rule"], render_rule_toml(updated_rule), mode=0o644)
-
-        state = _load_state_json(paths["state_json"])
-        state["ingress_domain"] = target_domain
-        state["ingress_fixed_ip"] = validated_ip
-        state["ingress_selected_at_utc"] = check.dns_result.queried_at_utc
-        atomic_write_text(paths["state_json"], json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+        updated_rule = replace(old_rule, ingress_domain=target_domain, ingress_fixed_ip=validated_ip)
+        _write_ingress_settings(paths, updated_rule, selected_at=check.dns_result.queried_at_utc)
 
         return {
             "rule_name": rule_name,
@@ -1162,7 +1236,7 @@ def select_rule_ingress_ip(
             "selected_ip": validated_ip,
             "public_port": updated_rule.public_port,
             "dial_address": f"{validated_ip}:{updated_rule.public_port}",
-            "realm_listen": f"{updated_rule.listen_ip}:{updated_rule.listen_port}",
+            "realm_listen": updated_rule.listen_endpoint,
             "realm_restarted": False,
             "probe": asdict(probe_res) if probe_res else None,
             "protocol_notes": protocol_preservation_notes(validated_ip, updated_rule.public_port, target_domain),
@@ -1173,6 +1247,7 @@ def unselect_rule_ingress_ip(
     global_cfg: GlobalConfig,
     rule_name: str,
     lock_timeout: float = 15.0,
+    expected_rule: Optional[RuleConfig] = None,
 ) -> Dict[str, Any]:
     """Clear fixed_ip so client dial falls back to rule.ingress_domain without touching Realm."""
     validate_rule_name(rule_name)
@@ -1185,26 +1260,12 @@ def unselect_rule_ingress_ip(
         old_rule = load_rule_config(
             str(paths["stored_rule"]), default_domain=global_cfg.ingress.default_domain
         )
-        updated = RuleConfig(
-            name=old_rule.name,
-            line=old_rule.line,
-            public_port=old_rule.public_port,
-            listen_ip=old_rule.listen_ip,
-            listen_port=old_rule.listen_port,
-            remote_ip=old_rule.remote_ip,
-            remote_port=old_rule.remote_port,
-            description=old_rule.description,
-            ingress_domain=old_rule.ingress_domain,
-            ingress_fixed_ip="",
-            log_level=old_rule.log_level,
-            tcp_timeout=old_rule.tcp_timeout,
-            tcp_keepalive=old_rule.tcp_keepalive,
-            tcp_keepalive_probe=old_rule.tcp_keepalive_probe,
-        )
-        atomic_write_text(paths["stored_rule"], render_rule_toml(updated), mode=0o644)
-        state = _load_state_json(paths["state_json"])
-        state["ingress_fixed_ip"] = ""
-        atomic_write_text(paths["state_json"], json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+        if old_rule.direct_ipv6:
+            raise ConfigError("公网 IPv6 直连入口请通过编辑规则更改监听地址")
+        if expected_rule is not None and old_rule != expected_rule:
+            raise ApplyError(f"规则 {rule_name!r} 已变更，请重新预览")
+        updated = replace(old_rule, ingress_fixed_ip="")
+        _write_ingress_settings(paths, updated)
         return {
             "rule_name": rule_name,
             "dial_address": f"{updated.ingress_domain}:{updated.public_port}",
@@ -1219,6 +1280,8 @@ def check_prereqs(global_cfg: GlobalConfig, probe_remote: str = "192.0.2.10") ->
     realm_detail: Any
     try:
         info = discover_realm_binary(global_cfg.tool.realm_bin)
+        if global_cfg.ingress.listen_interface and not info.supports_listen_interface:
+            raise PreflightError(f"Realm {info.version_text} 不支持 --listen-interface")
         realm_detail = {
             "path": info.path,
             "version": info.version_text,

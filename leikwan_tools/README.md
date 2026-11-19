@@ -1,8 +1,8 @@
 # leikwan_tools
 
-在 Debian 12 + `systemd` 环境下运行的独立 IPv4 TCP 转发部署与管理工具，基于 Realm v2.x，支持多条独立转发规则各自选择走 `9929` 或 `cn2` 出口线路到指定落地，并支持公网入口域名 A 记录查询、显式固定公网 IP 及客户端分层（TCP / TLS / 证书 / 应用）连通性验证。
+在 Debian 12 + `systemd` 环境下运行的 TCP 转发部署与管理工具，基于 Realm v2.x。每条规则可使用官方 IPv4 入口或本机公网 IPv6 直连，并选择 `9929` 或 `cn2` 出口连接 IPv4 落地。工具支持官方入口域名 A 记录查询、固定公网 IPv4，以及客户端分层（TCP / TLS / 证书 / 应用）连通性验证。
 
-> **安全边界声明**：本工具为完全独立项目，**不改动** 原版 `Toolkit`、`LeiKwanManager`、`v6-mng.sh`（不向其中添加菜单或入口），**不修改** 已有 Realm 实例、源策略路由、主路由、全局防火墙、香港落地服务与客户端现有配置，也**不添加任何防火墙例外**。
+原版 `Toolkit`、`LeiKwanManager`、`v6-mng.sh` 和外部 Realm 实例由各自原有工具管理。本工具只管理自己的 Realm 实例。经显式确认的路由初始化仅向主配置指定的独立 IPv4 表添加所需条目，保留主路由、全局防火墙、SSH 配置和第三方路由。
 
 ---
 
@@ -20,7 +20,7 @@ VPS 内网 IPv4:内网端口  (例如 10.7.0.146:10001)
   ▼  Realm（listen = 内网IPv4:内网端口，remote = 落地IPv4:落地端口，
   │        through = 所选出口源IPv4，interface = 所选出口网卡）
 VPS 源策略路由表（例如表 101 -> eth0 / 9929，或表 102 -> eth1 / CN2）
-  │  （VPS 源策略路由，部署前须已存在）
+  │  （使用已有兼容规则，或在 VPS 上确认初始化）
   ▼
 落地服务器 IPv4:落地端口  (例如 192.0.2.10:54141)
 ```
@@ -38,15 +38,16 @@ VPS 源策略路由表（例如表 101 -> eth0 / 9929，或表 102 -> eth1 / CN2
 ### 1. 运行期间防串线
 - `leikwan_tools` 为每条规则生成的 Realm 运行配置同时写入：
   - `through = "<出口源IPv4>"`（绑定出站 socket 源地址）
-  - `interface = "<出口网卡>"`（仅绑定连接落地的出站 TCP socket `SO_BINDTODEVICE`，不设置 `listen_interface`，不影响另一网卡入站及向客户端回包）
+  - `interface = "<出口网卡>"`（绑定连接落地的出站 TCP socket）
+  - 当主配置设置 `[ingress].listen_interface = "eth0"` 时，`listen_interface = "eth0"` 将监听 socket 绑定到 eth0。旧主配置省略该项时，沿用按监听 IPv4 绑定的模式。
 - 当选定线路的源策略路由在运行期间突然被撤掉或缺失时，由于出站 socket 已被内核绑定在指定出口网卡，新连接不会退回 `main` 主路由表从错误网卡发出（错误线路新增 SYN 为 `0`），而其他使用正常线路的规则继续正常工作。
 
 ### 2. 开机启动期间防串线与等待
-- `systemd` 模板单元 `leikwan_tools-realm@.service` 在 `ExecStartPre` 阶段执行 `/usr/local/lib/leikwan_tools/realm-preflight.sh %i`（调用 `leikwan_tools _verify-startup <规则名>`）。
+- `leikwan_tools-routing.service` 在 `network-online.target` 后恢复已批准的路由。Realm 单元排在该服务之后启动，并通过 `ExecStartPre` 独立验证路由。
 - 即使系统上的源策略路由服务在 `network-online.target` 之后才延迟完成配置，`ExecStartPre` 也会按 `0.5s` 间隔轮询等待（默认最多 `startup_route_wait_seconds = 45` 秒，可在主配置 `[tool]` 中调整，单元 `TimeoutStartSec=90`）：
   - 核对本地监听地址存在；
   - 核对出口网卡状态 `UP` 且携带预期 `source_ip`；
-  - 核对 `ip -4 route get <落地IPv4> from <出站源IPv4>`、`ip -4 route get ... from ... oif <出口网卡>` 与 `ip -4 rule show` 完全匹配。
+  - 核对 `ip -4 route get <落地IPv4> from <出站源IPv4>`、带出站 `oif` 的查询及源策略规则。另从监听 IPv4 对 `203.0.113.254` 做内核查路，以核对客户端回程网卡。该地址仅用于查路，查询不发包。
 - 策略路由就绪前绝不拉起 Realm；若在超时期内一直未就绪，`systemd` 按 `Restart=on-failure`（`RestartSec=3`）继续重试直到策略路由恢复。
 
 ### 3. 路由故障后的恢复方式
@@ -61,7 +62,16 @@ VPS 源策略路由表（例如表 101 -> eth0 / 9929，或表 102 -> eth1 / CN2
 
 ## 三、部署前置条件确认方法
 
-本工具将 **「利群官方端口映射」** 与 **「VPS 上已有的源策略路由」** 作为部署前置条件，不会自动修改端口映射或路由表。部署前请以只读命令核对：
+先在利群侧完成官方端口映射，并核对主配置中的本机地址、网卡、下一跳和表号。默认配置使用下列线路。源策略规则仅匹配各自的 `/32`。
+
+| 线路 | 源 IPv4 | 网卡 | 下一跳 | 表 |
+| --- | --- | --- | --- | --- |
+| 9929 与入口回程 | `10.7.0.146` | `eth0` | `10.7.0.1` | `101` |
+| CN2 | `10.8.0.146` | `eth1` | `10.8.0.1` | `102` |
+
+`lqtool routing plan` 只读显示将新增和复用的条目。`sudo lqtool routing init --yes` 或 `sudo lqtool` 菜单「5 -> 1」确认后应用。初始化支持独立路由表与能直接复用的人工规则。专用表里存在额外路由、源地址规则重叠或已批准的线路参数发生变化时，工具会报告冲突。初始化记录位于 `<state_dir>/source-routing.json`。卸载仅清理该记录和内核标记能共同证明归属的条目。
+
+也可使用以下只读命令核对。
 
 ```bash
 # 1) 查看本机网卡与 IPv4 地址（核对官方映射内网 IP 与 9929 / CN2 网卡）
@@ -113,7 +123,7 @@ ip -4 route get 192.0.2.10 from 10.8.0.146 oif eth1
 
 ## 五、Realm 兼容版本、上游来源与完整性校验
 
-- **已验证兼容版本**：`Realm v2.9.6`（要求主版本为 `2` 且 `>= 2.6.0`，支持 TOML、`--through` 与 `--interface`）
+- **已验证版本**为 `Realm v2.9.6`。基础模式要求 `2.x` 且 `>= 2.6.0`，并支持 TOML、`--through`、`--interface`。官方入口网卡绑定还要求 `--listen-interface`。
 - **复用策略**：优先发现并复用已有兼容 Realm（绝不覆盖已有二进制）；仅在未发现兼容二进制或显式传入 `--realm-tarball` 时才安装至 `/usr/local/lib/leikwan_tools/bin/realm`。
 - **上游来源（GitHub Releases）与 SHA-256**：
   - `x86_64` (`realm-x86_64-unknown-linux-musl.tar.gz`)：`b1cc335547bea8bb2a88178bef12ec7f2363e36200e7ea1d4e1e67627929bf65`
@@ -123,7 +133,11 @@ ip -4 route get 192.0.2.10 from 10.8.0.146 oif eth1
 
 ## 六、从安装到应用的完整可复制命令
 
-安装后输入 `lqtool` 打开交互菜单，按提示检查前置条件、预览和管理规则，或查询公网入口。应用、停用、删除规则需以 root 运行，例如 `sudo lqtool`。`lqtool --config /path/to/config.toml menu` 可为菜单指定主配置，`lqtool status` 等带子命令的调用与原有 CLI 相同。
+安装后以 `sudo lqtool` 打开菜单（主菜单包含 **1** 查看转发状态、**2** 转发规则管理、**3** 查询官方公网入口 IP、**4** 查询并设置转发的客户端入口 IP、**5** 初始化与环境排查、**6** 从仓库检查并更新工具）。先进入 **5 -> 1** 预览并确认初始化双线出口路由，再进入 **2** 转发规则管理（**1** 查看已有转发、**2** 新建转发、**3** 修改转发、**4** 暂停 / 恢复转发、**5** 删除转发）。菜单 **4** 查询规则域名的 A 记录，可用配置中的 DNS 服务器或临时指定解析器。菜单显示其他公网候选作为客户端备用，固定或恢复域名只更新客户端入口元数据。需要验证某个候选实际通往落地时，用 `lqtool ingress verify`。菜单 **6** 支持从 GitHub 或 Gitee 仓库检查更新并原地升级，原有主配置、规则和运行中连接均保留不变。
+
+使用公网 IPv6 直连时，在 **2 -> 2**（新建转发）或 **2 -> 3**（修改转发）的入口处填本机公网 IPv6 地址，端口同时用作客户端入口和本机监听端口。用 TOML 配置时，`forward.listen_ip` 填 IPv6 地址，`forward.listen_port` 与 `ingress.public_port` 一致，`ingress.domain` 和 `ingress.fixed_ip` 留空。Realm 绑定该 IPv6 地址，入口回程沿用系统 IPv6 路由，IPv4 出站仍绑定所选线路的源地址和网卡。
+
+RFC 香港验收可在 **2 -> 2**（新建转发）使用规则名 `rfc-hk`，接受默认入口域名 `paid-v4.bgp1.leikwanhost.com`，依次填外部端口 `54848`、本机 `10.7.0.146` 与 `10003`、落地 `172.81.104.22` 与 `54848`，选 `cn2` 后查看预览并输入 `y`。其他规则可按实际映射填写。
 
 ```bash
 # 1. 安装（安装工具与启用转发分开，默认不启用任何示例规则）
@@ -132,7 +146,9 @@ sudo bash install.sh
 
 # 2. 核对主配置与前置条件
 sudo nano /etc/leikwan_tools/config.toml
-sudo leikwan_tools check-prereqs --probe-remote 192.0.2.10
+sudo lqtool routing plan
+sudo lqtool routing init --yes
+sudo lqtool check-prereqs
 
 # 3. 复制示例规则修改并预览（只读）
 sudo cp /etc/leikwan_tools/examples/rule-zouter-jp.example.toml /tmp/zouter-jp.toml
@@ -148,7 +164,12 @@ sudo leikwan_tools status zouter-jp --check-dns
 sudo leikwan_tools disable zouter-jp
 sudo leikwan_tools delete zouter-jp
 
-# 6. 卸载（默认保留配置；加 --purge 仅逐项清理本工具清单登记的配置文件）
+# 6. 从仓库检查并原地更新（支持 GitHub / Gitee，保留现有配置与转发连接）
+lqtool update --check
+sudo lqtool update --channel github
+sudo lqtool update --channel gitee
+
+# 7. 卸载（默认保留配置；加 --purge 仅逐项清理本工具清单登记的配置文件）
 sudo bash uninstall.sh
 sudo bash uninstall.sh --purge
 ```
@@ -203,14 +224,14 @@ sudo bash uninstall.sh --purge
 ```bash
 cd "/Users/allen/Downloads/Agent_Worker/vpstools/vps_tools/leikwan_tools"
 
-# 1. 单元测试（原有 13 项 + 第二轮新增 10 项，共 23 项）
+# 1. 单元测试
 ./tests/run_unit_tests.sh
 
-# 2. 原有隔离 Debian 12 + systemd 全链路测试（T1–T11，动态独立 Docker 资源）
+# 2. 隔离 Debian 12 + systemd 全链路测试（T1–T12，动态独立 Docker 资源）
 ./tests/run_isolated_e2e.sh
 
 # 3. 第二轮 7 项独立审计回归专项测试（R1–R7）
 ./tests/run_r2_regressions.sh
 ```
 
-> **验收边界声明**：隔离网络中模拟回显与路由/TLS 实验仅作为 **TCP 握手** 与 **双向数据** 证据；**利群官方公网映射、真实 9929/CN2 线路、生产业务认证与吞吐** 仍待现网验收。
+T12 在隔离 VPS 中测试空策略表初始化、第二次运行、兼容人工规则、冲突与故障回滚。随后用菜单新建 HK 回显规则，检查 CN2 正常而 eth0 回程缺失的拒绝路径、入口固定前后的 PID，以及容器重启后的恢复。隔离实验验证了 TCP 握手与双向数据，真实公网映射、线路及生产业务仍由部署方验收。线路切换由操作员明确选择。

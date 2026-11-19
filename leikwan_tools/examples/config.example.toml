@@ -14,6 +14,7 @@ startup_route_wait_seconds = 45
 
 [ingress]
 default_domain = "paid-v4.bgp1.leikwanhost.com"
+listen_interface = "eth0"
 # 留空时使用 /etc/resolv.conf 与系统解析器；也可显式指定 DNS 服务器 IPv4
 dns_server = ""
 

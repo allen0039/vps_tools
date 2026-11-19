@@ -1,9 +1,16 @@
 test_example_configs_validate_and_roundtrip (test_unit.TestConfigValidation) ... ok
 test_independent_ports_and_validation_errors (test_unit.TestConfigValidation) ... ok
+test_public_ipv6_listens_directly_and_preserves_ipv4_egress (test_unit.TestConfigValidation) ... ok
 test_dns_wire_query_and_compressed_response (test_unit.TestIngressDnsAndProbing) ... ok
 test_fixed_ip_staleness_warning (test_unit.TestIngressDnsAndProbing) ... ok
 test_probe_three_tier_classification (test_unit.TestIngressDnsAndProbing) ... ok
-test_menu_requires_confirmation_and_returns_after_command (test_unit.TestInteractiveShortcut) ... ok
+test_truncated_udp_dns_retries_over_tcp (test_unit.TestIngressDnsAndProbing) ... ok
+test_menu_delete_lists_rules_requires_confirmation_and_returns_after_error (test_unit.TestInteractiveShortcut) ... ok
+test_menu_edit_preserves_rule_settings_and_uses_confirmed_snapshot (test_unit.TestInteractiveShortcut) ... ok
+test_menu_list_forwards_shows_egress_name (test_unit.TestInteractiveShortcut) ... ok
+test_menu_system_submenu_navigation (test_unit.TestInteractiveShortcut) ... ok
+test_menu_toggle_pause_and_resume (test_unit.TestInteractiveShortcut) ... ok
+test_menu_update_check_cancel_and_apply (test_unit.TestInteractiveShortcut) ... ok
 test_shortcut_opens_menu_and_accepts_cli_arguments (test_unit.TestInteractiveShortcut) ... ok
 test_realm_toml_binds_through_and_interface (test_unit.TestR2ConfigAndRoutePinning) ... ok
 test_reject_foreign_systemd_template (test_unit.TestR2ConfigAndRoutePinning) ... ok
@@ -24,10 +31,16 @@ test_parse_realm_version (test_unit.TestRealmAndLock) ... ok
 test_link_and_addr_parsers (test_unit.TestRoutingAndPorts) ... ok
 test_route_get_and_policy_rule_verification (test_unit.TestRoutingAndPorts) ... ok
 test_ss_port_conflict_exact_and_wildcard (test_unit.TestRoutingAndPorts) ... ok
+test_build_install_args_and_perform_update (test_unit.TestSelfUpdate) ... ok
+test_cli_update_check_and_apply (test_unit.TestSelfUpdate) ... ok
+test_extract_version_and_compare (test_unit.TestSelfUpdate) ... ok
+test_parse_commit_metadata_github_and_gitee (test_unit.TestSelfUpdate) ... ok
+test_tree_filter_and_truncated_fallback (test_unit.TestSelfUpdate) ... ok
+test_validate_staged_files_rejects_bad_syntax (test_unit.TestSelfUpdate) ... ok
 test_fallback_rejects_duplicate_keys (test_unit.TestTomlCompat) ... ok
 test_roundtrip_both_parsers (test_unit.TestTomlCompat) ... ok
 
 ----------------------------------------------------------------------
-Ran 28 tests in 0.923s
+Ran 41 tests in 1.017s
 
 OK

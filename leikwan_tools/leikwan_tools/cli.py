@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from datetime import datetime, timezone
+from ipaddress import IPv4Address, ip_address
 import json
+import os
 from pathlib import Path
+import re
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -15,8 +19,18 @@ from . import (
     MANAGED_REALM_BIN,
     __version__,
 )
-from .config import ConfigError, GlobalConfig, RuleConfig, load_global_config, load_rule_config
+from .config import (
+    ConfigError,
+    GlobalConfig,
+    RuleConfig,
+    format_endpoint,
+    load_global_config,
+    load_rule_config,
+    parse_rule_config_dict,
+    validate_ipv4,
+)
 from .ingress import (
+    DnsQueryResult,
     IngressError,
     check_fixed_ip_staleness,
     probe_candidate,
@@ -36,9 +50,45 @@ from .manager import (
     unselect_rule_ingress_ip,
     verify_startup_rule,
 )
-from .ownership import OwnershipError, ensure_safe_subpath, resolve_default_config_path, validate_rule_name
+from .ownership import (
+    BIN_LAUNCHER_PATH,
+    SHORTCUT_PATH,
+    OwnershipError,
+    ensure_safe_subpath,
+    resolve_default_config_path,
+    validate_rule_name,
+)
 from .realm import RealmError, install_realm_binary
-from .system import LockTimeoutError, PreflightError, SystemErrorBase
+from .routing import apply_routing, plan_routing
+from .system import (
+    LockTimeoutError,
+    PreflightError,
+    SystemErrorBase,
+    systemd_is_active,
+    unit_name_for_rule,
+)
+from .updater import (
+    DEFAULT_UPDATE_CHANNEL,
+    UPDATE_CHANNELS,
+    UpdateCheckInfo,
+    UpdateError,
+    UpdateResult,
+    check_for_update,
+    perform_update,
+)
+
+_MENU_ERRORS = (
+    ConfigError,
+    PreflightError,
+    ApplyError,
+    RealmError,
+    IngressError,
+    OwnershipError,
+    LockTimeoutError,
+    SystemErrorBase,
+    UpdateError,
+    OSError,
+)
 
 
 def _maybe_load_global(config_path: str) -> Optional[GlobalConfig]:
@@ -66,16 +116,26 @@ def _print_json(data: Any) -> None:
 
 
 def _print_plan(res: Dict[str, Any]) -> None:
-    print(f"=== 预览结果 [{res['action']}] 规则: {res['rule_name']} ===")
+    action_labels = {
+        "CREATE": "新建",
+        "UPDATE": "更新并重启",
+        "UPDATE_METADATA": "仅更新客户端入口",
+        "NOOP": "无变更",
+    }
+    action_zh = action_labels.get(res["action"], res["action"])
+    print(f"=== 变更预览 [{res['action']}]（{action_zh}） 转发: {res['rule_name']} ===")
     print(
         f"出口线路   : {res['line']['name']} (网卡={res['line']['interface']}, "
         f"源IP={res['through']}, 网关={res['line']['gateway']}, 表={res['line']['table']})"
     )
-    print(f"客户端入口 : {res['dial_hint']}:{res['public_port']} -> 本机监听 {res['listen']} -> 落地 {res['remote']}")
+    dial = format_endpoint(res["dial_hint"], res["public_port"])
+    print(f"客户端入口 : {dial} -> 本机监听 {res['listen']} -> 落地 {res['remote']}")
     print(f"systemd单元: {res['unit_name']}")
     print(f"Realm 版本 : {res['realm']['version']} ({res['realm']['origin']}) @ {res['realm']['path']}")
     print(f"路由校验   : {res['route_check']['command']}")
     print(f"             {res['route_check']['raw_output']}")
+    if res.get("return_route"):
+        print(f"入口回程   : {res['return_route']}")
     if res.get("forced_non_dns"):
         print("覆盖标记   : 已通过 --allow-non-dns 显式强制覆盖固定公网 IP 校验")
     if res.get("stale_ip_warning"):
@@ -97,7 +157,7 @@ def _print_apply(res: Dict[str, Any]) -> None:
     label = label_map.get(res["status"], res["status"])
     print(f"[{label}] 规则={res['rule_name']} 单元={res['unit_name']} PID={res['main_pid']}")
     print(
-        f"转发链路 : 客户端({res['dial_addr']}:{res['public_port']}) -> 本机({res['listen']}) "
+        f"转发链路 : 客户端({format_endpoint(res['dial_addr'], res['public_port'])}) -> 本机({res['listen']}) "
         f"-> 经({res['through']}@{res['egress_interface']}) -> 落地({res['remote']})"
     )
     print(f"出口线路 : {res['line']} | Realm {res['realm_version']} ({res['realm_bin']})")
@@ -109,28 +169,66 @@ def _print_apply(res: Dict[str, Any]) -> None:
         print(f"入口警告 : {res['stale_ip_warning']}")
 
 
+def _format_line_display(
+    line_name: str,
+    description: str = "",
+    interface: str = "",
+    source_ip: str = "",
+) -> str:
+    details = []
+    if description:
+        details.append(description)
+    if interface and source_ip:
+        details.append(f"{interface} / {source_ip}")
+    elif interface:
+        details.append(interface)
+    if not details:
+        return f"{line_name}（主配置未定义此线路）"
+    return f"{line_name}（{' | '.join(details)}）"
+
+
+def _format_rule_status_summary(item: Dict[str, Any]) -> str:
+    active_state = item["active_state"]
+    sub_state = item["sub_state"]
+    if active_state == "active" and sub_state == "running":
+        if item["listening_ok"]:
+            return f"运行中（监听正常，PID={item['main_pid']}，重启={item['n_restarts']}）"
+        return f"异常（进程运行中但监听端口异常，PID={item['main_pid']}，重启={item['n_restarts']}）"
+    if not item["enabled"] and active_state in ("inactive", "dead"):
+        return f"已暂停（未开机自启，状态={active_state}/{sub_state}）"
+    return f"未运行（状态={active_state}/{sub_state}，重启={item['n_restarts']}）"
+
+
 def _print_status_list(items: List[Dict[str, Any]]) -> None:
     if not items:
-        print("当前没有已部署的托管规则（安装默认不启用任何示例规则）。")
+        print("当前没有已部署的托管规则（可进入「2. 转发规则管理 -> 2. 新建转发」添加）。")
         return
     for idx, item in enumerate(items):
         if idx > 0:
             print("-" * 72)
-        print(f"规则名     : {item['rule_name']}  ({item['description'] or '无描述'})")
-        print(
-            f"运行状态   : enabled={item['enabled']} active={item['active_state']}({item['sub_state']}) "
-            f"PID={item['main_pid']} restarts={item['n_restarts']} listening_ok={item['listening_ok']}"
+        dial = format_endpoint(item["dial_addr"], item["public_port"])
+        autostart = "已开启" if item["enabled"] else "未开启"
+        line_desc = _format_line_display(
+            item["line"],
+            item.get("line_description", ""),
+            item["egress_interface"],
+            item["through"],
         )
+        print(f"转发名称   : {item['rule_name']}  ({item['description'] or '无备注'})")
+        print(f"当前状态   : {_format_rule_status_summary(item)} | 开机自启: {autostart}")
+        print(f"出口线路   : {line_desc}")
+        print(f"客户端连接 : {dial}")
         print(
-            f"转发路径   : 拨号 {item['dial_addr']}:{item['public_port']} -> 监听 {item['listen']} "
-            f"-> 线路 {item['line']}({item['through']}@{item['egress_interface']}) -> 落地 {item['remote']}"
+            f"转发路径   : 入口 {dial} -> 本机监听 {item['listen']} "
+            f"-> 出口 {item['line']}({item['through']}@{item['egress_interface']}) -> 落地 {item['remote']}"
         )
-        print(
-            f"固定公网IP : {item['ingress_fixed_ip'] or '(未固定，使用域名解析)'}  "
-            f"[域名: {item['ingress_domain']}]"
-        )
-        print(f"路由状态   : {'正常' if item['route_ok'] else '异常'} | {item['route_detail']}")
-        print(f"Realm 实例 : {item['realm_version']} @ {item['realm_bin']} | systemd={item['unit_name']}")
+        if item["ingress_domain"]:
+            print(
+                f"固定公网IP : {item['ingress_fixed_ip'] or '(未固定，使用域名解析)'}  "
+                f"[域名: {item['ingress_domain']}]"
+            )
+        print(f"出口路由   : {'正常' if item['route_ok'] else '异常'} | {item['route_detail']}")
+        print(f"运行服务   : Realm {item['realm_version']} @ {item['realm_bin']} | systemd={item['unit_name']}")
         if item.get("stale_ip_warning"):
             print(f"入口警告   : {item['stale_ip_warning']}")
 
@@ -144,6 +242,14 @@ def _cmd_ingress_query(args: argparse.Namespace) -> int:
 
     if args.rule:
         rule = _resolve_rule_for_ingress(args.rule, args.config)
+        if rule.direct_ipv6 and not args.domain:
+            direct_port = rule.public_port if port is None else port
+            endpoint = format_endpoint(rule.dial_addr, direct_port)
+            if args.json:
+                _print_json({"domain": "", "dial_address": endpoint, "port": direct_port, "candidates": []})
+            else:
+                print(f"公网 IPv6 直连入口 {endpoint}，可用 ingress verify --rule {rule.name} 验证。")
+            return 0
         if not args.domain:
             domain = rule.ingress_domain
         if port is None:
@@ -202,7 +308,7 @@ def _cmd_ingress_query(args: argparse.Namespace) -> int:
                     "tls_status": "未启用",
                     "cert_status": "未启用",
                     "app_status": "未校验",
-                    "detail": "仅执行 DNS A 记录查询（未指定 --port 或 --rule 探测端口）",
+                    "detail": "仅查询 DNS A 记录（未测端口连通性）",
                     "response_preview": "",
                     "exit_code": 0,
                 }
@@ -275,12 +381,19 @@ def _cmd_ingress_verify(args: argparse.Namespace) -> int:
         if port is None:
             port = rule.public_port
         if not args.host and not args.all_candidates:
-            args.host = rule.ingress_fixed_ip or rule.ingress_domain
+            args.host = rule.dial_addr
 
     if port is None:
         raise ConfigError("必须指定 --port 或通过 --rule 指定规则以获取公网端口")
 
-    dns_res = query_dns_a(domain=domain, dns_server=dns_server, timeout=args.timeout)
+    direct = not args.all_candidates and args.host and ":" in args.host
+    if direct:
+        now = datetime.now(timezone.utc)
+        dns_res = DnsQueryResult("", "", now.astimezone().isoformat(), now.isoformat(), [])
+    elif domain:
+        dns_res = query_dns_a(domain=domain, dns_server=dns_server, timeout=args.timeout)
+    else:
+        raise ConfigError("IPv6 直连规则使用 --host 或 --rule 验证")
     targets: List[str] = []
     if args.all_candidates:
         targets = list(dns_res.ips)
@@ -288,11 +401,10 @@ def _cmd_ingress_verify(args: argparse.Namespace) -> int:
             raise IngressError(f"未能从 {domain} 解析到任何 A 记录 ({dns_res.error})")
     elif args.host:
         try:
-            import ipaddress
-
-            ipaddress.IPv4Address(args.host)
-            targets = [args.host]
+            targets = [str(ip_address(args.host))]
         except ValueError:
+            if direct:
+                raise ConfigError(f"无效的 IPv6 地址: {args.host!r}") from None
             host_dns = query_dns_a(domain=args.host, dns_server=dns_server, timeout=args.timeout)
             targets = list(host_dns.ips)
             if not targets:
@@ -329,11 +441,12 @@ def _cmd_ingress_verify(args: argparse.Namespace) -> int:
         _print_json(payload)
     else:
         print(f"验证时间   : {dns_res.queried_at_local} ({dns_res.queried_at_utc})")
-        print(f"参考域名   : {domain} (当前 DNS A 记录: {', '.join(dns_res.ips) or '无'})")
+        if not direct:
+            print(f"参考域名   : {domain} (当前 DNS A 记录: {', '.join(dns_res.ips) or '无'})")
         for r in results:
             rtt = f" RTT={r['rtt_ms']}ms" if r["rtt_ms"] is not None else ""
             tcp_str = "连通" if r["tcp_reachable"] else "失败"
-            print(f"  - {r['ip']}:{r['port']} => [{r['stage']}]{rtt} | {r['detail']}")
+            print(f"  - {format_endpoint(r['ip'], r['port'])} => [{r['stage']}]{rtt} | {r['detail']}")
             print(
                 f"    分层状态: TCP={tcp_str} | TLS={r['tls_status']} | "
                 f"证书({r['cert_verify_mode']})={r['cert_status']} | 应用={r['app_status']}"
@@ -342,7 +455,8 @@ def _cmd_ingress_verify(args: argparse.Namespace) -> int:
                 print(f"    回包预览: {r['response_preview']}")
             if r["tls_subject"] or r["tls_san"]:
                 print(f"    TLS 证书: subject={r['tls_subject']} san={r['tls_san']}")
-        print("\n" + "\n".join(protocol_preservation_notes(results[0]["ip"], port, domain)))
+        if not direct:
+            print("\n" + "\n".join(protocol_preservation_notes(results[0]["ip"], port, domain)))
 
     if any(r["exit_code"] == 0 for r in results):
         return 0
@@ -352,39 +466,461 @@ def _cmd_ingress_verify(args: argparse.Namespace) -> int:
     return 1
 
 
-def _run_menu(config_path: str) -> int:
-    actions = {
-        "1": ("查看规则状态", ["status"], ""),
-        "2": ("检查运行前置条件", ["check-prereqs"], ""),
-        "3": ("预览规则部署", ["plan"], "规则 TOML 路径"),
-        "4": ("应用规则文件", ["apply"], "规则 TOML 路径"),
-        "5": ("停用规则", ["disable"], "规则名称"),
-        "6": ("删除规则", ["delete"], "规则名称"),
-        "7": ("查询公网入口", ["ingress", "query"], ""),
+def _confirm(message: str) -> bool:
+    return input(f"{message}？[y/N] ").strip().lower() == "y"
+
+
+def _menu_pick(
+    items: list[str],
+    prompt: str,
+    default: str = "",
+    labels: Optional[list[str]] = None,
+) -> str:
+    display_items = labels if labels is not None else items
+    for number, label in enumerate(display_items, 1):
+        print(f"  {number}. {label}")
+    hint = f"，回车保留 {default}" if default else "，回车取消"
+    value = input(f"{prompt}（输入编号，0 返回{hint}）：").strip()
+    if not value:
+        return default
+    if value == "0":
+        return ""
+    if value in items:
+        return value
+    if value.isascii() and value.isdecimal() and len(value) <= len(str(len(items))):
+        number = int(value)
+        if 1 <= number <= len(items):
+            return items[number - 1]
+    raise ConfigError(f"无效选项: {value}")
+
+
+def _rule_active_state(cfg: GlobalConfig, rule: RuleConfig) -> Optional[bool]:
+    unit_name = unit_name_for_rule(cfg.tool.systemd_unit_template, rule.name)
+    try:
+        return systemd_is_active(unit_name)
+    except (SystemErrorBase, OSError):
+        return None
+
+
+def _format_line_brief(cfg: GlobalConfig, line_name: str) -> str:
+    lc = cfg.lines.get(line_name)
+    if lc and lc.description:
+        return f"{line_name}({lc.description})"
+    return line_name
+
+
+def _menu_rule(cfg: GlobalConfig, prompt: str = "选择转发规则") -> Optional[RuleConfig]:
+    managed = list_managed_rules(cfg)
+    if not managed:
+        print("当前还没有已配置的转发规则。")
+        return None
+    rules = {rule.name: rule for rule in managed}
+    labels = [
+        f"{rule.name}  (出口: {_format_line_brief(cfg, rule.line)} | 入口: {format_endpoint(rule.dial_addr, rule.public_port)} -> 落地: {rule.remote_ip}:{rule.remote_port})"
+        for rule in managed
+    ]
+    return rules.get(_menu_pick(list(rules), prompt, labels=labels))
+
+
+def _menu_field(label: str, default: Any = "") -> str:
+    hint = f" [{default}]" if default else ""
+    return input(f"{label}{hint}：").strip() or str(default)
+
+
+def _menu_domain(value: str) -> str:
+    try:
+        hostname = value.removesuffix(".").encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ConfigError(f"入口域名无效: {value!r}") from exc
+    labels = hostname.split(".")
+    if len(hostname) > 253 or len(labels) < 2 or labels[-1].isdigit() or any(
+        not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in labels
+    ):
+        raise ConfigError(f"入口域名无效: {value!r}")
+    return value
+
+
+def _menu_port(label: str, default: Any = "") -> int:
+    value = _menu_field(label, default)
+    if not re.fullmatch(r"[0-9]{1,5}", value):
+        raise ConfigError(f"{label}必须填写 1–65535 的端口")
+    return int(value)
+
+
+def _menu_forward(cfg: GlobalConfig, *, edit: bool) -> None:
+    old = _menu_rule(cfg, prompt="选择要修改的转发") if edit else None
+    if edit and old is None:
+        return
+    name = old.name if old else _menu_field("转发名称（如 rfc-hk，仅字母数字/._-，留空返回）")
+    if not name:
+        return
+    validate_rule_name(name)
+    if not edit and (Path(cfg.tool.rules_dir) / f"{name}.toml").exists():
+        raise ConfigError(f"转发 {name!r} 已存在，请使用「修改转发」")
+    default_entry = cfg.ingress.default_domain
+    if old:
+        default_entry = old.listen_ip if old.direct_ipv6 else old.ingress_domain
+    entry = _menu_field("入口地址（默认官方域名；IPv6 直连请填本机公网 IPv6）", default_entry)
+    direct = ":" in entry
+    domain = "" if direct else _menu_domain(entry)
+    public_port = _menu_port("客户端连接的公网端口（外部端口）", old.public_port if old else "")
+    listen_ip, listen_port = entry, public_port
+    if not direct:
+        old_ipv4 = old if old and not old.direct_ipv6 else None
+        listen_ip = _menu_field("本机监听的内网 IPv4（利群面板映射指向的 VPS 内网地址）", old_ipv4.listen_ip if old_ipv4 else "")
+        listen_port = _menu_port("本机监听的内网端口（利群面板映射指向的 VPS 内部端口）", old_ipv4.listen_port if old_ipv4 else "")
+    remote_ip = _menu_field("落地服务器 IPv4（目标机地址）", old.remote_ip if old else "")
+    remote_port = _menu_port("落地服务器端口（目标机端口）", old.remote_port if old else "")
+    line_names = list(cfg.lines)
+    line_labels = [
+        f"{lname}（网卡 {lc.interface}，源IP {lc.source_ip}" + (f"，{lc.description}" if lc.description else "") + "）"
+        for lname, lc in cfg.lines.items()
+    ]
+    line = _menu_pick(
+        line_names,
+        "选择出口线路",
+        old.line if old and old.line in cfg.lines else "",
+        labels=line_labels,
+    )
+    if not line:
+        return
+    rule = parse_rule_config_dict({
+        "rule": {"name": name, "line": line},
+        "ingress": {"domain": domain, "public_port": public_port},
+        "forward": {
+            "listen_ip": listen_ip, "listen_port": listen_port, "remote_ip": remote_ip, "remote_port": remote_port,
+        },
+    })
+    if old:
+        rule = replace(
+            rule,
+            description=old.description,
+            ingress_fixed_ip=old.ingress_fixed_ip if domain == old.ingress_domain else "",
+            log_level=old.log_level,
+            tcp_timeout=old.tcp_timeout,
+            tcp_keepalive=old.tcp_keepalive,
+            tcp_keepalive_probe=old.tcp_keepalive_probe,
+        )
+    _print_plan(plan_rule(cfg, rule))
+    if _confirm("确认生效并启动此转发"):
+        _print_apply(apply_rule(cfg, rule, expected_rule=old, create_only=not edit))
+    else:
+        print("已取消。")
+
+
+def _menu_toggle_rule(cfg: GlobalConfig) -> None:
+    managed = list_managed_rules(cfg)
+    if not managed:
+        print("当前还没有已配置的转发规则。")
+        return
+    rules = {rule.name: rule for rule in managed}
+    states = {rule.name: _rule_active_state(cfg, rule) for rule in managed}
+    labels = []
+    for rule in managed:
+        state = states[rule.name]
+        badge = "运行中" if state is True else ("已暂停" if state is False else "状态未知")
+        dial = format_endpoint(rule.dial_addr, rule.public_port)
+        labels.append(
+            f"[{badge}] {rule.name}  (出口: {_format_line_brief(cfg, rule.line)} | 入口: {dial} -> 落地: {rule.remote_ip}:{rule.remote_port})"
+        )
+    selected = _menu_pick(list(rules), "选择要暂停或恢复的转发", labels=labels)
+    if not selected:
+        return
+    rule = rules[selected]
+    active = states[selected]
+    if active is None:
+        action = _menu_pick(["暂停转发", "恢复并启动转发"], f"无法自动识别 {rule.name} 的运行状态，请选择操作")
+        if not action:
+            return
+        pause = action == "暂停转发"
+    else:
+        pause = active
+    if pause:
+        if _confirm(f"确认暂停转发 {rule.name}（将停止服务并取消开机自启，保留配置以便随时恢复）"):
+            res = disable_rule(cfg, rule.name)
+            print(f"[已暂停] 转发={res['rule_name']} 单元={res['unit_name']}（配置已保留，可随时恢复）")
+        else:
+            print("已取消。")
+        return
+    _print_plan(plan_rule(cfg, rule))
+    if _confirm(f"确认恢复并启动转发 {rule.name}"):
+        _print_apply(apply_rule(cfg, rule, expected_rule=rule, create_only=False))
+    else:
+        print("已取消。")
+
+
+def _menu_delete_rule(cfg: GlobalConfig) -> None:
+    rule = _menu_rule(cfg, prompt="选择要删除的转发")
+    if rule is None:
+        return
+    dial = format_endpoint(rule.dial_addr, rule.public_port)
+    print(f"将删除转发：{rule.name}（入口 {dial} -> 本机监听 {rule.listen_endpoint} -> 落地 {rule.remote_ip}:{rule.remote_port}）")
+    if not _confirm(f"确认彻底删除转发 {rule.name}（将停止服务并移除所有配置文件）"):
+        print("已取消。")
+        return
+    res = delete_rule(cfg, rule.name)
+    print(f"[已删除] 转发={res['rule_name']} 单元={res['unit_name']}")
+    for f in res["removed_files"]:
+        print(f"  已移除: {f}")
+
+
+def _menu_ingress(cfg: GlobalConfig) -> None:
+    rule = _menu_rule(cfg, prompt="选择要设置客户端入口的转发")
+    if rule is None:
+        return
+    if rule.direct_ipv6:
+        print(f"该转发使用公网 IPv6 直连（{rule.listen_endpoint}），无需固定公网 IPv4；如需修改入口请进入「修改转发」。")
+        return
+    resolver = validate_ipv4(
+        _menu_field("DNS 服务器 IPv4（直接回车使用默认解析器）", cfg.ingress.dns_server),
+        "dns_server", allow_empty=True,
+    )
+    result = query_dns_a(rule.ingress_domain, dns_server=resolver)
+    print(f"{rule.ingress_domain} A 记录（解析器 {result.resolver}，时间 {result.queried_at_local}）")
+    if result.error:
+        print(f"查询失败：{result.error}")
+    if not result.records:
+        print("当前无 A 记录。")
+    candidates = []
+    for record in result.records:
+        addr = IPv4Address(record.ip)
+        if addr.is_global and not addr.is_multicast and not addr.is_reserved:
+            candidates.append(record.ip)
+            print(f"  {record.ip}  TTL={record.ttl if record.ttl is not None else '未知'}")
+        else:
+            print(f"  {record.ip}  非公网 IPv4，已排除")
+    print(f"当前客户端入口：{rule.ingress_fixed_ip or rule.ingress_domain}:{rule.public_port}")
+    restore_value = "恢复域名拨号"
+    values = [*candidates, restore_value]
+    labels = [f"{ip}:{rule.public_port}（固定此公网 IP）" for ip in candidates] + [
+        "恢复使用域名连接（不固定 IP，随 DNS 自动解析）"
+    ]
+    selected = _menu_pick(values, "选择客户端连接方式", labels=labels)
+    if not selected:
+        return
+    dial_addr = rule.ingress_domain if selected == restore_value else selected
+    print(f"客户端将连接 {dial_addr}:{rule.public_port}")
+    backups = [f"{ip}:{rule.public_port}" for ip in candidates if ip != selected]
+    if backups:
+        print(f"客户端备用地址 {'、'.join(backups)}")
+    if not _confirm("确认保存此客户端入口设置"):
+        print("已取消。")
+        return
+    if selected == restore_value:
+        outcome = unselect_rule_ingress_ip(cfg, rule.name, expected_rule=rule)
+    else:
+        outcome = select_rule_ingress_ip(cfg, rule.name, selected, dns_server=resolver, expected_rule=rule)
+    print(f"已设置 {outcome['dial_address']}（仅更新客户端入口记录，未重启 Realm，现有连接不受影响）")
+
+
+def _print_routing(result: dict) -> None:
+    status_val = result.get("status", "预览")
+    hint_map = {
+        "applied": "已初始化并启用开机自动恢复",
+        "noop": "已就绪，无需重复修改",
+        "unconfigured": "尚未配置双线源策略路由",
+        "预览": "只读预览，尚未写入系统",
     }
+    hint = hint_map.get(status_val, status_val)
+    print(f"双线出口路由状态 : {status_val}（{hint}）")
+    if status_val == "unconfigured":
+        return
+    for item in result["keep"]:
+        print(f"  保留已有 {item['kind']} {item['source_ip']}@{item['interface']} 表 {item['table']}")
+    for command in result["add"]:
+        print(f"  即将新增 {' '.join(command)}")
+    print(f"开机服务 {result['boot_unit']}，持久化记录 {result['state_file']}")
+
+
+def _menu_routing(cfg: GlobalConfig) -> None:
+    plan = plan_routing(cfg)
+    _print_routing(plan)
+    if _confirm("确认初始化并持久化双线出口路由（开机将自动恢复）"):
+        _print_routing(apply_routing(cfg, expected=plan))
+    else:
+        print("已取消。")
+
+
+def _menu_list_forwards(cfg: GlobalConfig) -> None:
+    managed = list_managed_rules(cfg)
+    if not managed:
+        print("当前还没有已配置的转发规则（可选择「2. 新建转发」添加）。")
+        return
+    print(f"\n当前共有 {len(managed)} 条已配置转发：")
+    for idx, rule in enumerate(managed, 1):
+        state = _rule_active_state(cfg, rule)
+        badge = "运行中" if state is True else ("已暂停" if state is False else "状态未知")
+        lc = cfg.lines.get(rule.line)
+        line_desc = _format_line_display(
+            rule.line,
+            lc.description if lc else "",
+            lc.interface if lc else "",
+            lc.source_ip if lc else "",
+        )
+        dial = format_endpoint(rule.dial_addr, rule.public_port)
+        if rule.direct_ipv6:
+            entry_note = "公网 IPv6 直连"
+        elif rule.ingress_fixed_ip:
+            entry_note = "已固定公网 IP"
+        else:
+            entry_note = "域名自动解析"
+        print(f"  {idx}. [{badge}] {rule.name}")
+        print(f"     出口线路   : {line_desc}")
+        print(f"     客户端入口 : {dial}（{entry_note}）")
+        print(f"     本机监听   : {rule.listen_endpoint}")
+        print(f"     落地目标   : {rule.remote_ip}:{rule.remote_port}")
+
+
+def _menu_rules_group(config_path: str) -> None:
+    handlers = {
+        "1": _menu_list_forwards,
+        "2": lambda cfg: _menu_forward(cfg, edit=False),
+        "3": lambda cfg: _menu_forward(cfg, edit=True),
+        "4": _menu_toggle_rule,
+        "5": _menu_delete_rule,
+    }
+    while True:
+        print(f"\nleikwan_tools v{__version__} > 转发规则管理")
+        print("  1. 查看已有转发")
+        print("  2. 新建转发")
+        print("  3. 修改转发")
+        print("  4. 暂停 / 恢复转发")
+        print("  5. 删除转发")
+        print("  0. 返回主菜单")
+        selected = input("请选择：").strip()
+        if selected == "0":
+            return
+        handler = handlers.get(selected)
+        if handler is None:
+            print("无效选项，请重新输入。")
+            continue
+        try:
+            handler(load_global_config(config_path))
+        except _MENU_ERRORS as exc:
+            print(f"错误: {exc}", file=sys.stderr)
+
+
+def _menu_system_group(config_path: str) -> None:
+    while True:
+        print(f"\nleikwan_tools v{__version__} > 初始化与环境排查")
+        print("  1. 初始化双线出口路由（首次装机时执行）")
+        print("  2. 检查运行环境与线路状态")
+        print("  0. 返回主菜单")
+        selected = input("请选择：").strip()
+        if selected == "0":
+            return
+        if selected == "1":
+            try:
+                _menu_routing(load_global_config(config_path))
+            except _MENU_ERRORS as exc:
+                print(f"错误: {exc}", file=sys.stderr)
+        elif selected == "2":
+            main(["--config", config_path, "check-prereqs"])
+        else:
+            print("无效选项，请重新输入。")
+
+
+def _print_update_check(info: UpdateCheckInfo) -> None:
+    status_map = {
+        "upgrade": f"发现新版本 v{info.remote_version}（当前 v{info.current_version}）",
+        "same": f"当前已是最新版本 v{info.current_version}",
+        "ahead": f"本地版本 (v{info.current_version}) 高于仓库版本 (v{info.remote_version})",
+        "unknown": f"仓库版本为 v{info.remote_version}（当前 v{info.current_version}）",
+    }
+    print(f"更新渠道   : {info.channel_label} ({info.repo} @ {info.branch})")
+    print(f"当前版本   : v{info.current_version}")
+    print(f"仓库版本   : v{info.remote_version}  (提交 {info.short_sha})")
+    if info.commit_message:
+        print(f"最新提交   : {info.commit_message}")
+    print(f"检查结论   : {status_map.get(info.status, info.status)}")
+
+
+def _print_update_result(res: UpdateResult) -> None:
+    if res.installed_version != res.previous_version:
+        ver_msg = f"已从 v{res.previous_version} 更新到 v{res.installed_version}"
+    else:
+        ver_msg = f"已同步仓库最新提交 {res.short_sha}（版本号仍为 v{res.installed_version}）"
+    print(f"[更新完成] {ver_msg}（来源：{res.channel_label}，已校验并更新 {res.files_updated} 个程序文件）")
+    print("提示：原有主配置、转发规则、Realm 程序及运行中的转发连接均已保留。")
+
+
+def _menu_update(config_path: str) -> bool:
+    print(f"\n当前版本：v{__version__}")
+    print("说明：将从仓库拉取最新程序文件并原地升级，现有转发配置与运行中的连接不受影响。")
+    channel = _menu_pick(
+        ["github", "gitee"],
+        "选择更新渠道",
+        default="github",
+        labels=["GitHub（默认）", "Gitee（国内网络推荐）"],
+    )
+    if not channel:
+        return False
+    print(f"正在查询 {UPDATE_CHANNELS[channel]['label']} 仓库最新版本……")
+    info = check_for_update(channel=channel)
+    _print_update_check(info)
+    if info.status == "upgrade":
+        prompt = f"确认从 {info.channel_label} 拉取并更新到 v{info.remote_version}（不中断现有转发）"
+    elif info.status == "ahead":
+        prompt = f"仓库版本 (v{info.remote_version}) 低于当前版本 (v{info.current_version})，仍要覆盖安装"
+    else:
+        prompt = f"当前版本号已是 v{info.current_version}，仍要同步最新提交 {info.short_sha} 并重新安装"
+    if not _confirm(prompt):
+        print("已取消。")
+        return False
+    print("正在下载、校验并安装更新……")
+    res = perform_update(channel=channel, prechecked=info)
+    _print_update_result(res)
+    return True
+
+
+def _reexec_updated_menu(config_path: str) -> None:
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        target = SHORTCUT_PATH if Path(sys.argv[0]).name == "lqtool" else BIN_LAUNCHER_PATH
+        if not (os.path.isfile(target) and os.access(target, os.X_OK)):
+            target = BIN_LAUNCHER_PATH
+        if os.path.isfile(target) and os.access(target, os.X_OK):
+            print("正在重新打开新版菜单……")
+            os.execv(target, [target, "--config", config_path, "menu"])
+    print("更新完成，请重新运行 lqtool 打开新版菜单。")
+
+
+def _run_menu(config_path: str) -> int:
     try:
         while True:
-            print("\nleikwan_tools 管理菜单")
-            for choice, (label, _, _) in actions.items():
-                print(f"  {choice}. {label}")
+            print(f"\nleikwan_tools 利群转发助手 v{__version__}")
+            print("  1. 查看转发状态")
+            print("  2. 转发规则管理（查看 / 新建 / 修改 / 暂停恢复 / 删除）")
+            print("  3. 查询官方公网入口 IP")
+            print("  4. 查询并设置转发的客户端入口 IP")
+            print("  5. 初始化与环境排查（双线路由 / 环境检查）")
+            print("  6. 从仓库检查并更新工具")
             print("  0. 退出")
             selected = input("请选择：").strip()
             if selected == "0":
                 return 0
-            if selected not in actions:
+            if selected == "1":
+                main(["--config", config_path, "status"])
+            elif selected == "2":
+                _menu_rules_group(config_path)
+            elif selected == "3":
+                main(["--config", config_path, "ingress", "query"])
+            elif selected == "4":
+                try:
+                    _menu_ingress(load_global_config(config_path))
+                except _MENU_ERRORS as exc:
+                    print(f"错误: {exc}", file=sys.stderr)
+            elif selected == "5":
+                _menu_system_group(config_path)
+            elif selected == "6":
+                updated = False
+                try:
+                    updated = _menu_update(config_path)
+                except _MENU_ERRORS as exc:
+                    print(f"错误: {exc}", file=sys.stderr)
+                if updated:
+                    _reexec_updated_menu(config_path)
+            else:
                 print("无效选项，请重新输入。")
-                continue
-
-            label, command, prompt = actions[selected]
-            if prompt:
-                value = input(f"{prompt}（留空返回）：").strip()
-                if not value:
-                    continue
-                command = [*command, "--", value]
-            if selected in ("4", "5", "6"):
-                if input(f"确认{label}？[y/N] ").strip().lower() != "y":
-                    continue
-            main(["--config", config_path, *command])
     except (EOFError, KeyboardInterrupt):
         print()
         return 0
@@ -406,6 +942,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("menu", help="打开交互管理菜单")
+
+    p_routing = sub.add_parser("routing", help="预览或初始化 IPv4 源策略路由")
+    routing_sub = p_routing.add_subparsers(dest="routing_cmd", required=True)
+    routing_sub.add_parser("plan", help="只读预览源策略路由")
+    p_routing_init = routing_sub.add_parser("init", help="应用并持久化主配置中的源策略路由")
+    p_routing_init.add_argument("--yes", action="store_true", required=True, help="明确确认初始化")
+    sub.add_parser("_restore-routing", help="内部命令：开机恢复已批准的源策略路由")
 
     p_plan = sub.add_parser("plan", aliases=["preview"], help="只读预览规则部署计划与前置校验")
     p_plan.add_argument("rule_file", help="规则 TOML 文件路径")
@@ -498,6 +1041,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_iv.add_argument("--tls-cafile", default="", help="自定义 CA 根证书 PEM 路径")
     p_iv.add_argument("--timeout", type=float, default=3.0)
 
+    p_update = sub.add_parser("update", help="从 GitHub/Gitee 仓库检查或拉取最新版本并原地更新")
+    p_update.add_argument(
+        "--channel",
+        choices=tuple(UPDATE_CHANNELS),
+        default=DEFAULT_UPDATE_CHANNEL,
+        help="下载渠道：github（默认）或 gitee",
+    )
+    p_update.add_argument("--check", action="store_true", help="仅检查仓库最新版本，不执行安装")
+    p_update.add_argument("--timeout", type=float, default=20.0, help="单次网络请求超时秒数 (默认 20)")
+
     return parser
 
 
@@ -508,6 +1061,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         if args.command == "menu":
             return _run_menu(args.config)
+
+        if args.command in ("routing", "_restore-routing"):
+            cfg = load_global_config(args.config)
+            if args.command == "routing" and args.routing_cmd == "plan":
+                result = plan_routing(cfg)
+            else:
+                result = apply_routing(cfg, restore=args.command == "_restore-routing")
+            if args.json:
+                _print_json(result)
+            else:
+                _print_routing(result)
+            return 0
 
         if args.command in ("plan", "preview"):
             cfg = load_global_config(args.config)
@@ -557,10 +1122,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if not rules:
                     print("当前没有已托管规则。")
                 for r in rules:
-                    dial = r.ingress_fixed_ip or r.ingress_domain
+                    dial = format_endpoint(r.dial_addr, r.public_port)
                     print(
-                        f"{r.name}: 线路={r.line} | 拨号={dial}:{r.public_port} | "
-                        f"监听={r.listen_ip}:{r.listen_port} -> 落地={r.remote_ip}:{r.remote_port}"
+                        f"{r.name}: 出口线路={_format_line_brief(cfg, r.line)} | 拨号={dial} | "
+                        f"监听={r.listen_endpoint} -> 落地={r.remote_ip}:{r.remote_port}"
                     )
             return 0
 
@@ -614,6 +1179,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     f"[启动前校验通过] 规则={res['rule_name']} 线路={res['line']} "
                     f"({res['source_ip']}@{res['interface']} -> gw {res['gateway']}, table {res['table']})"
                 )
+                print(f"入口回程 {res['return_route']}")
             return 0
 
         if args.command == "install-realm":
@@ -692,6 +1258,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.ingress_cmd == "verify":
                 return _cmd_ingress_verify(args)
 
+        if args.command == "update":
+            if args.check:
+                info = check_for_update(channel=args.channel, timeout=args.timeout)
+                if args.json:
+                    _print_json(asdict(info))
+                else:
+                    _print_update_check(info)
+                return 0
+            res = perform_update(channel=args.channel, timeout=args.timeout)
+            if args.json:
+                _print_json(asdict(res))
+            else:
+                _print_update_result(res)
+            return 0
+
         parser.print_help()
         return 2
     except (
@@ -703,6 +1284,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         OwnershipError,
         LockTimeoutError,
         SystemErrorBase,
+        UpdateError,
     ) as exc:
         if args.json:
             _print_json({"error": str(exc)})

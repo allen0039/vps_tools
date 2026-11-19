@@ -379,7 +379,7 @@ docker exec -i "${C_VPS}" tee /opt/failing-realm.sh >/dev/null <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}" in
     --version) echo "realm 2.9.6"; exit 0 ;;
-    --help) echo "Usage: realm -c --config -x --through -i --interface"; exit 0 ;;
+    --help) echo "Usage: realm -c --config -x --through -i --interface --listen-interface"; exit 0 ;;
     *) echo "simulated realm crash on start" >&2; exit 42 ;;
 esac
 EOF
@@ -568,7 +568,170 @@ IPTABLES_AFTER="$(docker exec "${C_VPS}" iptables-save | grep -v '^#' | grep -v 
 [[ "${T102_BEFORE}" == "${T102_AFTER}" ]] || fail "T11: table 102 changed!"
 [[ "${IPTABLES_BEFORE}" == "${IPTABLES_AFTER}" ]] || fail "T11: iptables changed!\nBEFORE:\n${IPTABLES_BEFORE}\nAFTER:\n${IPTABLES_AFTER}"
 
+echo "=== [T12] Confirmed routing bootstrap, rollback, menu, and reboot with no fixture policy routes ==="
+docker exec "${C_VPS}" bash -lc 'cd /opt/src/leikwan_tools && bash install.sh'
+docker exec "${C_VPS}" sed -i \
+    -e "s/10.7.0.146/${VPS_9929_IP}/g" -e "s/10.7.0.1\"/${GW_9929}\"/g" \
+    -e "s/10.8.0.146/${VPS_CN2_IP}/g" -e "s/10.8.0.1\"/${GW_CN2}\"/g" /etc/leikwan_tools/config.toml
+docker exec -i "${C_VPS}" python3 - <<'PY'
+import json, subprocess
+
+def routing(*args):
+    return json.loads(subprocess.check_output(["lqtool", "--json", "routing", *args], text=True))
+
+plan = routing("plan")
+assert plan["add"] == [] and len(plan["keep"]) == 6 and not plan["persisted"], plan
+assert routing("init", "--yes")["status"] == "applied"
+PY
+[[ "$(docker exec "${C_VPS}" ip -4 rule show)" == "${RULES_BEFORE}" ]] || fail "T12: compatible manual rules changed"
+docker exec "${C_VPS}" bash -lc 'cd /opt/src/leikwan_tools && bash uninstall.sh'
+[[ "$(docker exec "${C_VPS}" ip -4 rule show)" == "${RULES_BEFORE}" ]] || fail "T12: manual rules were claimed at uninstall"
+[[ "$(docker exec "${C_VPS}" ip -4 route show table 101 | sort)" == "${T101_BEFORE}" ]] || fail "T12: manual table changed"
+
+docker exec "${C_VPS}" bash -lc 'cd /opt/src/leikwan_tools && bash install.sh'
+docker exec "${C_VPS}" touch /etc/liqun-lab-main-only
+docker exec "${C_VPS}" ip -4 rule del pref 101 from "${VPS_9929_IP}/32" table 101
+docker exec "${C_VPS}" ip -4 rule del pref 102 from "${VPS_CN2_IP}/32" table 102
+docker exec "${C_VPS}" ip -4 route flush table 101
+docker exec "${C_VPS}" ip -4 route flush table 102
+docker exec "${C_VPS}" ip -4 rule add pref 12000 from 192.168.250.0/24 table 199
+docker exec "${C_VPS}" ip -4 route add blackhole 192.168.249.0/24 table 199
+T12_RULES="$(docker exec "${C_VPS}" ip -4 rule show)"
+T12_FOREIGN_ROUTE="$(docker exec "${C_VPS}" ip -4 route show table 199)"
+
+test_route_state_absent() {
+    docker exec "${C_VPS}" test ! -e /var/lib/leikwan_tools/source-routing.json &&
+    [[ "$(docker exec "${C_VPS}" ip -4 rule show)" == "${T12_RULES}" ]] &&
+    [[ -z "$(docker exec "${C_VPS}" ip -4 route show table 101 2>/dev/null || true)" ]] &&
+    [[ -z "$(docker exec "${C_VPS}" ip -4 route show table 102 2>/dev/null || true)" ]]
+}
+lq_vps() {
+    docker exec -i "${C_VPS}" lqtool "$@"
+}
+
+PLAN_OUT="$(lq_vps routing plan)"
+assert_contains "${PLAN_OUT}" "${VPS_9929_IP}/32" "T12 route plan"
+! lq_vps routing init || fail "T12: missing confirmation accepted"
+printf '5\n1\nn\n0\n0\n' | lq_vps menu
+test_route_state_absent || fail "T12: preview/cancel modified routes or state"
+
+docker exec "${C_VPS}" ip -4 route add blackhole default table 102
+T12_CONFLICT_ROUTE="$(docker exec "${C_VPS}" ip -4 route show table 102)"
+if CONFLICT_OUT="$(lq_vps routing init --yes 2>&1)"; then
+    fail "T12: conflicting table unexpectedly accepted"
+fi
+assert_contains "${CONFLICT_OUT}" "不兼容路由" "T12 routing conflict"
+[[ "$(docker exec "${C_VPS}" ip -4 route show table 102)" == "${T12_CONFLICT_ROUTE}" ]] || fail "T12: conflicting route changed"
+docker exec "${C_VPS}" ip -4 route del blackhole default table 102
+test_route_state_absent || fail "T12: conflict partially applied"
+docker exec "${C_VPS}" ip -4 rule add pref 500 from "${SUB_9929}" table 199
+if CONFLICT_OUT="$(lq_vps routing plan 2>&1)"; then
+    fail "T12: overlapping source rule unexpectedly accepted"
+fi
+assert_contains "${CONFLICT_OUT}" "源策略规则冲突" "T12 overlapping source"
+docker exec "${C_VPS}" ip -4 rule del pref 500 from "${SUB_9929}" table 199
+
+docker exec -i "${C_VPS}" env PYTHONPATH=/usr/local/lib/leikwan_tools python3 - <<'PY'
+from unittest.mock import patch
+from leikwan_tools import routing
+from leikwan_tools.config import load_global_config
+from leikwan_tools.system import PreflightError
+
+original = routing._mutate
+def fail_cn2_rule(command):
+    if command[2:4] == ["rule", "add"] and "102" in command:
+        raise PreflightError("injected CN2 add failure")
+    original(command)
+
+with patch.object(routing, "_mutate", side_effect=fail_cn2_rule):
+    try:
+        routing.apply_routing(load_global_config("/etc/leikwan_tools/config.toml"))
+    except PreflightError as exc:
+        assert "injected CN2 add failure" in str(exc) and "已回滚本次新增项" in str(exc), exc
+    else:
+        raise AssertionError("failure was not observed")
+PY
+test_route_state_absent || fail "T12: failure left policy routes or persisted state"
+
+printf '5\n1\ny\n0\n0\n' | lq_vps menu
+STATE_BEFORE="$(docker exec "${C_VPS}" sha256sum /var/lib/leikwan_tools/source-routing.json)"
+assert_contains "$(lq_vps routing init --yes)" "noop" "T12 second routing init"
+[[ "$(docker exec "${C_VPS}" sha256sum /var/lib/leikwan_tools/source-routing.json)" == "${STATE_BEFORE}" ]] || fail "T12: no-op rewrote state"
+[[ "$(docker exec "${C_VPS}" ip -4 route show table main | sort)" == "${MAIN_ROUTE_BEFORE}" ]] || fail "T12: main table changed"
+lq_vps check-prereqs
+
+MENU_RULE="2
+2
+rfc-hk-bootstrap
+
+54848
+${VPS_9929_IP}
+10003
+${HK_IP}
+54848
+cn2"
+printf '%s\nn\n0\n0\n' "${MENU_RULE}" | lq_vps menu
+docker exec "${C_VPS}" test ! -e /etc/leikwan_tools/rules.d/rfc-hk-bootstrap.toml || fail "T12: cancelled forward was written"
+printf '%s\ny\n0\n0\n' "${MENU_RULE}" | lq_vps menu
+LIST_FORWARDS_OUT="$(printf '2\n1\n0\n0\n' | lq_vps menu)"
+assert_contains "${LIST_FORWARDS_OUT}" "rfc-hk-bootstrap" "T12 list forwards rule"
+assert_contains "${LIST_FORWARDS_OUT}" "CN2 GIA 出口线路" "T12 list forwards egress name"
+docker exec "${C_VPS}" grep -Fx 'listen_interface = "eth0"' /var/lib/leikwan_tools/realm/rfc-hk-bootstrap.toml
+assert_contains "$(docker exec "${C_VPS}" ss -H -ltn4 'sport = :10003')" "${VPS_9929_IP}%eth0:10003" "T12 listener socket binding"
+assert_contains "$(client_probe "${PUB_10}" 54848 BOOTSTRAP)" "LANDING=rfc-hk-mock SRC=${VPS_CN2_IP}" "T12 CN2 landing"
+
+docker exec "${C_VPS}" ip -4 rule del from "${VPS_9929_IP}/32" table 101
+docker exec "${C_VPS}" ip -4 route get "${HK_IP}" from "${VPS_CN2_IP}" | grep -q 'dev eth1 table 102'
+for operation in plan _verify-startup; do
+    if [[ "${operation}" == "plan" ]]; then
+        args=(plan /etc/leikwan_tools/rules.d/rfc-hk-bootstrap.toml)
+    else
+        args=(_verify-startup rfc-hk-bootstrap --wait-timeout 0)
+    fi
+    if RETURN_OUT="$(lq_vps "${args[@]}" 2>&1)"; then
+        fail "T12: ${operation} accepted missing return policy"
+    fi
+    assert_contains "${RETURN_OUT}" "入口回程校验失败" "T12 ${operation} return check"
+done
+
+docker exec -i "${C_ROUTER}" tee /tmp/dns_records.json >/dev/null <<EOF
+{
+  "paid-v4.bgp1.leikwanhost.com": ["1.1.1.1", "8.8.8.8", "198.18.1.10", "${PUB_10}"]
+}
+EOF
+BOOTSTRAP_PID="$(docker exec "${C_VPS}" systemctl show -p MainPID --value leikwan_tools-realm@rfc-hk-bootstrap.service)"
+MENU_SELECT="4
+rfc-hk-bootstrap
+${GW_PUB}
+1.1.1.1"
+SELECT_OUT="$(printf '%s\nn\n0\n' "${MENU_SELECT}" | lq_vps menu)"
+assert_contains "${SELECT_OUT}" "198.18.1.10  非公网 IPv4，已排除" "T12 fake IP filtering"
+assert_contains "${SELECT_OUT}" "客户端备用地址 8.8.8.8:54848" "T12 backup candidate"
+assert_contains "$(lq_vps list)" "paid-v4.bgp1.leikwanhost.com:54848" "T12 cancelled pin"
+assert_contains "$(printf '%s\ny\n0\n' "${MENU_SELECT}" | lq_vps menu)" "已设置 1.1.1.1:54848" "T12 pin"
+assert_contains "$(printf '4\nrfc-hk-bootstrap\n%s\n恢复域名拨号\ny\n0\n' "${GW_PUB}" | lq_vps menu)" \
+    "已设置 paid-v4.bgp1.leikwanhost.com:54848" "T12 unpin"
+[[ "$(docker exec "${C_VPS}" systemctl show -p MainPID --value leikwan_tools-realm@rfc-hk-bootstrap.service)" == "${BOOTSTRAP_PID}" ]] ||
+    fail "T12: ingress selection restarted Realm"
+
+docker restart "${C_VPS}" >/dev/null
+for _ in $(seq 1 40); do
+    if docker exec "${C_VPS}" systemctl is-active --quiet leikwan_tools-realm@rfc-hk-bootstrap.service; then
+        break
+    fi
+    sleep 1
+done
+docker exec "${C_VPS}" systemctl is-active --quiet leikwan_tools-routing.service || fail "T12: routing boot unit failed"
+assert_contains "$(client_probe "${PUB_10}" 54848 BOOT-RESTORED)" "LANDING=rfc-hk-mock SRC=${VPS_CN2_IP}" "T12 boot recovery"
+
+docker exec "${C_VPS}" ip -4 rule add pref 12000 from 192.168.250.0/24 table 199
+docker exec "${C_VPS}" ip -4 route add blackhole 192.168.249.0/24 table 199
+docker exec "${C_VPS}" bash -lc 'cd /opt/src/leikwan_tools && bash uninstall.sh --purge'
+test_route_state_absent || fail "T12: uninstall left owned routes or removed unrelated rules"
+[[ "$(docker exec "${C_VPS}" ip -4 route show table 199)" == "${T12_FOREIGN_ROUTE}" ]] || fail "T12: unrelated route changed"
+docker exec "${C_VPS}" test ! -e /etc/systemd/system/leikwan_tools-routing.service
+
 echo ""
 echo "========================================================================"
-echo "ALL ISOLATED DEBIAN 12 + SYSTEMD E2E TESTS (T1 - T11) PASSED SUCCESSFULLY"
+echo "ALL ISOLATED DEBIAN 12 + SYSTEMD E2E TESTS (T1 - T12) PASSED SUCCESSFULLY"
 echo "========================================================================"

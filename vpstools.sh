@@ -16,7 +16,7 @@ VPS Tools 中文工具箱
   vpstools update [github|gitee]  安装或更新全部工具
   vpstools --version
 
-工具：ssh、sshkey、sshpass、firewall、dns、swap、bbr、agent、netcheck、iperf、fail2ban、ipv6、tcp（别名 tcptool）、socks5
+工具：ssh、sshkey、sshpass、firewall、dns、swap、bbr、agent、netcheck、iperf、fail2ban、ipv6、tcp（别名 tcptool）、socks5、leikwan（别名 leikwan_tools）
 示例：vpstools run dns status
       vpstools run ssh interactive
       vpstools run bbr status
@@ -38,13 +38,14 @@ tool_path() {
         tcp|tcptool) printf '%s/tcptool\n' "$SBIN_DIR" ;;
         socks5) printf '%s/socks5.sh\n' "$LIB_DIR" ;;
         ipv6) printf '%s/ipv6tool\n' "$SBIN_DIR" ;;
+        leikwan|leikwan_tools) printf '%s/leikwan_tools\n' "$BIN_DIR" ;;
         *) printf '未知工具：%s\n' "$1" >&2; return 2 ;;
     esac
 }
 
 list_tools() {
     local id path state
-    for id in ssh sshkey sshpass firewall dns swap bbr agent netcheck iperf fail2ban ipv6 tcp socks5; do
+    for id in ssh sshkey sshpass firewall dns swap bbr agent netcheck iperf fail2ban ipv6 tcp socks5 leikwan; do
         path=$(tool_path "$id")
         state=未安装
         [[ ! -x $path ]] || state=已安装
@@ -58,7 +59,7 @@ run_tool() {
     path=$(tool_path "$id") || return $?
     [[ -x $path ]] || { printf '工具未安装：%s。请运行 vpstools update。\n' "$id" >&2; return 1; }
     if [[ $id == firewall ]]; then set -- firewall "$@"; fi
-    if [[ $EUID != 0 ]] && { [[ $id == agent && ${1:-} != --help && ${1:-} != -h ]] || [[ ( $id == tcp || $id == tcptool || $id == sshkey || $id == socks5 ) && $# == 0 ]]; }; then
+    if [[ $EUID != 0 ]] && { [[ $id == agent && ${1:-} != --help && ${1:-} != -h ]] || [[ ( $id == tcp || $id == tcptool || $id == sshkey || $id == socks5 ) && $# == 0 ]] || [[ ( $id == leikwan || $id == leikwan_tools ) && ${1:-} != --help && ${1:-} != -h ]]; }; then
         command -v sudo >/dev/null || { printf '需要 root 或 sudo 权限。\n' >&2; return 1; }
         if [[ $id == sshkey ]]; then
             sudo --preserve-env=SSH_CONNECTION,SSH_USER_AUTH -- "$path" "$@"
@@ -96,7 +97,7 @@ category_menu() {
         system)
             title=系统管理
             ids=(ssh sshkey sshpass firewall fail2ban dns ipv6 swap)
-            labels=('SSH 端口与配置恢复' 'SSH 密钥登录管理' 'SSH 密码登录管理' '防火墙管理' 'Fail2ban 防暴力破解' 'DNS 设置与恢复' 'IPv4 / IPv6 管理' 'Swap 管理') ;;
+            labels=('SSH 端口与配置恢复' 'SSH 密钥登录管理' 'SSH 密码登录管理' '防火墙管理' 'Fail2ban 防暴力破解' 'DNS 设置与恢复' 'Ipv4/ipv6管理工具' 'Swap 管理') ;;
         network)
             title=网络检测与测速
             ids=(netcheck iperf)
@@ -107,8 +108,8 @@ category_menu() {
             labels=('TCP / BBR 调优' 'TCP 参数导入与回滚') ;;
         services)
             title=服务管理
-            ids=(agent socks5)
-            labels=('妙妙屋 Agent 重启' 'SOCKS5 / TLS 代理管理') ;;
+            ids=(agent socks5 leikwan)
+            labels=('妙妙屋 Agent 重启' 'SOCKS5 / TLS 代理管理' '利群助手') ;;
         *) return 2 ;;
     esac
     while :; do

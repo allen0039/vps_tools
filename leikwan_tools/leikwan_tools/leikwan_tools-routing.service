@@ -1,0 +1,14 @@
+# Managed-By: leikwan_tools
+[Unit]
+Description=Restore approved leikwan_tools IPv4 source policy routing
+Wants=network-online.target
+After=network-online.target networking.service
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/leikwan_tools _restore-routing
+
+[Install]
+WantedBy=multi-user.target

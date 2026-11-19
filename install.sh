@@ -9,7 +9,16 @@ FILES=(vpstools.sh install.sh safe-ssh-port/safe-ssh-port.sh dns_tool/dns_tool.s
        bbr-tune/install.sh bbr-tune/bbr-tune.sh bbr-tune/bbr-kernel.sh web_tool/netcheck.py
        iperf3_tool/iperf3-tool.sh iperf3_tool/iperf3_tool.py Fail2ban/f2btool.py
        system_tool/install.sh system_tool/ipv6_tool.py tcp-tool/install.sh tcp-tool/tcp_tool.py
-       ssh-key/install.sh ssh-key/ssh_key_tool.py ssh-password/install.sh ssh-password/ssh_password_tool.py socks5/socks5.sh)
+       ssh-key/install.sh ssh-key/ssh_key_tool.py ssh-password/install.sh ssh-password/ssh_password_tool.py socks5/socks5.sh
+       leikwan_tools/README.md leikwan_tools/install.sh leikwan_tools/uninstall.sh
+       leikwan_tools/bin/leikwan_tools leikwan_tools/bin/realm-exec.sh leikwan_tools/bin/realm-preflight.sh
+       leikwan_tools/examples/config.example.toml leikwan_tools/examples/rule-rfc-hk.example.toml
+       leikwan_tools/examples/rule-zouter-jp.example.toml
+       leikwan_tools/leikwan_tools/__init__.py leikwan_tools/leikwan_tools/cli.py
+       leikwan_tools/leikwan_tools/config.py leikwan_tools/leikwan_tools/ingress.py
+       leikwan_tools/leikwan_tools/manager.py leikwan_tools/leikwan_tools/ownership.py
+       leikwan_tools/leikwan_tools/realm.py leikwan_tools/leikwan_tools/system.py
+       leikwan_tools/leikwan_tools/toml_compat.py leikwan_tools/systemd/leikwan_tools-realm@.service)
 
 die() { printf '[vpstools] 错误：%s\n' "$*" >&2; exit 1; }
 usage() {
@@ -61,14 +70,16 @@ prepare_sources() {
         fi
         [[ -s $STAGE/$file ]] || die "文件为空：$file"
         if [[ $file == *.py ]]; then
-            head -n 1 "$STAGE/$file" | grep -q '^#!/usr/bin/env python3' || die "文件不是 Python 脚本：$file"
             python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' "$STAGE/$file" || die "语法检查失败：$file"
-        else
+        elif [[ $file == *.sh ]]; then
             head -n 1 "$STAGE/$file" | grep -q '^#!/usr/bin/env bash' || die "文件不是 Bash 脚本：$file"
             bash -n "$STAGE/$file" || die "语法检查失败：$file"
             if [[ $file == socks5/socks5.sh ]]; then
                 python3 -c 'import ast, pathlib, sys; text = pathlib.Path(sys.argv[1]).read_text(); marker = "<<" + chr(39) + "PY_SOCKS5" + chr(39) + "\n"; ast.parse(text.split(marker, 1)[1].rsplit("\nPY_SOCKS5", 1)[0])' "$STAGE/$file" || die "内嵌 Python 语法检查失败：$file"
             fi
+        elif [[ $file == leikwan_tools/bin/leikwan_tools ]]; then
+            head -n 1 "$STAGE/$file" | grep -q '^#!/usr/bin/env python3' || die "文件不是 Python 脚本：$file"
+            python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' "$STAGE/$file" || die "语法检查失败：$file"
         fi
     done
 }
@@ -87,6 +98,7 @@ install_tools() {
     bash "$STAGE/ssh-key/install.sh" || die 'SSH 密钥工具安装失败。此前已完成的安装保留，可修复后重试。'
     bash "$STAGE/ssh-password/install.sh" || die 'SSH 密码登录工具安装失败。此前已完成的安装保留，可修复后重试。'
     bash "$STAGE/bbr-tune/install.sh" --install-only || die 'BBR 安装失败。此前已完成的安装保留，可修复后重试。'
+    bash "$STAGE/leikwan_tools/install.sh" --skip-realm-install || die '利群助手安装失败。此前已完成的安装保留，可修复后重试。'
     # 保留独立 socks5 命令给代理部署流程，避免占用其首次安装检查的路径。
     install -m 0755 "$STAGE/socks5/socks5.sh" /usr/local/lib/vpstools/socks5.sh
     install -m 0755 "$STAGE/install.sh" /usr/local/lib/vpstools/install.sh

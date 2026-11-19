@@ -6,6 +6,8 @@ INSTALL_LIB_DIR="/usr/local/lib/leikwan_tools"
 BIN_PATH="/usr/local/bin/leikwan_tools"
 SHORTCUT_PATH="/usr/local/bin/lqtool"
 SYSTEMD_UNIT_PATH="/etc/systemd/system/leikwan_tools-realm@.service"
+ROUTING_UNIT_PATH="/etc/systemd/system/leikwan_tools-routing.service"
+ROUTING_UNIT_SOURCE="${SCRIPT_DIR}/leikwan_tools/leikwan_tools-routing.service"
 CONFIG_DIR="/etc/leikwan_tools"
 STATE_DIR="/var/lib/leikwan_tools"
 LOCK_FILE="/run/leikwan_tools.lock"
@@ -87,6 +89,15 @@ export PYTHONPATH="${SCRIPT_DIR}"
 python3 -m leikwan_tools.ownership check-install-targets \
     --config-dir "${CONFIG_DIR}" --state-dir "${STATE_DIR}" --lock-file "${LOCK_FILE}"
 
+ROUTING_FRAGMENT="$(systemctl show -p FragmentPath --value leikwan_tools-routing.service || true)"
+ROUTING_DROPINS="$(systemctl show -p DropInPaths --value leikwan_tools-routing.service || true)"
+if [[ -L "${ROUTING_UNIT_PATH}" || -n "${ROUTING_DROPINS}" ||
+      ( -n "${ROUTING_FRAGMENT}" && "${ROUTING_FRAGMENT}" != "${ROUTING_UNIT_PATH}" ) ]] ||
+   { [[ -e "${ROUTING_UNIT_PATH}" ]] && ! cmp -s "${ROUTING_UNIT_PATH}" "${ROUTING_UNIT_SOURCE}" && ! grep -Fxq "# Managed-By: leikwan_tools" "${ROUTING_UNIT_PATH}"; }; then
+    echo "错误: 拒绝覆盖非受管源策略路由服务 ${ROUTING_UNIT_PATH}" >&2
+    exit 1
+fi
+
 echo "[1/5] 安装 leikwan_tools 程序文件到 ${INSTALL_LIB_DIR}..."
 mkdir -p "${INSTALL_LIB_DIR}/bin"
 rm -rf "${INSTALL_LIB_DIR}/leikwan_tools"
@@ -100,7 +111,9 @@ install -m 0755 "${SCRIPT_DIR}/bin/leikwan_tools" "${SHORTCUT_PATH}"
 
 echo "[2/5] 安装 systemd 模板单元 ${SYSTEMD_UNIT_PATH}..."
 install -m 0644 "${SCRIPT_DIR}/systemd/leikwan_tools-realm@.service" "${SYSTEMD_UNIT_PATH}"
+install -m 0644 "${ROUTING_UNIT_SOURCE}" "${ROUTING_UNIT_PATH}"
 systemctl daemon-reload
+systemctl enable leikwan_tools-routing.service
 
 echo "[3/5] 初始化配置目录 ${CONFIG_DIR} 与状态目录 ${STATE_DIR}（不启用任何示例规则）..."
 ensure_dir() {
@@ -292,4 +305,4 @@ echo "安装完成："
 echo "  - 输入 lqtool 打开交互菜单。"
 echo "  - 已写入资源归属清单: ${INSTALL_LIB_DIR}/install-manifest.json"
 echo "  - 未启用任何示例规则；未修改 Toolkit / LeiKwanManager / v6-mng.sh / 现有 Realm / 路由 / 防火墙。"
-echo "  - 下一步请先核对 ${CONFIG_DIR}/config.toml，再执行: leikwan_tools check-prereqs"
+echo "  - 核对 ${CONFIG_DIR}/config.toml 后，用 lqtool routing plan 预览源策略路由，或从菜单进入「5. 初始化与环境排查 -> 1. 初始化双线出口路由」。"
