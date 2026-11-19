@@ -2,12 +2,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_LIB_DIR="/usr/local/lib/liqun-helper"
-BIN_PATH="/usr/local/bin/liqun-helper"
-SYSTEMD_UNIT_PATH="/etc/systemd/system/liqun-helper-realm@.service"
-CONFIG_DIR="/etc/liqun-helper"
-STATE_DIR="/var/lib/liqun-helper"
-LOCK_FILE="/run/liqun-helper.lock"
+INSTALL_LIB_DIR="/usr/local/lib/leikwan_tools"
+BIN_PATH="/usr/local/bin/leikwan_tools"
+SYSTEMD_UNIT_PATH="/etc/systemd/system/leikwan_tools-realm@.service"
+CONFIG_DIR="/etc/leikwan_tools"
+STATE_DIR="/var/lib/leikwan_tools"
+LOCK_FILE="/run/leikwan_tools.lock"
 
 REALM_BIN_ARG=""
 REALM_TARBALL_ARG=""
@@ -22,8 +22,8 @@ usage() {
   --realm-bin <path>       指定要复用的已有 Realm 二进制路径（校验版本 >= 2.6.0 且主版本为 2）
   --realm-tarball <path>   指定离线 Realm v2.9.6 官方 .tar.gz 安装包路径（执行 SHA-256 校验）
   --skip-realm-install     若未找到已有 Realm，跳过下载安装（稍后需手动执行 install-realm）
-  --config-dir <dir>       配置目录 (默认: /etc/liqun-helper)
-  --state-dir <dir>        状态与生成配置目录 (默认: /var/lib/liqun-helper)
+  --config-dir <dir>       配置目录 (默认: /etc/leikwan_tools)
+  --state-dir <dir>        状态与生成配置目录 (默认: /var/lib/leikwan_tools)
   -h, --help               显示帮助
 EOF
 }
@@ -75,29 +75,29 @@ for cmd in python3 ip ss systemctl; do
 done
 
 # Coordinate entire install lifecycle under the shared FileLock against concurrent uninstall/apply.
-if [[ "${_LIQUN_INSTALL_LOCKED:-0}" != "1" ]]; then
+if [[ "${_LEIKWAN_TOOLS_INSTALL_LOCKED:-0}" != "1" ]]; then
     export PYTHONPATH="${SCRIPT_DIR}"
-    exec env _LIQUN_INSTALL_LOCKED=1 python3 -m liqun_helper.ownership with-lock \
+    exec env _LEIKWAN_TOOLS_INSTALL_LOCKED=1 python3 -m leikwan_tools.ownership with-lock \
         --lock-file "${LOCK_FILE}" --lock-timeout 20 -- \
         bash "${BASH_SOURCE[0]}" "${ORIG_ARGS[@]}"
 fi
 
 export PYTHONPATH="${SCRIPT_DIR}"
-python3 -m liqun_helper.ownership check-install-targets \
+python3 -m leikwan_tools.ownership check-install-targets \
     --config-dir "${CONFIG_DIR}" --state-dir "${STATE_DIR}" --lock-file "${LOCK_FILE}"
 
-echo "[1/5] 安装 liqun_helper 程序文件到 ${INSTALL_LIB_DIR}..."
+echo "[1/5] 安装 leikwan_tools 程序文件到 ${INSTALL_LIB_DIR}..."
 mkdir -p "${INSTALL_LIB_DIR}/bin"
-rm -rf "${INSTALL_LIB_DIR}/liqun_helper"
-cp -R "${SCRIPT_DIR}/liqun_helper" "${INSTALL_LIB_DIR}/liqun_helper"
-find "${INSTALL_LIB_DIR}/liqun_helper" -type d -name "__pycache__" -exec rm -rf {} +
+rm -rf "${INSTALL_LIB_DIR}/leikwan_tools"
+cp -R "${SCRIPT_DIR}/leikwan_tools" "${INSTALL_LIB_DIR}/leikwan_tools"
+find "${INSTALL_LIB_DIR}/leikwan_tools" -type d -name "__pycache__" -exec rm -rf {} +
 
 install -m 0755 "${SCRIPT_DIR}/bin/realm-exec.sh" "${INSTALL_LIB_DIR}/realm-exec.sh"
 install -m 0755 "${SCRIPT_DIR}/bin/realm-preflight.sh" "${INSTALL_LIB_DIR}/realm-preflight.sh"
-install -m 0755 "${SCRIPT_DIR}/bin/liqun-helper" "${BIN_PATH}"
+install -m 0755 "${SCRIPT_DIR}/bin/leikwan_tools" "${BIN_PATH}"
 
 echo "[2/5] 安装 systemd 模板单元 ${SYSTEMD_UNIT_PATH}..."
-install -m 0644 "${SCRIPT_DIR}/systemd/liqun-helper-realm@.service" "${SYSTEMD_UNIT_PATH}"
+install -m 0644 "${SCRIPT_DIR}/systemd/leikwan_tools-realm@.service" "${SYSTEMD_UNIT_PATH}"
 systemctl daemon-reload
 
 echo "[3/5] 初始化配置目录 ${CONFIG_DIR} 与状态目录 ${STATE_DIR}（不启用任何示例规则）..."
@@ -148,9 +148,9 @@ p = pathlib.Path(cfg_path)
 txt = p.read_text(encoding="utf-8")
 if rb:
     txt = txt.replace('realm_bin = ""', f'realm_bin = "{rb}"', 1)
-txt = txt.replace('rules_dir = "/etc/liqun-helper/rules.d"', f'rules_dir = "{os.path.realpath(rules_dir)}"', 1)
-txt = txt.replace('state_dir = "/var/lib/liqun-helper"', f'state_dir = "{os.path.realpath(state_dir)}"', 1)
-txt = txt.replace('lock_file = "/run/liqun-helper.lock"', f'lock_file = "{lock_file}"', 1)
+txt = txt.replace('rules_dir = "/etc/leikwan_tools/rules.d"', f'rules_dir = "{os.path.realpath(rules_dir)}"', 1)
+txt = txt.replace('state_dir = "/var/lib/leikwan_tools"', f'state_dir = "{os.path.realpath(state_dir)}"', 1)
+txt = txt.replace('lock_file = "/run/leikwan_tools.lock"', f'lock_file = "{lock_file}"', 1)
 p.write_text(txt, encoding="utf-8")
 PY
     chmod 0644 "${CONFIG_DIR}/config.toml"
@@ -169,7 +169,7 @@ REALM_OK=0
 if [[ -n "${REALM_BIN_ARG}" ]]; then
     if python3 - "${REALM_BIN_ARG}" "${STATE_DIR}" "${REALM_META_FILE}" <<'PY'
 import json, pathlib, sys
-from liqun_helper.realm import inspect_realm_binary
+from leikwan_tools.realm import inspect_realm_binary
 bin_arg, state_dir, meta_out = sys.argv[1], sys.argv[2], sys.argv[3]
 info = inspect_realm_binary(bin_arg, origin="configured")
 print(f"  复用指定 Realm: {info.path} (v{info.version_text}, sha256={info.sha256[:12]}...)")
@@ -194,8 +194,8 @@ PY
 elif [[ -z "${REALM_TARBALL_ARG}" ]]; then
     if python3 - "${STATE_DIR}" "${REALM_META_FILE}" <<'PY'
 import json, os, pathlib, sys
-from liqun_helper import MANAGED_REALM_BIN
-from liqun_helper.realm import discover_realm_binary, RealmError
+from leikwan_tools import MANAGED_REALM_BIN
+from leikwan_tools.realm import discover_realm_binary, RealmError
 state_dir, meta_out = sys.argv[1], sys.argv[2]
 try:
     info = discover_realm_binary()
@@ -223,7 +223,7 @@ fi
 
 if [[ "${REALM_OK}" -eq 0 ]]; then
     if [[ "${SKIP_REALM_INSTALL}" -eq 1 ]]; then
-        echo "  已跳过 Realm 安装；启用规则前请先运行: liqun-helper install-realm"
+        echo "  已跳过 Realm 安装；启用规则前请先运行: leikwan_tools install-realm"
         printf '{"path": "", "managed": false}' > "${REALM_META_FILE}"
     else
         if [[ -n "${REALM_TARBALL_ARG}" ]]; then
@@ -231,7 +231,7 @@ if [[ "${REALM_OK}" -eq 0 ]]; then
         else
             "${BIN_PATH}" --config "${CONFIG_DIR}/config.toml" install-realm --state-dir "${STATE_DIR}"
         fi
-        printf '{"path": "/usr/local/lib/liqun-helper/bin/realm", "managed": true}' > "${REALM_META_FILE}"
+        printf '{"path": "/usr/local/lib/leikwan_tools/bin/realm", "managed": true}' > "${REALM_META_FILE}"
     fi
 fi
 
@@ -257,7 +257,7 @@ WRITE_ARGS+=("${EXAMPLE_ARGS[@]}")
 # Note: lock already held by parent with-lock wrapper, call write_install_artifacts directly!
 python3 - "${WRITE_ARGS[@]}" <<'PY'
 import argparse
-from liqun_helper.ownership import write_install_artifacts
+from leikwan_tools.ownership import write_install_artifacts
 
 p = argparse.ArgumentParser()
 p.add_argument("--install-lib-dir", required=True)
@@ -289,4 +289,4 @@ echo "[5/5] 安装完成验证..."
 echo "安装完成："
 echo "  - 已写入资源归属清单: ${INSTALL_LIB_DIR}/install-manifest.json"
 echo "  - 未启用任何示例规则；未修改 Toolkit / LeiKwanManager / v6-mng.sh / 现有 Realm / 路由 / 防火墙。"
-echo "  - 下一步请先核对 ${CONFIG_DIR}/config.toml，再执行: liqun-helper check-prereqs"
+echo "  - 下一步请先核对 ${CONFIG_DIR}/config.toml，再执行: leikwan_tools check-prereqs"

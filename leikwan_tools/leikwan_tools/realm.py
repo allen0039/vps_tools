@@ -211,7 +211,7 @@ def _is_owned_realm_target(target: Path, state_dir: str, manifest_path: str = IN
 
 
 def _record_realm_source(state_dir: str, payload: Dict[str, Any]) -> None:
-    """Persist Realm source/verification metadata in liqun-helper state dir."""
+    """Persist Realm source/verification metadata in leikwan_tools state dir."""
     state_root = Path(state_dir)
     state_root.mkdir(parents=True, exist_ok=True)
     record_path = state_root / "realm-source.json"
@@ -256,7 +256,7 @@ def install_realm_binary(
             try:
                 req = urllib.request.Request(
                     download_url,
-                    headers={"User-Agent": "liqun-helper/1.0"},
+                    headers={"User-Agent": "leikwan_tools/1.0"},
                 )
                 with urllib.request.urlopen(req, timeout=60) as resp, archive_path.open("wb") as out_fh:
                     shutil.copyfileobj(resp, out_fh)

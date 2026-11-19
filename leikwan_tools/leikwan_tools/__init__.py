@@ -1,22 +1,22 @@
-"""独立「利群助手」(liqun-helper) 核心包。"""
+"""独立「leikwan_tools」(leikwan_tools) 核心包。"""
 
 __version__ = "0.1.1"
 
-INSTALL_LIB_DIR = "/usr/local/lib/liqun-helper"
-INSTALL_MANIFEST_PATH = "/usr/local/lib/liqun-helper/install-manifest.json"
-INSTALL_ENV_PATH = "/usr/local/lib/liqun-helper/install.env"
-MANAGED_MARKER = "# Managed-By: liqun-helper"
+INSTALL_LIB_DIR = "/usr/local/lib/leikwan_tools"
+INSTALL_MANIFEST_PATH = "/usr/local/lib/leikwan_tools/install-manifest.json"
+INSTALL_ENV_PATH = "/usr/local/lib/leikwan_tools/install.env"
+MANAGED_MARKER = "# Managed-By: leikwan_tools"
 
-DEFAULT_CONFIG_PATH = "/etc/liqun-helper/config.toml"
-DEFAULT_RULES_DIR = "/etc/liqun-helper/rules.d"
-DEFAULT_STATE_DIR = "/var/lib/liqun-helper"
-DEFAULT_COORDINATED_LOCK_FILE = "/run/liqun-helper.lock"
+DEFAULT_CONFIG_PATH = "/etc/leikwan_tools/config.toml"
+DEFAULT_RULES_DIR = "/etc/leikwan_tools/rules.d"
+DEFAULT_STATE_DIR = "/var/lib/leikwan_tools"
+DEFAULT_COORDINATED_LOCK_FILE = "/run/leikwan_tools.lock"
 DEFAULT_LOCK_FILE = DEFAULT_COORDINATED_LOCK_FILE
-FIXED_SYSTEMD_UNIT_TEMPLATE = "liqun-helper-realm@.service"
+FIXED_SYSTEMD_UNIT_TEMPLATE = "leikwan_tools-realm@.service"
 DEFAULT_SYSTEMD_UNIT_TEMPLATE = FIXED_SYSTEMD_UNIT_TEMPLATE
 DEFAULT_STARTUP_ROUTE_WAIT_SECONDS = 45
 DEFAULT_INGRESS_DOMAIN = "paid-v4.bgp1.leikwanhost.com"
-MANAGED_REALM_BIN = "/usr/local/lib/liqun-helper/bin/realm"
+MANAGED_REALM_BIN = "/usr/local/lib/leikwan_tools/bin/realm"
 
 REALM_VERIFIED_VERSION = "2.9.6"
 REALM_MIN_COMPAT_VERSION = (2, 6, 0)

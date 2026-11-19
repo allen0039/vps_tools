@@ -42,7 +42,7 @@ RUN set -eu; \
 # Create tampered archive in /opt/cache for testing SHA-256 rejection.
 RUN python3 -c 'import io, tarfile; tf = tarfile.open("/opt/cache/bad-realm.tar.gz", "w:gz"); info = tarfile.TarInfo("realm"); data = b"tampered"; info.size = len(data); tf.addfile(info, io.BytesIO(data)); tf.close()'
 
-# Pre-existing legacy files that liqun-helper must never modify or delete.
+# Pre-existing legacy files that leikwan_tools must never modify or delete.
 RUN printf '#!/bin/sh\necho "original Toolkit v1"\n' > /usr/local/bin/Toolkit \
     && printf '#!/bin/sh\necho "original LeiKwanManager v1"\n' > /usr/local/bin/LeiKwanManager \
     && printf '#!/bin/sh\necho "original v6-mng.sh v1"\n' > /root/v6-mng.sh \

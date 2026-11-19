@@ -1,14 +1,14 @@
-# 独立「利群助手」主配置示例 (/etc/liqun-helper/config.toml)
+# 独立「leikwan_tools」主配置示例 (/etc/leikwan_tools/config.toml)
 # 说明：以下地址、网卡、网关与路由表号仅作示例，实际部署时请核对本机 `ip addr` 与 `ip rule` 输出后修改。
 
 [tool]
 # 留空时自动优先发现已安装的兼容 Realm (>= 2.6.0, 主版本 2)；也可显式指定路径
 realm_bin = ""
-rules_dir = "/etc/liqun-helper/rules.d"
-state_dir = "/var/lib/liqun-helper"
-# 受管 systemd 模板单元名必须固定为 liqun-helper-realm@.service
-systemd_unit_template = "liqun-helper-realm@.service"
-lock_file = "/run/liqun-helper.lock"
+rules_dir = "/etc/leikwan_tools/rules.d"
+state_dir = "/var/lib/leikwan_tools"
+# 受管 systemd 模板单元名必须固定为 leikwan_tools-realm@.service
+systemd_unit_template = "leikwan_tools-realm@.service"
+lock_file = "/run/leikwan_tools.lock"
 # 开机启动时 systemd ExecStartPre 等待源策略路由就绪的最大秒数
 startup_route_wait_seconds = 45
 

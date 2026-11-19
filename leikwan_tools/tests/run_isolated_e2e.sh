@@ -80,17 +80,17 @@ IPTABLES_BEFORE="$(docker exec "${C_VPS}" iptables-save | grep -v '^#' | grep -v
 echo "Baseline sentinels:"
 echo "${SENTINEL_BEFORE}"
 
-echo "=== [Setup] Copying local 利群助手 source into VPS and client (no internet access needed) ==="
-docker exec "${C_VPS}" mkdir -p /opt/src/liqun-helper
-docker cp "${PROJECT_DIR}/." "${C_VPS}:/opt/src/liqun-helper/"
-docker exec "${C_CLIENT}" mkdir -p /usr/local/lib/liqun-helper
-docker cp "${PROJECT_DIR}/liqun_helper" "${C_CLIENT}:/usr/local/lib/liqun-helper/liqun_helper"
-docker cp "${PROJECT_DIR}/bin/liqun-helper" "${C_CLIENT}:/usr/local/bin/liqun-helper"
-docker exec "${C_CLIENT}" chmod +x /usr/local/bin/liqun-helper
+echo "=== [Setup] Copying local leikwan_tools source into VPS and client (no internet access needed) ==="
+docker exec "${C_VPS}" mkdir -p /opt/src/leikwan_tools
+docker cp "${PROJECT_DIR}/." "${C_VPS}:/opt/src/leikwan_tools/"
+docker exec "${C_CLIENT}" mkdir -p /usr/local/lib/leikwan_tools
+docker cp "${PROJECT_DIR}/leikwan_tools" "${C_CLIENT}:/usr/local/lib/leikwan_tools/leikwan_tools"
+docker cp "${PROJECT_DIR}/bin/leikwan_tools" "${C_CLIENT}:/usr/local/bin/leikwan_tools"
+docker exec "${C_CLIENT}" chmod +x /usr/local/bin/leikwan_tools
 
 echo "=== [T2] Realm SHA-256 verification, reuse mode, tarball install, zero default rules ==="
 set +e
-BAD_TAR_OUT="$(docker exec "${C_VPS}" bash -lc 'cd /opt/src/liqun-helper && python3 -c "from liqun_helper.realm import install_realm_binary; install_realm_binary(target_path=\"/tmp/r\", tarball_path=\"/opt/cache/bad-realm.tar.gz\", state_dir=\"/tmp\")"' 2>&1)"
+BAD_TAR_OUT="$(docker exec "${C_VPS}" bash -lc 'cd /opt/src/leikwan_tools && python3 -c "from leikwan_tools.realm import install_realm_binary; install_realm_binary(target_path=\"/tmp/r\", tarball_path=\"/opt/cache/bad-realm.tar.gz\", state_dir=\"/tmp\")"' 2>&1)"
 BAD_TAR_RC=$?
 set -e
 echo "Tampered tarball output: ${BAD_TAR_OUT}"
@@ -98,26 +98,26 @@ echo "Tampered tarball output: ${BAD_TAR_OUT}"
 assert_contains "${BAD_TAR_OUT}" "SHA-256 校验失败" "T2 tampered sha256"
 
 # First verify auto-reuse of existing /usr/local/bin/realm via install.sh (no flags), then uninstall and install managed tarball.
-REUSE_OUT="$(docker exec "${C_VPS}" bash -lc 'cd /opt/src/liqun-helper && bash install.sh')"
+REUSE_OUT="$(docker exec "${C_VPS}" bash -lc 'cd /opt/src/leikwan_tools && bash install.sh')"
 echo "${REUSE_OUT}"
 assert_contains "${REUSE_OUT}" "发现并复用已有兼容 Realm: /usr/local/bin/realm" "T2 reuse install"
-docker exec "${C_VPS}" bash -lc 'cd /opt/src/liqun-helper && bash uninstall.sh --purge'
+docker exec "${C_VPS}" bash -lc 'cd /opt/src/leikwan_tools && bash uninstall.sh --purge'
 
-INSTALL_OUT="$(docker exec "${C_VPS}" bash -lc 'cd /opt/src/liqun-helper && bash install.sh --realm-tarball /opt/cache/realm-v2.9.6.tar.gz')"
+INSTALL_OUT="$(docker exec "${C_VPS}" bash -lc 'cd /opt/src/leikwan_tools && bash install.sh --realm-tarball /opt/cache/realm-v2.9.6.tar.gz')"
 echo "${INSTALL_OUT}"
 assert_contains "${INSTALL_OUT}" "Realm 已安装" "T2 tarball install"
-docker exec "${C_VPS}" test -x /usr/local/lib/liqun-helper/bin/realm || fail "T2: managed realm binary missing"
-docker exec "${C_VPS}" cat /var/lib/liqun-helper/realm-source.json
+docker exec "${C_VPS}" test -x /usr/local/lib/leikwan_tools/bin/realm || fail "T2: managed realm binary missing"
+docker exec "${C_VPS}" cat /var/lib/leikwan_tools/realm-source.json
 
-STATUS_EMPTY="$(docker exec "${C_VPS}" liqun-helper status)"
+STATUS_EMPTY="$(docker exec "${C_VPS}" leikwan_tools status)"
 echo "Initial status: ${STATUS_EMPTY}"
 assert_contains "${STATUS_EMPTY}" "当前没有已部署的托管规则" "T2 zero default rules"
 
-# Update /etc/liqun-helper/config.toml to match allocated subnet variables + mock DNS server.
+# Update /etc/leikwan_tools/config.toml to match allocated subnet variables + mock DNS server.
 docker exec -i "${C_VPS}" python3 - "${GW_PUB}" "${VPS_9929_IP}" "${GW_9929}" "${VPS_CN2_IP}" "${GW_CN2}" <<'PY'
 import sys
 gw_pub, vps_9929, gw_9929, vps_cn2, gw_cn2 = sys.argv[1:6]
-p = "/etc/liqun-helper/config.toml"
+p = "/etc/leikwan_tools/config.toml"
 txt = open(p, encoding="utf-8").read()
 txt = txt.replace('dns_server = ""', f'dns_server = "{gw_pub}"', 1)
 txt = txt.replace('10.7.0.146', vps_9929).replace('10.7.0.1', gw_9929)
@@ -125,7 +125,7 @@ txt = txt.replace('10.8.0.146', vps_cn2).replace('10.8.0.1', gw_cn2)
 open(p, "w", encoding="utf-8").write(txt)
 PY
 
-PREREQ_OUT="$(docker exec "${C_VPS}" liqun-helper check-prereqs --probe-remote "${JP_IP}")"
+PREREQ_OUT="$(docker exec "${C_VPS}" leikwan_tools check-prereqs --probe-remote "${JP_IP}")"
 echo "${PREREQ_OUT}"
 assert_contains "${PREREQ_OUT}" "线路 9929 [通过]" "T2 prereq 9929"
 assert_contains "${PREREQ_OUT}" "线路 cn2 [通过]" "T2 prereq cn2"
@@ -152,14 +152,14 @@ remote_port = 54141
 log_level = "warn"
 EOF
 
-PLAN_OUT="$(docker exec "${C_VPS}" liqun-helper plan /tmp/rule-zouter-9929.toml)"
+PLAN_OUT="$(docker exec "${C_VPS}" leikwan_tools plan /tmp/rule-zouter-9929.toml)"
 echo "${PLAN_OUT}"
 assert_contains "${PLAN_OUT}" "[CREATE]" "T3 plan"
 assert_contains "${PLAN_OUT}" "through = \"${VPS_9929_IP}\"" "T3 plan through"
 assert_contains "${PLAN_OUT}" 'interface = "eth0"' "T3 plan interface"
-docker exec "${C_VPS}" test ! -e /etc/liqun-helper/rules.d/zouter-jp.toml || fail "T3: plan wrote rule file"
+docker exec "${C_VPS}" test ! -e /etc/leikwan_tools/rules.d/zouter-jp.toml || fail "T3: plan wrote rule file"
 
-APPLY_9929="$(docker exec "${C_VPS}" liqun-helper apply /tmp/rule-zouter-9929.toml)"
+APPLY_9929="$(docker exec "${C_VPS}" leikwan_tools apply /tmp/rule-zouter-9929.toml)"
 echo "${APPLY_9929}"
 assert_contains "${APPLY_9929}" "已创建并启用" "T3 apply 9929"
 
@@ -194,7 +194,7 @@ remote_port = 54141
 log_level = "warn"
 EOF
 
-APPLY_CN2="$(docker exec "${C_VPS}" liqun-helper apply /tmp/rule-zouter-cn2.toml)"
+APPLY_CN2="$(docker exec "${C_VPS}" leikwan_tools apply /tmp/rule-zouter-cn2.toml)"
 echo "${APPLY_CN2}"
 assert_contains "${APPLY_CN2}" "已更新并重启" "T3 apply cn2"
 
@@ -230,17 +230,17 @@ remote_port = 54848
 log_level = "warn"
 EOF
 
-APPLY_HK="$(docker exec "${C_VPS}" liqun-helper apply /tmp/rule-rfc-hk.toml)"
+APPLY_HK="$(docker exec "${C_VPS}" leikwan_tools apply /tmp/rule-rfc-hk.toml)"
 echo "${APPLY_HK}"
-HK_PID_BEFORE="$(docker exec "${C_VPS}" systemctl show -p MainPID --value liqun-helper-realm@rfc-hk.service)"
+HK_PID_BEFORE="$(docker exec "${C_VPS}" systemctl show -p MainPID --value leikwan_tools-realm@rfc-hk.service)"
 RESP_HK_1="$(client_probe "${PUB_10}" 54848 HK_BEFORE)"
 echo "HK probe before updating JP: ${RESP_HK_1} (MainPID=${HK_PID_BEFORE})"
 assert_contains "${RESP_HK_1}" "LANDING=rfc-hk-mock SRC=${VPS_9929_IP}" "T4 HK before"
 
 docker exec "${C_VPS}" python3 -c 'open("/tmp/rule-zouter-cn2.toml", "a").write("tcp_timeout = 6\n")'
-APPLY_JP_UPDATE="$(docker exec "${C_VPS}" liqun-helper apply /tmp/rule-zouter-cn2.toml)"
+APPLY_JP_UPDATE="$(docker exec "${C_VPS}" leikwan_tools apply /tmp/rule-zouter-cn2.toml)"
 echo "${APPLY_JP_UPDATE}"
-HK_PID_AFTER="$(docker exec "${C_VPS}" systemctl show -p MainPID --value liqun-helper-realm@rfc-hk.service)"
+HK_PID_AFTER="$(docker exec "${C_VPS}" systemctl show -p MainPID --value leikwan_tools-realm@rfc-hk.service)"
 [[ "${HK_PID_BEFORE}" == "${HK_PID_AFTER}" && -n "${HK_PID_AFTER}" ]] || fail "T4: rfc-hk MainPID changed (${HK_PID_BEFORE} -> ${HK_PID_AFTER})"
 RESP_HK_2="$(client_probe "${PUB_10}" 54848 HK_AFTER)"
 assert_contains "${RESP_HK_2}" "LANDING=rfc-hk-mock SRC=${VPS_9929_IP}" "T4 HK after"
@@ -258,12 +258,12 @@ listen_port = 10009
 remote_ip = "${HK_IP}"
 remote_port = 54848
 EOF
-docker exec "${C_VPS}" liqun-helper apply /tmp/rule-three-ports.toml
+docker exec "${C_VPS}" leikwan_tools apply /tmp/rule-three-ports.toml
 RESP_3P="$(client_probe "${PUB_10}" 54999 THREE_PORTS)"
 echo "3-distinct-ports probe (54999->10009->54848 via CN2): ${RESP_3P}"
 assert_contains "${RESP_3P}" "LANDING=rfc-hk-mock SRC=${VPS_CN2_IP}" "T4 3 distinct ports src"
 assert_contains "${RESP_3P}" "ECHO=THREE_PORTS" "T4 3 distinct ports echo"
-docker exec "${C_VPS}" liqun-helper delete three-ports
+docker exec "${C_VPS}" leikwan_tools delete three-ports
 
 BIDIR_OUT="$(docker exec -i "${C_CLIENT}" python3 - "${PUB_10}" <<'PY'
 import socket, sys
@@ -285,18 +285,18 @@ assert_contains "${BIDIR_OUT}" "ECHO=BIDIR_MSG_1" "T4 bidir 1"
 assert_contains "${BIDIR_OUT}" "ECHO=BIDIR_MSG_2" "T4 bidir 2"
 
 echo "=== [T5] Idempotent re-apply & concurrent lock contention ==="
-JP_PID_1="$(docker exec "${C_VPS}" systemctl show -p MainPID --value liqun-helper-realm@zouter-jp.service)"
-NOOP_OUT="$(docker exec "${C_VPS}" liqun-helper apply /tmp/rule-zouter-cn2.toml)"
+JP_PID_1="$(docker exec "${C_VPS}" systemctl show -p MainPID --value leikwan_tools-realm@zouter-jp.service)"
+NOOP_OUT="$(docker exec "${C_VPS}" leikwan_tools apply /tmp/rule-zouter-cn2.toml)"
 echo "${NOOP_OUT}"
 assert_contains "${NOOP_OUT}" "幂等跳过" "T5 idempotent noop"
-JP_PID_2="$(docker exec "${C_VPS}" systemctl show -p MainPID --value liqun-helper-realm@zouter-jp.service)"
+JP_PID_2="$(docker exec "${C_VPS}" systemctl show -p MainPID --value leikwan_tools-realm@zouter-jp.service)"
 [[ "${JP_PID_1}" == "${JP_PID_2}" ]] || fail "T5: idempotent apply restarted service (${JP_PID_1} -> ${JP_PID_2})"
 
-LOCK_TEST_OUT="$(docker exec "${C_VPS}" env PYTHONPATH=/usr/local/lib/liqun-helper python3 -c '
+LOCK_TEST_OUT="$(docker exec "${C_VPS}" env PYTHONPATH=/usr/local/lib/leikwan_tools python3 -c '
 import subprocess
-from liqun_helper.system import FileLock
-with FileLock("/run/liqun-helper.lock", timeout=2.0):
-    res = subprocess.run(["liqun-helper", "apply", "/tmp/rule-zouter-cn2.toml", "--lock-timeout", "0.3"], capture_output=True, text=True)
+from leikwan_tools.system import FileLock
+with FileLock("/run/leikwan_tools.lock", timeout=2.0):
+    res = subprocess.run(["leikwan_tools", "apply", "/tmp/rule-zouter-cn2.toml", "--lock-timeout", "0.3"], capture_output=True, text=True)
     print("rc=", res.returncode)
     print(res.stdout + res.stderr)
 ')"
@@ -339,9 +339,9 @@ remote_port = 54141
 EOF
 
 set +e
-WILD_OUT="$(docker exec "${C_VPS}" liqun-helper apply /tmp/rule-conflict-wild.toml 2>&1)"
+WILD_OUT="$(docker exec "${C_VPS}" leikwan_tools apply /tmp/rule-conflict-wild.toml 2>&1)"
 WILD_RC=$?
-EXACT_OUT="$(docker exec "${C_VPS}" liqun-helper apply /tmp/rule-conflict-exact.toml 2>&1)"
+EXACT_OUT="$(docker exec "${C_VPS}" leikwan_tools apply /tmp/rule-conflict-exact.toml 2>&1)"
 EXACT_RC=$?
 set -e
 echo "Wildcard conflict: ${WILD_OUT}"
@@ -352,12 +352,12 @@ assert_contains "${EXACT_OUT}" "精确地址冲突" "T6 exact type"
 
 CONFLICT_PIDS_AFTER="$(docker exec "${C_VPS}" ss -H -ltnp '( sport = :10005 or sport = :10006 )')"
 [[ "${CONFLICT_PIDS_BEFORE}" == "${CONFLICT_PIDS_AFTER}" ]] || fail "T6: occupying processes were killed or altered!"
-docker exec "${C_VPS}" test ! -e /etc/liqun-helper/rules.d/conflict-wild.toml || fail "T6: stray rule created"
+docker exec "${C_VPS}" test ! -e /etc/leikwan_tools/rules.d/conflict-wild.toml || fail "T6: stray rule created"
 
 echo "=== [T7] Route mismatch / missing policy rule must fail loudly without silent line switch ==="
 docker exec "${C_VPS}" ip -4 rule del from "${VPS_CN2_IP}" lookup 102
 set +e
-MISSING_RULE_OUT="$(docker exec "${C_VPS}" liqun-helper plan /tmp/rule-zouter-cn2.toml 2>&1)"
+MISSING_RULE_OUT="$(docker exec "${C_VPS}" leikwan_tools plan /tmp/rule-zouter-cn2.toml 2>&1)"
 MISSING_RULE_RC=$?
 set -e
 echo "${MISSING_RULE_OUT}"
@@ -368,7 +368,7 @@ docker exec "${C_VPS}" ip -4 rule add from "${VPS_CN2_IP}" lookup 102 pref 102
 
 docker exec "${C_VPS}" bash -lc 'sed "s/line = \"cn2\"/line = \"nonexistent\"/" /tmp/rule-zouter-cn2.toml > /tmp/rule-bad-line.toml'
 set +e
-BAD_LINE_OUT="$(docker exec "${C_VPS}" liqun-helper apply /tmp/rule-bad-line.toml 2>&1)"
+BAD_LINE_OUT="$(docker exec "${C_VPS}" leikwan_tools apply /tmp/rule-bad-line.toml 2>&1)"
 BAD_LINE_RC=$?
 set -e
 [[ ${BAD_LINE_RC} -ne 0 ]] || fail "T7: unknown line should fail"
@@ -384,7 +384,7 @@ case "${1:-}" in
 esac
 EOF
 docker exec "${C_VPS}" chmod +x /opt/failing-realm.sh
-docker exec "${C_VPS}" bash -lc 'sed "s|realm_bin = \"\"|realm_bin = \"/opt/failing-realm.sh\"|" /etc/liqun-helper/config.toml > /tmp/config-failing.toml'
+docker exec "${C_VPS}" bash -lc 'sed "s|realm_bin = \"\"|realm_bin = \"/opt/failing-realm.sh\"|" /etc/leikwan_tools/config.toml > /tmp/config-failing.toml'
 
 docker exec -i "${C_VPS}" tee /tmp/rule-fail-new.toml >/dev/null <<EOF
 [rule]
@@ -400,32 +400,32 @@ remote_port = 54141
 EOF
 
 set +e
-RB_NEW_OUT="$(docker exec "${C_VPS}" liqun-helper --config /tmp/config-failing.toml apply /tmp/rule-fail-new.toml 2>&1)"
+RB_NEW_OUT="$(docker exec "${C_VPS}" leikwan_tools --config /tmp/config-failing.toml apply /tmp/rule-fail-new.toml 2>&1)"
 RB_NEW_RC=$?
 set -e
 echo "8a rollback output:"
 echo "${RB_NEW_OUT}"
 [[ ${RB_NEW_RC} -ne 0 ]] || fail "T8a: expected failure"
 assert_contains "${RB_NEW_OUT}" "首次创建失败，已停用单元并清理本次生成的规则与运行文件" "T8a cleanup msg"
-docker exec "${C_VPS}" test ! -e /etc/liqun-helper/rules.d/fail-new.toml || fail "T8a: rule file leaked"
-docker exec "${C_VPS}" test ! -e /var/lib/liqun-helper/realm/fail-new.toml || fail "T8a: realm toml leaked"
-docker exec "${C_VPS}" test ! -e /var/lib/liqun-helper/state/fail-new.json || fail "T8a: state json leaked"
+docker exec "${C_VPS}" test ! -e /etc/leikwan_tools/rules.d/fail-new.toml || fail "T8a: rule file leaked"
+docker exec "${C_VPS}" test ! -e /var/lib/leikwan_tools/realm/fail-new.toml || fail "T8a: realm toml leaked"
+docker exec "${C_VPS}" test ! -e /var/lib/leikwan_tools/state/fail-new.json || fail "T8a: state json leaked"
 
-JP_RULE_BEFORE="$(docker exec "${C_VPS}" cat /etc/liqun-helper/rules.d/zouter-jp.toml)"
-JP_REALM_BEFORE="$(docker exec "${C_VPS}" cat /var/lib/liqun-helper/realm/zouter-jp.toml)"
+JP_RULE_BEFORE="$(docker exec "${C_VPS}" cat /etc/leikwan_tools/rules.d/zouter-jp.toml)"
+JP_REALM_BEFORE="$(docker exec "${C_VPS}" cat /var/lib/leikwan_tools/realm/zouter-jp.toml)"
 docker exec "${C_VPS}" bash -lc 'sed "s/tcp_timeout = 6/tcp_timeout = 9/" /tmp/rule-zouter-cn2.toml > /tmp/rule-zouter-fail-upd.toml'
 set +e
-RB_UPD_OUT="$(docker exec "${C_VPS}" liqun-helper --config /tmp/config-failing.toml apply /tmp/rule-zouter-fail-upd.toml 2>&1)"
+RB_UPD_OUT="$(docker exec "${C_VPS}" leikwan_tools --config /tmp/config-failing.toml apply /tmp/rule-zouter-fail-upd.toml 2>&1)"
 RB_UPD_RC=$?
 set -e
 echo "8b rollback output:"
 echo "${RB_UPD_OUT}"
 [[ ${RB_UPD_RC} -ne 0 ]] || fail "T8b: expected update failure"
 assert_contains "${RB_UPD_OUT}" "已恢复原有规则配置、启用状态并重新拉起原运行实例" "T8b rollback msg"
-JP_RULE_AFTER="$(docker exec "${C_VPS}" cat /etc/liqun-helper/rules.d/zouter-jp.toml)"
-JP_REALM_AFTER="$(docker exec "${C_VPS}" cat /var/lib/liqun-helper/realm/zouter-jp.toml)"
+JP_RULE_AFTER="$(docker exec "${C_VPS}" cat /etc/leikwan_tools/rules.d/zouter-jp.toml)"
+JP_REALM_AFTER="$(docker exec "${C_VPS}" cat /var/lib/leikwan_tools/realm/zouter-jp.toml)"
 [[ "${JP_RULE_BEFORE}" == "${JP_RULE_AFTER}" && "${JP_REALM_BEFORE}" == "${JP_REALM_AFTER}" ]] || fail "T8b: rule files not restored"
-docker exec "${C_VPS}" systemctl is-active --quiet liqun-helper-realm@zouter-jp.service || fail "T8b: zouter-jp not active after rollback"
+docker exec "${C_VPS}" systemctl is-active --quiet leikwan_tools-realm@zouter-jp.service || fail "T8b: zouter-jp not active after rollback"
 RESP_AFTER_RB="$(client_probe "${PUB_10}" 54141 AFTER_ROLLBACK)"
 assert_contains "${RESP_AFTER_RB}" "LANDING=zouter-jp-mock SRC=${VPS_CN2_IP}" "T8b live forwarding after rollback"
 
@@ -442,17 +442,17 @@ listen_port = 10088
 remote_ip = "${JP_IP}"
 remote_port = 54141
 EOF
-docker exec "${C_VPS}" liqun-helper apply /tmp/rule-stay-disabled.toml
-docker exec "${C_VPS}" liqun-helper disable stay-disabled
+docker exec "${C_VPS}" leikwan_tools apply /tmp/rule-stay-disabled.toml
+docker exec "${C_VPS}" leikwan_tools disable stay-disabled
 docker exec "${C_VPS}" bash -lc 'sed "s/remote_port = 54141/remote_port = 54142/" /tmp/rule-stay-disabled.toml > /tmp/rule-stay-disabled-bad.toml'
 set +e
-RB_DIS_OUT="$(docker exec "${C_VPS}" liqun-helper --config /tmp/config-failing.toml apply /tmp/rule-stay-disabled-bad.toml 2>&1)"
+RB_DIS_OUT="$(docker exec "${C_VPS}" leikwan_tools --config /tmp/config-failing.toml apply /tmp/rule-stay-disabled-bad.toml 2>&1)"
 RB_DIS_RC=$?
 set -e
 [[ ${RB_DIS_RC} -ne 0 ]] || fail "T8c: expected failure"
 assert_contains "${RB_DIS_OUT}" "已恢复原有规则配置与停用状态" "T8c disabled rollback"
-! docker exec "${C_VPS}" systemctl is-enabled --quiet liqun-helper-realm@stay-disabled.service || fail "T8c: rule re-enabled!"
-! docker exec "${C_VPS}" systemctl is-active --quiet liqun-helper-realm@stay-disabled.service || fail "T8c: rule active!"
+! docker exec "${C_VPS}" systemctl is-enabled --quiet leikwan_tools-realm@stay-disabled.service || fail "T8c: rule re-enabled!"
+! docker exec "${C_VPS}" systemctl is-active --quiet leikwan_tools-realm@stay-disabled.service || fail "T8c: rule active!"
 docker exec "${C_VPS}" rm -f /opt/failing-realm.sh /tmp/config-failing.toml
 
 echo "=== [T9] Real container reboot recovery (docker restart ${C_VPS}) ==="
@@ -464,10 +464,10 @@ for _ in $(seq 1 40); do
     fi
     sleep 1
 done
-docker exec "${C_VPS}" systemctl is-active --quiet liqun-helper-realm@zouter-jp.service || fail "T9: zouter-jp did not auto-recover on reboot"
-docker exec "${C_VPS}" systemctl is-active --quiet liqun-helper-realm@rfc-hk.service || fail "T9: rfc-hk did not auto-recover on reboot"
+docker exec "${C_VPS}" systemctl is-active --quiet leikwan_tools-realm@zouter-jp.service || fail "T9: zouter-jp did not auto-recover on reboot"
+docker exec "${C_VPS}" systemctl is-active --quiet leikwan_tools-realm@rfc-hk.service || fail "T9: rfc-hk did not auto-recover on reboot"
 docker exec "${C_VPS}" systemctl is-active --quiet legacy-realm.service || fail "T9: legacy-realm did not recover"
-! docker exec "${C_VPS}" systemctl is-active --quiet liqun-helper-realm@stay-disabled.service || fail "T9: disabled rule started on reboot"
+! docker exec "${C_VPS}" systemctl is-active --quiet leikwan_tools-realm@stay-disabled.service || fail "T9: disabled rule started on reboot"
 
 RESP_REBOOT_JP="$(client_probe "${PUB_10}" 54141 REBOOT_JP)"
 RESP_REBOOT_HK="$(client_probe "${PUB_10}" 54848 REBOOT_HK)"
@@ -476,30 +476,30 @@ assert_contains "${RESP_REBOOT_JP}" "LANDING=zouter-jp-mock SRC=${VPS_CN2_IP}" "
 assert_contains "${RESP_REBOOT_HK}" "LANDING=rfc-hk-mock SRC=${VPS_9929_IP}" "T9 reboot HK"
 
 echo "=== [T10] Public ingress query, 3-tier classification, selection, client verify, DNS disappearance ==="
-CLIENT_Q_TCP="$(docker exec "${C_CLIENT}" liqun-helper ingress query --domain paid-v4.bgp1.leikwanhost.com --port 54141)"
+CLIENT_Q_TCP="$(docker exec "${C_CLIENT}" leikwan_tools ingress query --domain paid-v4.bgp1.leikwanhost.com --port 54141)"
 echo "${CLIENT_Q_TCP}"
 assert_contains "${CLIENT_Q_TCP}" "查询时间" "T10 timestamp"
 assert_contains "${CLIENT_Q_TCP}" "${PUB_10}:54141  [TCP 端口可达]" "T10 .10 tcp"
 assert_contains "${CLIENT_Q_TCP}" "${PUB_12}:54141  [TCP 端口可达]" "T10 .12 decoy tcp"
 assert_contains "${CLIENT_Q_TCP}" "${PUB_13}:54141  [DNS 候选]" "T10 .13 closed"
 
-CLIENT_Q_LANDING="$(docker exec "${C_CLIENT}" liqun-helper ingress query --domain paid-v4.bgp1.leikwanhost.com --port 54141 --verify-send 'PING\n' --verify-expect 'LANDING=zouter-jp-mock')"
+CLIENT_Q_LANDING="$(docker exec "${C_CLIENT}" leikwan_tools ingress query --domain paid-v4.bgp1.leikwanhost.com --port 54141 --verify-send 'PING\n' --verify-expect 'LANDING=zouter-jp-mock')"
 echo "${CLIENT_Q_LANDING}"
 assert_contains "${CLIENT_Q_LANDING}" "${PUB_10}:54141  [已验证到达指定落地]" "T10 .10 verified"
 assert_contains "${CLIENT_Q_LANDING}" "${PUB_11}:54141  [已验证到达指定落地]" "T10 .11 verified"
 assert_contains "${CLIENT_Q_LANDING}" "${PUB_12}:54141  [TCP 端口可达]" "T10 .12 decoy unverified"
 assert_contains "${CLIENT_Q_LANDING}" "${PUB_13}:54141  [DNS 候选]" "T10 .13 unreachable"
 
-JP_PID_BEFORE_SEL="$(docker exec "${C_VPS}" systemctl show -p MainPID --value liqun-helper-realm@zouter-jp.service)"
-SEL_OUT="$(docker exec "${C_VPS}" liqun-helper ingress select --rule zouter-jp --ip "${PUB_11}")"
+JP_PID_BEFORE_SEL="$(docker exec "${C_VPS}" systemctl show -p MainPID --value leikwan_tools-realm@zouter-jp.service)"
+SEL_OUT="$(docker exec "${C_VPS}" leikwan_tools ingress select --rule zouter-jp --ip "${PUB_11}")"
 echo "${SEL_OUT}"
 assert_contains "${SEL_OUT}" "客户端拨号地址/端口: ${PUB_11}:54141" "T10 dial addr"
 assert_contains "${SEL_OUT}" "保持不变，未重启 Realm" "T10 realm untouched"
 assert_contains "${SEL_OUT}" "禁止把 TLS SNI / Host 改成拨号 IP" "T10 protocol note"
-JP_PID_AFTER_SEL="$(docker exec "${C_VPS}" systemctl show -p MainPID --value liqun-helper-realm@zouter-jp.service)"
+JP_PID_AFTER_SEL="$(docker exec "${C_VPS}" systemctl show -p MainPID --value leikwan_tools-realm@zouter-jp.service)"
 [[ "${JP_PID_BEFORE_SEL}" == "${JP_PID_AFTER_SEL}" ]] || fail "T10: ingress select restarted Realm"
 
-CLIENT_VER_OUT="$(docker exec "${C_CLIENT}" liqun-helper ingress verify --host "${PUB_11}" --port 54141 --send 'PING\n' --expect 'LANDING=zouter-jp-mock')"
+CLIENT_VER_OUT="$(docker exec "${C_CLIENT}" leikwan_tools ingress verify --host "${PUB_11}" --port 54141 --send 'PING\n' --expect 'LANDING=zouter-jp-mock')"
 echo "${CLIENT_VER_OUT}"
 assert_contains "${CLIENT_VER_OUT}" "[已验证到达指定落地]" "T10 client verify"
 
@@ -513,33 +513,33 @@ docker exec -i "${C_ROUTER}" tee /tmp/dns_records.json >/dev/null <<EOF
 }
 EOF
 
-QUERY_STALE_OUT="$(docker exec "${C_VPS}" liqun-helper ingress query --rule zouter-jp)"
+QUERY_STALE_OUT="$(docker exec "${C_VPS}" leikwan_tools ingress query --rule zouter-jp)"
 echo "${QUERY_STALE_OUT}"
 assert_contains "${QUERY_STALE_OUT}" "固定公网 IP ${PUB_11} 已从 paid-v4.bgp1.leikwanhost.com 当前 DNS A 记录中消失" "T10 query stale warning"
 assert_contains "${QUERY_STALE_OUT}" "当前固定IP : ${PUB_11}" "T10 query fixed ip preserved"
 
-STALE_OUT="$(docker exec "${C_VPS}" liqun-helper status zouter-jp --check-dns)"
+STALE_OUT="$(docker exec "${C_VPS}" leikwan_tools status zouter-jp --check-dns)"
 echo "${STALE_OUT}"
 assert_contains "${STALE_OUT}" "固定公网 IP ${PUB_11} 已从 paid-v4.bgp1.leikwanhost.com 当前 DNS A 记录中消失" "T10 stale warning"
 assert_contains "${STALE_OUT}" "固定公网IP : ${PUB_11}" "T10 fixed ip preserved"
 
 echo "=== [T11] Disable, delete, uninstall & non-interference verification ==="
-docker exec "${C_VPS}" liqun-helper delete stay-disabled
-docker exec "${C_VPS}" liqun-helper disable rfc-hk
-! docker exec "${C_VPS}" systemctl is-active --quiet liqun-helper-realm@rfc-hk.service || fail "T11: rfc-hk still active after disable"
-docker exec "${C_VPS}" test -f /etc/liqun-helper/rules.d/rfc-hk.toml || fail "T11: disable removed rule config"
+docker exec "${C_VPS}" leikwan_tools delete stay-disabled
+docker exec "${C_VPS}" leikwan_tools disable rfc-hk
+! docker exec "${C_VPS}" systemctl is-active --quiet leikwan_tools-realm@rfc-hk.service || fail "T11: rfc-hk still active after disable"
+docker exec "${C_VPS}" test -f /etc/leikwan_tools/rules.d/rfc-hk.toml || fail "T11: disable removed rule config"
 
-docker exec "${C_VPS}" liqun-helper delete rfc-hk
-docker exec "${C_VPS}" test ! -e /etc/liqun-helper/rules.d/rfc-hk.toml || fail "T11: delete left rule config"
-docker exec "${C_VPS}" systemctl is-active --quiet liqun-helper-realm@zouter-jp.service || fail "T11: deleting rfc-hk impacted zouter-jp"
+docker exec "${C_VPS}" leikwan_tools delete rfc-hk
+docker exec "${C_VPS}" test ! -e /etc/leikwan_tools/rules.d/rfc-hk.toml || fail "T11: delete left rule config"
+docker exec "${C_VPS}" systemctl is-active --quiet leikwan_tools-realm@zouter-jp.service || fail "T11: deleting rfc-hk impacted zouter-jp"
 
-UNINSTALL_OUT="$(docker exec "${C_VPS}" bash -lc 'cd /opt/src/liqun-helper && bash uninstall.sh --purge')"
+UNINSTALL_OUT="$(docker exec "${C_VPS}" bash -lc 'cd /opt/src/leikwan_tools && bash uninstall.sh --purge')"
 echo "${UNINSTALL_OUT}"
-docker exec "${C_VPS}" test ! -e /usr/local/bin/liqun-helper || fail "T11: binary still exists"
-docker exec "${C_VPS}" test ! -e /usr/local/lib/liqun-helper || fail "T11: lib dir still exists"
-docker exec "${C_VPS}" test ! -e /var/lib/liqun-helper || fail "T11: state dir still exists"
-docker exec "${C_VPS}" test ! -e /etc/liqun-helper || fail "T11: config dir still exists"
-docker exec "${C_VPS}" test ! -e /etc/systemd/system/liqun-helper-realm@.service || fail "T11: systemd unit still exists"
+docker exec "${C_VPS}" test ! -e /usr/local/bin/leikwan_tools || fail "T11: binary still exists"
+docker exec "${C_VPS}" test ! -e /usr/local/lib/leikwan_tools || fail "T11: lib dir still exists"
+docker exec "${C_VPS}" test ! -e /var/lib/leikwan_tools || fail "T11: state dir still exists"
+docker exec "${C_VPS}" test ! -e /etc/leikwan_tools || fail "T11: config dir still exists"
+docker exec "${C_VPS}" test ! -e /etc/systemd/system/leikwan_tools-realm@.service || fail "T11: systemd unit still exists"
 
 docker exec "${C_VPS}" systemctl is-active --quiet legacy-realm.service || fail "T11: legacy-realm stopped!"
 LEGACY_WAIT="$(docker exec -i "${C_VPS}" python3 - "${VPS_9929_IP}" <<'PY'

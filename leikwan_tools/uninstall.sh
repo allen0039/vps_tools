@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_LIB_DIR="/usr/local/lib/liqun-helper"
+INSTALL_LIB_DIR="/usr/local/lib/leikwan_tools"
 CONFIG_DIR_ARG=""
 STATE_DIR_ARG=""
 PURGE=0
@@ -20,7 +20,7 @@ usage() {
   -h, --help           显示帮助
 
 说明:
-  依据安装清单与规则归属记录执行加锁清理，只删除 liqun-helper 自身创建的资源；
+  依据安装清单与规则归属记录执行加锁清理，只删除 leikwan_tools 自身创建的资源；
   共享目录中的无关文件、复用的 Realm、非托管同名服务、Toolkit、LeiKwanManager、v6-mng.sh、路由和防火墙均保持原样。
 EOF
 }
@@ -61,12 +61,12 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 PY_ROOT=""
-if [[ -f "${INSTALL_LIB_DIR}/liqun_helper/ownership.py" ]]; then
+if [[ -f "${INSTALL_LIB_DIR}/leikwan_tools/ownership.py" ]]; then
     PY_ROOT="${INSTALL_LIB_DIR}"
-elif [[ -f "${SCRIPT_DIR}/liqun_helper/ownership.py" ]]; then
+elif [[ -f "${SCRIPT_DIR}/leikwan_tools/ownership.py" ]]; then
     PY_ROOT="${SCRIPT_DIR}"
 else
-    echo "错误: 未找到 liqun_helper.ownership 模块，拒绝执行无清单清理" >&2
+    echo "错误: 未找到 leikwan_tools.ownership 模块，拒绝执行无清单清理" >&2
     exit 1
 fi
 
@@ -85,4 +85,4 @@ if [[ -n "${STATE_DIR_ARG}" ]]; then
 fi
 
 export PYTHONPATH="${PY_ROOT}"
-exec python3 -m liqun_helper.ownership uninstall "${UN_ARGS[@]}"
+exec python3 -m leikwan_tools.ownership uninstall "${UN_ARGS[@]}"

@@ -117,7 +117,7 @@ class FileLock:
                 os.close(fd)
                 if time.monotonic() >= deadline:
                     raise LockTimeoutError(
-                        f"获取并发写锁超时 ({self.timeout:.1f}s): {self.lock_path}，可能有其他 liqun-helper 写操作正在执行"
+                        f"获取并发写锁超时 ({self.timeout:.1f}s): {self.lock_path}，可能有其他 leikwan_tools 写操作正在执行"
                     )
                 time.sleep(0.05)
             except Exception:

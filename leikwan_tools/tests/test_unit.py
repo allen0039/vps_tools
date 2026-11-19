@@ -1,4 +1,4 @@
-"""Unit tests for liqun-helper (zero external dependencies, runs on Python 3.9+ and 3.11+)."""
+"""Unit tests for leikwan_tools (zero external dependencies, runs on Python 3.9+ and 3.11+)."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from liqun_helper import MANAGED_MARKER, REALM_RELEASES  # noqa: E402
-from liqun_helper.config import (  # noqa: E402
+from leikwan_tools import MANAGED_MARKER, REALM_RELEASES  # noqa: E402
+from leikwan_tools.config import (  # noqa: E402
     ConfigError,
     LineConfig,
     parse_global_config_dict,
@@ -26,7 +26,7 @@ from liqun_helper.config import (  # noqa: E402
     render_realm_toml,
     render_rule_toml,
 )
-from liqun_helper.ingress import (  # noqa: E402
+from leikwan_tools.ingress import (  # noqa: E402
     STATUS_DNS_CANDIDATE,
     STATUS_LANDING_VERIFIED,
     STATUS_TCP_REACHABLE,
@@ -38,8 +38,8 @@ from liqun_helper.ingress import (  # noqa: E402
     parse_dns_a_response,
     probe_candidate,
 )
-from liqun_helper.manager import ApplyError, PreflightReport, apply_rule  # noqa: E402
-from liqun_helper.ownership import (  # noqa: E402
+from leikwan_tools.manager import ApplyError, PreflightReport, apply_rule  # noqa: E402
+from leikwan_tools.ownership import (  # noqa: E402
     OwnershipError,
     check_conservative_legacy_rule,
     ensure_safe_subpath,
@@ -48,8 +48,8 @@ from liqun_helper.ownership import (  # noqa: E402
     verify_legacy_template_owned,
     write_install_artifacts,
 )
-from liqun_helper.realm import RealmBinaryInfo, RealmError, install_realm_binary, parse_realm_version  # noqa: E402
-from liqun_helper.system import (  # noqa: E402
+from leikwan_tools.realm import RealmBinaryInfo, RealmError, install_realm_binary, parse_realm_version  # noqa: E402
+from leikwan_tools.system import (  # noqa: E402
     FileLock,
     LockTimeoutError,
     PreflightError,
@@ -65,7 +65,7 @@ from liqun_helper.system import (  # noqa: E402
     systemd_is_active,
     verify_egress_route,
 )
-from liqun_helper.toml_compat import TomlParseError, _fallback_loads, loads_toml  # noqa: E402
+from leikwan_tools.toml_compat import TomlParseError, _fallback_loads, loads_toml  # noqa: E402
 
 
 class TestTomlCompat(unittest.TestCase):
@@ -74,7 +74,7 @@ class TestTomlCompat(unittest.TestCase):
         # Top comment
         [tool]
         realm_bin = ""
-        rules_dir = "/etc/liqun-helper/rules.d"
+        rules_dir = "/etc/leikwan_tools/rules.d"
         [lines.9929]
         interface = "eth0"
         source_ip = "10.7.0.146"
@@ -220,8 +220,8 @@ class TestRoutingAndPorts(unittest.TestCase):
                 return Res(0, rules_out)
             raise AssertionError(cmd)
 
-        with patch("liqun_helper.system.run_cmd", side_effect=fake_run), patch(
-            "liqun_helper.system._load_rt_tables", return_value=rt_tables
+        with patch("leikwan_tools.system.run_cmd", side_effect=fake_run), patch(
+            "leikwan_tools.system._load_rt_tables", return_value=rt_tables
         ):
             ok_res = verify_egress_route(line_cn2, "192.0.2.10")
             self.assertEqual(ok_res.table, "102")
@@ -240,8 +240,8 @@ class TestRoutingAndPorts(unittest.TestCase):
                 return Res(0, bad_route_out)
             return Res(0, rules_out)
 
-        with patch("liqun_helper.system.run_cmd", side_effect=fake_run_fallback), patch(
-            "liqun_helper.system._load_rt_tables", return_value=rt_tables
+        with patch("leikwan_tools.system.run_cmd", side_effect=fake_run_fallback), patch(
+            "leikwan_tools.system._load_rt_tables", return_value=rt_tables
         ):
             with self.assertRaises(PreflightError) as ctx:
                 verify_egress_route(line_cn2, "192.0.2.10")
@@ -446,8 +446,8 @@ class TestR2ConfigAndRoutePinning(unittest.TestCase):
                 return Res(2, "", "RTNETLINK answers: Network is unreachable")
             return Res(0, good_from)
 
-        with patch("liqun_helper.system.run_cmd", side_effect=fake_run), patch(
-            "liqun_helper.system._load_rt_tables", return_value=rt_tables
+        with patch("leikwan_tools.system.run_cmd", side_effect=fake_run), patch(
+            "leikwan_tools.system._load_rt_tables", return_value=rt_tables
         ):
             with self.assertRaises(PreflightError) as ctx:
                 verify_egress_route(line_cn2, "192.0.2.10")
@@ -457,13 +457,13 @@ class TestR2ConfigAndRoutePinning(unittest.TestCase):
 class TestR2OwnershipAndRollback(unittest.TestCase):
     def test_legacy_template_upgrade_fingerprint_rejects_foreign_unit(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            unit = Path(td) / "liqun-helper-realm@.service"
+            unit = Path(td) / "leikwan_tools-realm@.service"
             unit.write_text(
                 "[Unit]\n"
-                "Description=Liqun Helper Realm IPv4 TCP Relay (%i)\n"
+                "Description=leikwan_tools Realm IPv4 TCP Relay (%i)\n"
                 "[Service]\n"
                 "Type=simple\n"
-                "ExecStart=/usr/local/lib/liqun-helper/realm-exec.sh %i\n"
+                "ExecStart=/usr/local/lib/leikwan_tools/realm-exec.sh %i\n"
                 "Restart=on-failure\n"
                 "[Install]\n"
                 "WantedBy=multi-user.target\n",
@@ -473,7 +473,7 @@ class TestR2OwnershipAndRollback(unittest.TestCase):
 
             unit.write_text(
                 "[Unit]\n"
-                "Description=Liqun Helper Realm IPv4 TCP Relay (%i)\n"
+                "Description=leikwan_tools Realm IPv4 TCP Relay (%i)\n"
                 "[Service]\n"
                 "ExecStart=/usr/local/lib/foreign/realm-exec.sh %i\n",
                 encoding="utf-8",
@@ -519,7 +519,7 @@ class TestR2OwnershipAndRollback(unittest.TestCase):
             lib_dir = base / "lib"
             cfg_dir = base / "shared_cfg"
             st_dir = base / "shared_state"
-            (lib_dir / "liqun_helper").mkdir(parents=True)
+            (lib_dir / "leikwan_tools").mkdir(parents=True)
             (cfg_dir / "rules.d").mkdir(parents=True)
             (cfg_dir / "examples").mkdir(parents=True)
             (st_dir / "realm").mkdir(parents=True)
@@ -548,9 +548,9 @@ class TestR2OwnershipAndRollback(unittest.TestCase):
             )
             self.assertEqual(manifest["config_dir"], str(cfg_dir.resolve()))
 
-            with patch("liqun_helper.ownership.TEMPLATE_UNIT_PATH", str(base / "missing.service")), patch(
-                "liqun_helper.ownership.BIN_LAUNCHER_PATH", str(base / "missing-bin")
-            ), patch("liqun_helper.ownership.systemd_daemon_reload"):
+            with patch("leikwan_tools.ownership.TEMPLATE_UNIT_PATH", str(base / "missing.service")), patch(
+                "leikwan_tools.ownership.BIN_LAUNCHER_PATH", str(base / "missing-bin")
+            ), patch("leikwan_tools.ownership.systemd_daemon_reload"):
                 res = uninstall_tool(
                     purge=True,
                     config_dir_arg=str(cfg_dir),
@@ -577,17 +577,17 @@ class TestR2OwnershipAndRollback(unittest.TestCase):
             (rdir / "legacy1.toml").write_text('[rule]\nname = "legacy1"\n', encoding="utf-8")
             (sdir / "realm" / "legacy1.toml").write_text("# wrong header\n", encoding="utf-8")
             (sdir / "state" / "legacy1.json").write_text('{"rule_name":"legacy1"}', encoding="utf-8")
-            with patch("liqun_helper.ownership.is_standalone_unmanaged_unit", return_value=(False, "")):
+            with patch("leikwan_tools.ownership.is_standalone_unmanaged_unit", return_value=(False, "")):
                 ok, _ = check_conservative_legacy_rule(str(rdir), str(sdir), "legacy1")
                 self.assertFalse(ok)
 
                 # With all valid markers -> returns True
-                (rdir / "legacy1.toml").write_text("# Managed by liqun-helper (rule: legacy1)\n", encoding="utf-8")
+                (rdir / "legacy1.toml").write_text("# Managed by leikwan_tools (rule: legacy1)\n", encoding="utf-8")
                 (sdir / "realm" / "legacy1.toml").write_text(
-                    "# Generated by liqun-helper for rule: legacy1\n", encoding="utf-8"
+                    "# Generated by leikwan_tools for rule: legacy1\n", encoding="utf-8"
                 )
                 (sdir / "state" / "legacy1.json").write_text(
-                    '{"rule_name":"legacy1","unit_name":"liqun-helper-realm@legacy1.service"}',
+                    '{"rule_name":"legacy1","unit_name":"leikwan_tools-realm@legacy1.service"}',
                     encoding="utf-8",
                 )
                 ok2, _ = check_conservative_legacy_rule(str(rdir), str(sdir), "legacy1")
@@ -615,7 +615,7 @@ class TestR2OwnershipAndRollback(unittest.TestCase):
                 '[forward]\nlisten_ip = "10.7.0.146"\nlisten_port = 10001\nremote_ip = "192.0.2.10"\nremote_port = 54141\n',
                 encoding="utf-8",
             )
-            from liqun_helper.config import load_global_config
+            from leikwan_tools.config import load_global_config
 
             gcfg = load_global_config(str(cfg_path))
             fake_realm = RealmBinaryInfo("/usr/local/bin/realm", "2.9.6", (2, 9, 6), "abc", "reused")
@@ -623,7 +623,7 @@ class TestR2OwnershipAndRollback(unittest.TestCase):
             fake_rt = RouteGetResult("192.0.2.10", "10.8.0.146", "eth1", "10.8.0.1", "102", "10.8.0.146", "ok", ["ip"])
 
             def make_report():
-                from liqun_helper.config import load_rule_config
+                from leikwan_tools.config import load_rule_config
 
                 return PreflightReport(
                     rule=load_rule_config(str(rule_file)),
@@ -631,35 +631,35 @@ class TestR2OwnershipAndRollback(unittest.TestCase):
                     realm_info=fake_realm,
                     listen_interface="eth0",
                     route_result=fake_rt,
-                    unit_name="liqun-helper-realm@r1.service",
+                    unit_name="leikwan_tools-realm@r1.service",
                 )
 
             # Case A: Stage 2 start fails AND journalctl fails AND stop raises while unit is confirmed inactive -> cleans all files!
-            with patch("liqun_helper.manager.preflight_rule", side_effect=lambda *a, **kw: make_report()), patch(
-                "liqun_helper.manager.systemd_enable"
-            ), patch("liqun_helper.manager.systemd_reset_failed"), patch(
-                "liqun_helper.manager.systemd_show", return_value={"NRestarts": "0"}
-            ), patch("liqun_helper.manager.systemd_restart", side_effect=RuntimeError("boom-start")), patch(
-                "liqun_helper.manager.systemd_journal_tail", side_effect=RuntimeError("boom-journal")
-            ), patch("liqun_helper.manager.systemd_stop", side_effect=RuntimeError("boom-stop")), patch(
-                "liqun_helper.manager.systemd_disable"
-            ), patch("liqun_helper.manager.systemd_is_active", return_value=False):
+            with patch("leikwan_tools.manager.preflight_rule", side_effect=lambda *a, **kw: make_report()), patch(
+                "leikwan_tools.manager.systemd_enable"
+            ), patch("leikwan_tools.manager.systemd_reset_failed"), patch(
+                "leikwan_tools.manager.systemd_show", return_value={"NRestarts": "0"}
+            ), patch("leikwan_tools.manager.systemd_restart", side_effect=RuntimeError("boom-start")), patch(
+                "leikwan_tools.manager.systemd_journal_tail", side_effect=RuntimeError("boom-journal")
+            ), patch("leikwan_tools.manager.systemd_stop", side_effect=RuntimeError("boom-stop")), patch(
+                "leikwan_tools.manager.systemd_disable"
+            ), patch("leikwan_tools.manager.systemd_is_active", return_value=False):
                 with self.assertRaises(ApplyError) as ctx:
                     apply_rule(gcfg, str(rule_file))
-                self.assertIn("已确认 liqun-helper-realm@r1.service 未在运行；已清理文件", str(ctx.exception))
+                self.assertIn("已确认 leikwan_tools-realm@r1.service 未在运行；已清理文件", str(ctx.exception))
                 self.assertFalse((rules_dir / "r1.toml").exists())
                 self.assertFalse((state_dir / "realm" / "r1.toml").exists())
 
             # Case B: Stage 2 start/stop fail AND status query is unknown -> keeps runtime files & ownership!
-            with patch("liqun_helper.manager.preflight_rule", side_effect=lambda *a, **kw: make_report()), patch(
-                "liqun_helper.manager.systemd_enable"
-            ), patch("liqun_helper.manager.systemd_reset_failed"), patch(
-                "liqun_helper.manager.systemd_show", return_value={"NRestarts": "0"}
-            ), patch("liqun_helper.manager.systemd_restart", side_effect=RuntimeError("boom-start")), patch(
-                "liqun_helper.manager.systemd_journal_tail", return_value=""
-            ), patch("liqun_helper.manager.systemd_stop", side_effect=RuntimeError("boom-stop")), patch(
-                "liqun_helper.manager.systemd_disable"
-            ), patch("liqun_helper.manager.systemd_is_active", return_value=None):
+            with patch("leikwan_tools.manager.preflight_rule", side_effect=lambda *a, **kw: make_report()), patch(
+                "leikwan_tools.manager.systemd_enable"
+            ), patch("leikwan_tools.manager.systemd_reset_failed"), patch(
+                "leikwan_tools.manager.systemd_show", return_value={"NRestarts": "0"}
+            ), patch("leikwan_tools.manager.systemd_restart", side_effect=RuntimeError("boom-start")), patch(
+                "leikwan_tools.manager.systemd_journal_tail", return_value=""
+            ), patch("leikwan_tools.manager.systemd_stop", side_effect=RuntimeError("boom-stop")), patch(
+                "leikwan_tools.manager.systemd_disable"
+            ), patch("leikwan_tools.manager.systemd_is_active", return_value=None):
                 with self.assertRaises(ApplyError) as ctx:
                     apply_rule(gcfg, str(rule_file))
                 self.assertIn("回滚未完全完成", str(ctx.exception))
@@ -667,15 +667,15 @@ class TestR2OwnershipAndRollback(unittest.TestCase):
                 self.assertTrue((state_dir / "managed-rules.json").exists())
 
             # Case C: Update existing active rule where first write fails -> zero systemctl stop/restart calls!
-            (rules_dir / "r1.toml").write_text("# Managed by liqun-helper (rule: r1)\n", encoding="utf-8")
+            (rules_dir / "r1.toml").write_text("# Managed by leikwan_tools (rule: r1)\n", encoding="utf-8")
             (state_dir / "realm" / "r1.toml").write_text("# old realm toml\n", encoding="utf-8")
-            with patch("liqun_helper.manager.preflight_rule", side_effect=lambda *a, **kw: make_report()), patch(
-                "liqun_helper.manager.systemd_is_enabled", return_value=True
-            ), patch("liqun_helper.manager.systemd_is_active", return_value=True), patch(
-                "liqun_helper.manager.systemd_show", return_value={"ActiveState": "active", "SubState": "running", "MainPID": "777"}
-            ), patch("liqun_helper.manager.atomic_write_text", side_effect=OSError("disk-full")), patch(
-                "liqun_helper.manager.systemd_stop"
-            ) as m_stop, patch("liqun_helper.manager.systemd_restart") as m_restart:
+            with patch("leikwan_tools.manager.preflight_rule", side_effect=lambda *a, **kw: make_report()), patch(
+                "leikwan_tools.manager.systemd_is_enabled", return_value=True
+            ), patch("leikwan_tools.manager.systemd_is_active", return_value=True), patch(
+                "leikwan_tools.manager.systemd_show", return_value={"ActiveState": "active", "SubState": "running", "MainPID": "777"}
+            ), patch("leikwan_tools.manager.atomic_write_text", side_effect=OSError("disk-full")), patch(
+                "leikwan_tools.manager.systemd_stop"
+            ) as m_stop, patch("leikwan_tools.manager.systemd_restart") as m_restart:
                 with self.assertRaises(ApplyError) as ctx:
                     apply_rule(gcfg, str(rule_file))
                 self.assertIn("首次写入即失败", str(ctx.exception))
@@ -696,7 +696,7 @@ class TestR2OwnershipAndRollback(unittest.TestCase):
                 Result(1, ""),
             ]
         )
-        with patch("liqun_helper.system.run_cmd", side_effect=lambda *args, **kwargs: next(results)):
+        with patch("leikwan_tools.system.run_cmd", side_effect=lambda *args, **kwargs: next(results)):
             self.assertIs(systemd_is_active("demo.service"), True)
             self.assertIs(systemd_is_active("demo.service"), False)
             self.assertIsNone(systemd_is_active("demo.service"))
@@ -742,7 +742,7 @@ class TestR2TlsAndFixedIpPolicy(unittest.TestCase):
             records=[],
             error="timed out",
         )
-        with patch("liqun_helper.ingress.query_dns_a", return_value=dns_ok):
+        with patch("leikwan_tools.ingress.query_dns_a", return_value=dns_ok):
             r1 = evaluate_fixed_ip_policy("paid-v4.bgp1.leikwanhost.com", "203.0.113.99", "")
             self.assertFalse(r1.allowed)
             r2 = evaluate_fixed_ip_policy("paid-v4.bgp1.leikwanhost.com", "203.0.113.99", "", allow_non_dns=True)
@@ -753,7 +753,7 @@ class TestR2TlsAndFixedIpPolicy(unittest.TestCase):
             self.assertTrue(r3.allowed)
             self.assertIn("消失", r3.warning or "")
 
-        with patch("liqun_helper.ingress.query_dns_a", return_value=dns_err):
+        with patch("leikwan_tools.ingress.query_dns_a", return_value=dns_err):
             r4 = evaluate_fixed_ip_policy("paid-v4.bgp1.leikwanhost.com", "203.0.113.10", "")
             self.assertFalse(r4.allowed)
             self.assertTrue(r4.dns_failed)

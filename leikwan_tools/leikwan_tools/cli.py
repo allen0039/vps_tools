@@ -1,4 +1,4 @@
-"""Command-line interface for liqun-helper."""
+"""Command-line interface for leikwan_tools."""
 
 from __future__ import annotations
 
@@ -249,9 +249,9 @@ def _cmd_ingress_query(args: argparse.Namespace) -> int:
 
         if port:
             print("\n客户端可用命令提示:")
-            print("  固定选择: liqun-helper ingress select --rule <规则名> --ip <候选IP>")
+            print("  固定选择: leikwan_tools ingress select --rule <规则名> --ip <候选IP>")
             print(
-                f"  客户端验证: liqun-helper ingress verify --host <候选IP> --port {port} "
+                f"  客户端验证: leikwan_tools ingress verify --host <候选IP> --port {port} "
                 f'--send "PING\\n" --expect "<你的落地标识>"'
             )
 
@@ -355,8 +355,8 @@ def _cmd_ingress_verify(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     default_cfg = resolve_default_config_path()
     parser = argparse.ArgumentParser(
-        prog="liqun-helper",
-        description="独立「利群助手」— 利群 VPS 多规则 Realm IPv4 TCP 转发与公网入口管理工具",
+        prog="leikwan_tools",
+        description="独立「leikwan_tools」— 利群 VPS 多规则 Realm IPv4 TCP 转发与公网入口管理工具",
     )
     parser.add_argument(
         "--config",
@@ -364,7 +364,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"主配置文件路径 (当前默认: {default_cfg})",
     )
     parser.add_argument("--json", action="store_true", help="以 JSON 格式输出结果")
-    parser.add_argument("--version", action="version", version=f"liqun-helper {__version__}")
+    parser.add_argument("--version", action="version", version=f"leikwan_tools {__version__}")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
