@@ -352,6 +352,44 @@ def _cmd_ingress_verify(args: argparse.Namespace) -> int:
     return 1
 
 
+def _run_menu(config_path: str) -> int:
+    actions = {
+        "1": ("查看规则状态", ["status"], ""),
+        "2": ("检查运行前置条件", ["check-prereqs"], ""),
+        "3": ("预览规则部署", ["plan"], "规则 TOML 路径"),
+        "4": ("应用规则文件", ["apply"], "规则 TOML 路径"),
+        "5": ("停用规则", ["disable"], "规则名称"),
+        "6": ("删除规则", ["delete"], "规则名称"),
+        "7": ("查询公网入口", ["ingress", "query"], ""),
+    }
+    try:
+        while True:
+            print("\nleikwan_tools 管理菜单")
+            for choice, (label, _, _) in actions.items():
+                print(f"  {choice}. {label}")
+            print("  0. 退出")
+            selected = input("请选择：").strip()
+            if selected == "0":
+                return 0
+            if selected not in actions:
+                print("无效选项，请重新输入。")
+                continue
+
+            label, command, prompt = actions[selected]
+            if prompt:
+                value = input(f"{prompt}（留空返回）：").strip()
+                if not value:
+                    continue
+                command = [*command, "--", value]
+            if selected in ("4", "5", "6"):
+                if input(f"确认{label}？[y/N] ").strip().lower() != "y":
+                    continue
+            main(["--config", config_path, *command])
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     default_cfg = resolve_default_config_path()
     parser = argparse.ArgumentParser(
@@ -367,6 +405,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"leikwan_tools {__version__}")
 
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("menu", help="打开交互管理菜单")
 
     p_plan = sub.add_parser("plan", aliases=["preview"], help="只读预览规则部署计划与前置校验")
     p_plan.add_argument("rule_file", help="规则 TOML 文件路径")
@@ -467,6 +506,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "menu":
+            return _run_menu(args.config)
+
         if args.command in ("plan", "preview"):
             cfg = load_global_config(args.config)
             res = plan_rule(

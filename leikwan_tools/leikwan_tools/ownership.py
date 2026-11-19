@@ -42,6 +42,7 @@ from .system import (
 
 TEMPLATE_UNIT_PATH = f"/etc/systemd/system/{FIXED_SYSTEMD_UNIT_TEMPLATE}"
 BIN_LAUNCHER_PATH = "/usr/local/bin/leikwan_tools"
+SHORTCUT_PATH = "/usr/local/bin/lqtool"
 
 
 class OwnershipError(RuntimeError):
@@ -167,7 +168,11 @@ def verify_launcher_owned(bin_path: str = BIN_LAUNCHER_PATH) -> Tuple[bool, str]
         content = p.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return False, f"无法读取 CLI 入口 ({bin_path}): {exc}"
-    if MANAGED_MARKER in content or "leikwan_tools.cli" in content:
+    if bin_path == SHORTCUT_PATH:
+        owned = MANAGED_MARKER in content.splitlines()
+    else:
+        owned = MANAGED_MARKER in content or "leikwan_tools.cli" in content
+    if owned:
         return True, ""
     return False, f"CLI 入口缺少归属标记: {bin_path}"
 
@@ -486,6 +491,7 @@ def write_install_artifacts(
         "installed_at_utc": datetime.now(timezone.utc).isoformat(),
         "install_lib_dir": os.path.realpath(str(lib_dir)),
         "launcher_path": BIN_LAUNCHER_PATH,
+        "shortcut_path": SHORTCUT_PATH,
         "systemd_template_path": TEMPLATE_UNIT_PATH,
         "systemd_template_unit": FIXED_SYSTEMD_UNIT_TEMPLATE,
         "config_dir": os.path.realpath(str(cfg_dir)),
@@ -699,13 +705,15 @@ def uninstall_tool(
         elif Path(TEMPLATE_UNIT_PATH).exists():
             skipped_items.append(f"保留非本工具模板单元 {TEMPLATE_UNIT_PATH}: {tpl_reason}")
 
-        # Remove launcher ONLY if owned.
-        bin_ok, bin_reason = verify_launcher_owned(BIN_LAUNCHER_PATH)
-        if bin_ok:
-            Path(BIN_LAUNCHER_PATH).unlink()
-            removed_files.append(BIN_LAUNCHER_PATH)
-        elif Path(BIN_LAUNCHER_PATH).exists():
-            skipped_items.append(f"保留外部 CLI {BIN_LAUNCHER_PATH}: {bin_reason}")
+        for launcher_path in (BIN_LAUNCHER_PATH, SHORTCUT_PATH):
+            launcher = Path(launcher_path)
+            if launcher.exists() or launcher.is_symlink():
+                bin_ok, bin_reason = verify_launcher_owned(launcher_path)
+                if bin_ok:
+                    launcher.unlink()
+                    removed_files.append(launcher_path)
+                else:
+                    skipped_items.append(f"保留外部 CLI {launcher_path}: {bin_reason}")
 
         # Remove our own files inside install_lib_dir (keeping any foreign files untouched!).
         lib_root = Path(os.path.realpath(install_lib_dir))
@@ -819,10 +827,12 @@ def _cli_main(argv: Optional[List[str]] = None) -> int:
                 proc = subprocess.run(cmd, check=False)
                 return proc.returncode
         if args.action == "check-install-targets":
-            if Path(BIN_LAUNCHER_PATH).exists() or Path(BIN_LAUNCHER_PATH).is_symlink():
-                ok, reason = verify_launcher_owned(BIN_LAUNCHER_PATH)
-                if not ok:
-                    raise OwnershipError(f"拒绝覆盖非本工具 CLI 入口: {reason}")
+            for launcher_path in (BIN_LAUNCHER_PATH, SHORTCUT_PATH):
+                launcher = Path(launcher_path)
+                if launcher.exists() or launcher.is_symlink():
+                    ok, reason = verify_launcher_owned(launcher_path)
+                    if not ok:
+                        raise OwnershipError(f"拒绝覆盖非本工具 CLI 入口: {reason}")
             if Path(TEMPLATE_UNIT_PATH).exists() or Path(TEMPLATE_UNIT_PATH).is_symlink():
                 ok, reason = verify_template_unit_owned(TEMPLATE_UNIT_PATH)
                 if not ok:

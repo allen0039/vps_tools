@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_LIB_DIR="/usr/local/lib/leikwan_tools"
 BIN_PATH="/usr/local/bin/leikwan_tools"
+SHORTCUT_PATH="/usr/local/bin/lqtool"
 SYSTEMD_UNIT_PATH="/etc/systemd/system/leikwan_tools-realm@.service"
 CONFIG_DIR="/etc/leikwan_tools"
 STATE_DIR="/var/lib/leikwan_tools"
@@ -95,6 +96,7 @@ find "${INSTALL_LIB_DIR}/leikwan_tools" -type d -name "__pycache__" -exec rm -rf
 install -m 0755 "${SCRIPT_DIR}/bin/realm-exec.sh" "${INSTALL_LIB_DIR}/realm-exec.sh"
 install -m 0755 "${SCRIPT_DIR}/bin/realm-preflight.sh" "${INSTALL_LIB_DIR}/realm-preflight.sh"
 install -m 0755 "${SCRIPT_DIR}/bin/leikwan_tools" "${BIN_PATH}"
+install -m 0755 "${SCRIPT_DIR}/bin/leikwan_tools" "${SHORTCUT_PATH}"
 
 echo "[2/5] 安装 systemd 模板单元 ${SYSTEMD_UNIT_PATH}..."
 install -m 0644 "${SCRIPT_DIR}/systemd/leikwan_tools-realm@.service" "${SYSTEMD_UNIT_PATH}"
@@ -287,6 +289,7 @@ PY
 echo "[5/5] 安装完成验证..."
 "${BIN_PATH}" --version
 echo "安装完成："
+echo "  - 输入 lqtool 打开交互菜单。"
 echo "  - 已写入资源归属清单: ${INSTALL_LIB_DIR}/install-manifest.json"
 echo "  - 未启用任何示例规则；未修改 Toolkit / LeiKwanManager / v6-mng.sh / 现有 Realm / 路由 / 防火墙。"
 echo "  - 下一步请先核对 ${CONFIG_DIR}/config.toml，再执行: leikwan_tools check-prereqs"

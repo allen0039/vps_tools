@@ -21,4 +21,6 @@ for root in CANDIDATE_ROOTS:
 from leikwan_tools.cli import main  # noqa: E402
 
 if __name__ == "__main__":
+    if Path(sys.argv[0]).name == "lqtool" and len(sys.argv) == 1:
+        raise SystemExit(main(["menu"]))
     raise SystemExit(main())

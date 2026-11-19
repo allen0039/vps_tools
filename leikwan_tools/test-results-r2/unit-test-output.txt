@@ -3,6 +3,8 @@ test_independent_ports_and_validation_errors (test_unit.TestConfigValidation) ..
 test_dns_wire_query_and_compressed_response (test_unit.TestIngressDnsAndProbing) ... ok
 test_fixed_ip_staleness_warning (test_unit.TestIngressDnsAndProbing) ... ok
 test_probe_three_tier_classification (test_unit.TestIngressDnsAndProbing) ... ok
+test_menu_requires_confirmation_and_returns_after_command (test_unit.TestInteractiveShortcut) ... ok
+test_shortcut_opens_menu_and_accepts_cli_arguments (test_unit.TestInteractiveShortcut) ... ok
 test_realm_toml_binds_through_and_interface (test_unit.TestR2ConfigAndRoutePinning) ... ok
 test_reject_foreign_systemd_template (test_unit.TestR2ConfigAndRoutePinning) ... ok
 test_route_get_rejects_oif_mismatch (test_unit.TestR2ConfigAndRoutePinning) ... ok
@@ -11,6 +13,7 @@ test_install_realm_refuses_foreign_binary_overwrite (test_unit.TestR2OwnershipAn
 test_legacy_template_upgrade_fingerprint_rejects_foreign_unit (test_unit.TestR2OwnershipAndRollback) ... ok
 test_safe_subpath_rejects_symlink_and_traversal (test_unit.TestR2OwnershipAndRollback) ... ok
 test_shared_dir_uninstall_preserves_unrelated_sentinel (test_unit.TestR2OwnershipAndRollback) ... ok
+test_shortcut_ownership_rejects_foreign_file_and_symlink (test_unit.TestR2OwnershipAndRollback) ... ok
 test_staged_rollback_unit_fault_injections (test_unit.TestR2OwnershipAndRollback) ... ok
 test_systemd_is_active_distinguishes_inactive_from_unknown (test_unit.TestR2OwnershipAndRollback) ... ok
 test_fixed_ip_policy_unified_rules (test_unit.TestR2TlsAndFixedIpPolicy) ... ok
@@ -25,6 +28,6 @@ test_fallback_rejects_duplicate_keys (test_unit.TestTomlCompat) ... ok
 test_roundtrip_both_parsers (test_unit.TestTomlCompat) ... ok
 
 ----------------------------------------------------------------------
-Ran 25 tests in 0.769s
+Ran 28 tests in 0.923s
 
 OK

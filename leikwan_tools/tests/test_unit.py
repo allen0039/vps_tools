@@ -6,6 +6,8 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import os
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -18,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from leikwan_tools import MANAGED_MARKER, REALM_RELEASES  # noqa: E402
+from leikwan_tools.cli import main  # noqa: E402
 from leikwan_tools.config import (  # noqa: E402
     ConfigError,
     LineConfig,
@@ -45,6 +48,7 @@ from leikwan_tools.ownership import (  # noqa: E402
     ensure_safe_subpath,
     uninstall_tool,
     validate_rule_name,
+    verify_launcher_owned,
     verify_legacy_template_owned,
     write_install_artifacts,
 )
@@ -66,6 +70,48 @@ from leikwan_tools.system import (  # noqa: E402
     verify_egress_route,
 )
 from leikwan_tools.toml_compat import TomlParseError, _fallback_loads, loads_toml  # noqa: E402
+
+
+class TestInteractiveShortcut(unittest.TestCase):
+    def test_shortcut_opens_menu_and_accepts_cli_arguments(self) -> None:
+        launcher = REPO_ROOT / "bin" / "leikwan_tools"
+        with tempfile.TemporaryDirectory() as td:
+            shortcut = Path(td) / "lqtool"
+            shortcut.write_bytes(launcher.read_bytes())
+            env = dict(os.environ, PYTHONPATH=str(REPO_ROOT))
+            menu = subprocess.run(
+                [sys.executable, str(shortcut)],
+                input="invalid\n0\n",
+                capture_output=True,
+                text=True,
+                env=env,
+                check=True,
+            )
+            self.assertIn("leikwan_tools 管理菜单", menu.stdout)
+            self.assertIn("无效选项", menu.stdout)
+            version = subprocess.run(
+                [sys.executable, str(shortcut), "--version"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=True,
+            )
+            self.assertTrue(version.stdout.startswith("leikwan_tools "))
+
+    def test_menu_requires_confirmation_and_returns_after_command(self) -> None:
+        with patch("builtins.input", side_effect=["6", "rule-one", "", "6", "rule-two", "y", "0"]), patch(
+            "leikwan_tools.cli.load_global_config"
+        ), patch(
+            "leikwan_tools.cli.delete_rule", side_effect=ApplyError("test failure")
+        ) as delete, patch(
+            "sys.stdout", new_callable=io.StringIO
+        ), patch(
+            "sys.stderr", new_callable=io.StringIO
+        ) as stderr:
+            self.assertEqual(main(["--config", "/tmp/test-leikwan.toml", "menu"]), 0)
+        self.assertEqual(delete.call_count, 1)
+        self.assertEqual(delete.call_args.args[1], "rule-two")
+        self.assertIn("test failure", stderr.getvalue())
 
 
 class TestTomlCompat(unittest.TestCase):
@@ -534,6 +580,8 @@ class TestR2OwnershipAndRollback(unittest.TestCase):
             cfg_file.write_text("# dummy", encoding="utf-8")
             ex_file = cfg_dir / "examples" / "config.example.toml"
             ex_file.write_text("# ex", encoding="utf-8")
+            shortcut = base / "lqtool"
+            shortcut.write_text(f"#!/usr/bin/env python3\n{MANAGED_MARKER}\n", encoding="utf-8")
 
             manifest = write_install_artifacts(
                 install_lib_dir=str(lib_dir),
@@ -550,6 +598,8 @@ class TestR2OwnershipAndRollback(unittest.TestCase):
 
             with patch("leikwan_tools.ownership.TEMPLATE_UNIT_PATH", str(base / "missing.service")), patch(
                 "leikwan_tools.ownership.BIN_LAUNCHER_PATH", str(base / "missing-bin")
+            ), patch(
+                "leikwan_tools.ownership.SHORTCUT_PATH", str(shortcut)
             ), patch("leikwan_tools.ownership.systemd_daemon_reload"):
                 res = uninstall_tool(
                     purge=True,
@@ -563,7 +613,19 @@ class TestR2OwnershipAndRollback(unittest.TestCase):
             self.assertTrue(sentinel_cfg.is_file())
             self.assertEqual(sentinel_cfg.read_text(encoding="utf-8"), "keep-cfg-sentinel\n")
             self.assertFalse(cfg_file.exists())
+            self.assertFalse(shortcut.exists())
+            self.assertIn(str(shortcut), res["removed_files"])
             self.assertIn("保留复用的外部 Realm 二进制", "\n".join(res["skipped_items"]))
+
+    def test_shortcut_ownership_rejects_foreign_file_and_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            shortcut = Path(td) / "lqtool"
+            with patch("leikwan_tools.ownership.SHORTCUT_PATH", str(shortcut)):
+                shortcut.write_text("import leikwan_tools.cli\n", encoding="utf-8")
+                self.assertFalse(verify_launcher_owned(str(shortcut))[0])
+                shortcut.unlink()
+                shortcut.symlink_to(REPO_ROOT / "bin" / "leikwan_tools")
+                self.assertFalse(verify_launcher_owned(str(shortcut))[0])
 
     def test_conservative_legacy_proof_requires_all_markers(self) -> None:
         with tempfile.TemporaryDirectory() as td:

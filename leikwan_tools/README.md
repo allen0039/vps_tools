@@ -123,6 +123,8 @@ ip -4 route get 192.0.2.10 from 10.8.0.146 oif eth1
 
 ## 六、从安装到应用的完整可复制命令
 
+安装后输入 `lqtool` 打开交互菜单，按提示检查前置条件、预览和管理规则，或查询公网入口。应用、停用、删除规则需以 root 运行，例如 `sudo lqtool`。`lqtool --config /path/to/config.toml menu` 可为菜单指定主配置，`lqtool status` 等带子命令的调用与原有 CLI 相同。
+
 ```bash
 # 1. 安装（安装工具与启用转发分开，默认不启用任何示例规则）
 cd "/path/to/leikwan_tools"
