@@ -1,0 +1,13 @@
+[Unit]
+Description=Mock Leikwan Source Policy Routing Precondition
+DefaultDependencies=no
+Before=network-online.target legacy-realm.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/setup_vps_pbr.sh
+
+[Install]
+WantedBy=multi-user.target

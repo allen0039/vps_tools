@@ -1,0 +1,390 @@
+=== [Setup] Building isolated images (liqun-lab-vps:e2e-1795065398-69119-ba36, liqun-lab-netnode:e2e-1795065398-69119-ba36) ===
+#0 building with "orbstack" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.vps
+#1 transferring dockerfile: 2.90kB 0.0s done
+#1 DONE 0.1s
+
+#2 [internal] load metadata for docker.io/library/debian:12-slim
+#2 ...
+
+#3 [auth] library/debian:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:12-slim
+#2 DONE 2.2s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [ 1/11] FROM docker.io/library/debian:12-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 3.98kB done
+#6 DONE 0.0s
+
+#7 [ 4/11] RUN python3 -c 'import io, tarfile; tf = tarfile.open("/opt/cache/bad-realm.tar.gz", "w:gz"); info = tarfile.TarInfo("realm"); data = b"tampered"; info.size = len(data); tf.addfile(info, io.BytesIO(data)); tf.close()'
+#7 CACHED
+
+#8 [ 2/11] RUN apt-get update     && apt-get install -y --no-install-recommends         systemd         systemd-sysv         dbus         iproute2         iptables         procps         python3         ca-certificates         curl         tar         gzip     && rm -rf /var/lib/apt/lists/*     && find /etc/systemd/system /lib/systemd/system -name '*udev*' -o -name '*getty*' | xargs rm -f || true
+#8 CACHED
+
+#9 [ 9/11] COPY legacy-realm.toml /etc/legacy-realm.toml
+#9 CACHED
+
+#10 [ 7/11] COPY run_legacy_realm.sh /usr/local/sbin/run_legacy_realm.sh
+#10 CACHED
+
+#11 [10/11] COPY legacy-realm.service /etc/systemd/system/legacy-realm.service
+#11 CACHED
+
+#12 [ 6/11] COPY setup_vps_pbr.sh /usr/local/sbin/setup_vps_pbr.sh
+#12 CACHED
+
+#13 [ 8/11] COPY mock-leikwan-pbr.service /etc/systemd/system/mock-leikwan-pbr.service
+#13 CACHED
+
+#14 [ 3/11] RUN set -eu;     ARCH="$(uname -m)";     case "${ARCH}" in         x86_64)             ASSET="realm-x86_64-unknown-linux-musl.tar.gz";             EXPECTED_SHA="b1cc335547bea8bb2a88178bef12ec7f2363e36200e7ea1d4e1e67627929bf65";             ;;         aarch64|arm64)             ASSET="realm-aarch64-unknown-linux-musl.tar.gz";             EXPECTED_SHA="f4c0318dd86854da483dcb7645b4f39cae2cc3f91c688fef969d53220b949488";             ;;         *) echo "Unsupported arch: ${ARCH}" >&2; exit 1 ;;     esac;     mkdir -p /opt/cache;     curl -fsSL "https://github.com/zhboner/realm/releases/download/v2.9.6/${ASSET}" -o /opt/cache/realm-v2.9.6.tar.gz;     echo "${EXPECTED_SHA}  /opt/cache/realm-v2.9.6.tar.gz" | sha256sum -c -;     tar -xzf /opt/cache/realm-v2.9.6.tar.gz -C /usr/local/bin realm;     chmod 0755 /usr/local/bin/realm;     /usr/local/bin/realm --version
+#14 CACHED
+
+#15 [ 5/11] RUN printf '#!/bin/sh\necho "original Toolkit v1"\n' > /usr/local/bin/Toolkit     && printf '#!/bin/sh\necho "original LeiKwanManager v1"\n' > /usr/local/bin/LeiKwanManager     && printf '#!/bin/sh\necho "original v6-mng.sh v1"\n' > /root/v6-mng.sh     && chmod +x /usr/local/bin/Toolkit /usr/local/bin/LeiKwanManager /root/v6-mng.sh
+#15 CACHED
+
+#16 [11/11] RUN chmod 0755 /usr/local/sbin/setup_vps_pbr.sh /usr/local/sbin/run_legacy_realm.sh     && chmod 0644 /etc/systemd/system/mock-leikwan-pbr.service /etc/systemd/system/legacy-realm.service /etc/legacy-realm.toml     && systemctl enable mock-leikwan-pbr.service legacy-realm.service
+#16 CACHED
+
+#17 exporting to image
+#17 exporting layers done
+#17 writing image sha256:895f13ca1774069ee1bf6eee36b1abcf3ba0611e434497d58cca5529ea3b3e00 done
+#17 naming to docker.io/library/liqun-lab-vps:e2e-1795065398-69119-ba36 done
+#17 DONE 0.0s
+#0 building with "orbstack" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.netnode
+#1 transferring dockerfile: 629B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:12-slim
+#2 DONE 0.4s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/7] FROM docker.io/library/debian:12-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 8.57kB done
+#5 DONE 0.0s
+
+#6 [6/7] COPY setup_router.sh /opt/lab/setup_router.sh
+#6 CACHED
+
+#7 [3/7] COPY mock_landing.py /opt/lab/mock_landing.py
+#7 CACHED
+
+#8 [4/7] COPY mock_tls_landing.py /opt/lab/mock_tls_landing.py
+#8 CACHED
+
+#9 [5/7] COPY mock_dns.py /opt/lab/mock_dns.py
+#9 CACHED
+
+#10 [2/7] RUN apt-get update     && apt-get install -y --no-install-recommends         iproute2         iptables         python3         ca-certificates         openssl         procps     && rm -rf /var/lib/apt/lists/*
+#10 CACHED
+
+#11 [7/7] RUN chmod 0755 /opt/lab/mock_landing.py /opt/lab/mock_tls_landing.py /opt/lab/mock_dns.py /opt/lab/setup_router.sh
+#11 CACHED
+
+#12 exporting to image
+#12 exporting layers done
+#12 writing image sha256:bb8326e7fe88200094f4d7cdf6b163e575a3147eb70d37ae81a932634dbffa1d done
+#12 naming to docker.io/library/liqun-lab-netnode:e2e-1795065398-69119-ba36 done
+#12 DONE 0.0s
+=== [Setup] Allocated subnets (classic): 9929=10.7.0.0/24, cn2=10.8.0.0/24, pub=203.0.113.0/24, jp=192.0.2.0/24, hk=198.51.100.0/24 ===
+=== [Setup] Starting isolated lab containers (RUN_ID=e2e-1795065398-69119-ba36) ===
+=== [Setup] Waiting for Debian 12 systemd & router readiness ===
+=== [T1] Checking Debian 12 systemd baseline ===
+systemd state: running
+Baseline sentinels:
+6967d956a262eb287db56c41188d9828a386f90dd7bfae85f708d25657d638a3  /usr/local/bin/Toolkit
+bcbcfd0cb767bbf9675209be14c7cc3d1f446ba0e6d84b59a65bca112ac083ee  /usr/local/bin/LeiKwanManager
+76551b761b4c3d968627d88459bf09f54dc834af9ca9bc12d3001f001d7147bb  /root/v6-mng.sh
+386f1f3845d3ccf07541b00fcf7e9ba51209666134265ef49cf63dc1896e7326  /usr/local/bin/realm
+c622c6ee2d98e8eebe8df25c597b9968e957b680afa3370f3cb26cee4bdf5fe4  /etc/legacy-realm.toml
+=== [Setup] Copying local 利群助手 source into VPS and client (no internet access needed) ===
+=== [T2] Realm SHA-256 verification, reuse mode, tarball install, zero default rules ===
+Tampered tarball output: Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/opt/src/liqun-helper/liqun_helper/realm.py", line 268, in install_realm_binary
+    raise RealmError(
+liqun_helper.realm.RealmError: Realm 安装包 SHA-256 校验失败! 预期=f4c0318dd86854da483dcb7645b4f39cae2cc3f91c688fef969d53220b949488, 实际=41dfc8af72a909fd14daefb85cd51c5ff89ec6842133b4e32afe1f66a92bf571 (文件: /opt/cache/bad-realm.tar.gz)
+[1/5] 安装 liqun_helper 程序文件到 /usr/local/lib/liqun-helper...
+[2/5] 安装 systemd 模板单元 /etc/systemd/system/liqun-helper-realm@.service...
+[3/5] 初始化配置目录 /etc/liqun-helper 与状态目录 /var/lib/liqun-helper（不启用任何示例规则）...
+  已生成初始主配置: /etc/liqun-helper/config.toml（请按本机参数核对后使用）
+[4/5] 检查并准备兼容的 Realm 二进制（保留系统已有二进制，不覆盖）...
+  发现并复用已有兼容 Realm: /usr/local/bin/realm (v2.9.6, origin=reused, sha256=386f1f3845d3...)
+[5/5] 安装完成验证...
+liqun-helper 1.0.0
+安装完成：
+  - 已写入资源归属清单: /usr/local/lib/liqun-helper/install-manifest.json
+  - 未启用任何示例规则；未修改 Toolkit / LeiKwanManager / v6-mng.sh / 现有 Realm / 路由 / 防火墙。
+  - 下一步请先核对 /etc/liqun-helper/config.toml，再执行: liqun-helper check-prereqs
+卸载模式: manifest
+保留/跳过: 保留复用的外部 Realm 二进制: /usr/local/bin/realm
+卸载完成：仅清理了 liqun-helper 自身拥有并验证归属的资源。
+[1/5] 安装 liqun_helper 程序文件到 /usr/local/lib/liqun-helper...
+[2/5] 安装 systemd 模板单元 /etc/systemd/system/liqun-helper-realm@.service...
+[3/5] 初始化配置目录 /etc/liqun-helper 与状态目录 /var/lib/liqun-helper（不启用任何示例规则）...
+  已生成初始主配置: /etc/liqun-helper/config.toml（请按本机参数核对后使用）
+[4/5] 检查并准备兼容的 Realm 二进制（保留系统已有二进制，不覆盖）...
+[Realm 已安装] 版本=2.9.6 路径=/usr/local/lib/liqun-helper/bin/realm SHA256=386f1f3845d3ccf07541b00fcf7e9ba51209666134265ef49cf63dc1896e7326
+[5/5] 安装完成验证...
+liqun-helper 1.0.0
+安装完成：
+  - 已写入资源归属清单: /usr/local/lib/liqun-helper/install-manifest.json
+  - 未启用任何示例规则；未修改 Toolkit / LeiKwanManager / v6-mng.sh / 现有 Realm / 路由 / 防火墙。
+  - 下一步请先核对 /etc/liqun-helper/config.toml，再执行: liqun-helper check-prereqs
+{
+  "mode": "installed-tarball",
+  "upstream_repo": "https://github.com/zhboner/realm",
+  "version": "2.9.6",
+  "arch": "aarch64",
+  "asset": "realm-aarch64-unknown-linux-musl.tar.gz",
+  "upstream_url": "https://github.com/zhboner/realm/releases/download/v2.9.6/realm-aarch64-unknown-linux-musl.tar.gz",
+  "archive_sha256": "f4c0318dd86854da483dcb7645b4f39cae2cc3f91c688fef969d53220b949488",
+  "binary_path": "/usr/local/lib/liqun-helper/bin/realm",
+  "binary_sha256": "386f1f3845d3ccf07541b00fcf7e9ba51209666134265ef49cf63dc1896e7326",
+  "verified_at_utc": "2026-11-19T05:16:48.455108+00:00"
+}
+Initial status: 当前没有已部署的托管规则（安装默认不启用任何示例规则）。
+Realm 检查: 通过 -> {'path': '/usr/local/lib/liqun-helper/bin/realm', 'version': '2.9.6', 'origin': 'managed', 'sha256': '386f1f3845d3ccf07541b00fcf7e9ba51209666134265ef49cf63dc1896e7326'}
+线路 9929 [通过]: eth0 (10.7.0.146 -> gw 10.7.0.1, table 101) | 192.0.2.10 from 10.7.0.146 via 10.7.0.1 dev eth0 table 101 uid 0
+线路 cn2 [通过]: eth1 (10.8.0.146 -> gw 10.8.0.1, table 102) | 192.0.2.10 from 10.8.0.146 via 10.8.0.1 dev eth1 table 102 uid 0
+=== [T3] Same inbound mapping (10.7.0.146:10001) routed via 9929 then switched to CN2 ===
+=== 预览结果 [CREATE] 规则: zouter-jp ===
+出口线路   : 9929 (网卡=eth0, 源IP=10.7.0.146, 网关=10.7.0.1, 表=101)
+客户端入口 : paid-v4.bgp1.leikwanhost.com:54141 -> 本机监听 10.7.0.146:10001 -> 落地 192.0.2.10:54141
+systemd单元: liqun-helper-realm@zouter-jp.service
+Realm 版本 : 2.9.6 (managed) @ /usr/local/lib/liqun-helper/bin/realm
+路由校验   : ip -4 route get 192.0.2.10 from 10.7.0.146
+             192.0.2.10 from 10.7.0.146 via 10.7.0.1 dev eth0 table 101 uid 0
+将写入文件 :
+  - stored_rule: /etc/liqun-helper/rules.d/zouter-jp.toml
+  - realm_toml: /var/lib/liqun-helper/realm/zouter-jp.toml
+  - realm_env: /var/lib/liqun-helper/realm/zouter-jp.env
+  - state_json: /var/lib/liqun-helper/state/zouter-jp.json
+
+--- 生成的 Realm 配置预览 ---
+# Generated by liqun-helper for rule: zouter-jp
+# Managed file - do not edit manually
+
+[log]
+level = "warn"
+output = "stdout"
+
+[dns]
+mode = "ipv4_only"
+
+[network]
+no_tcp = false
+use_udp = false
+tcp_timeout = 5
+tcp_keepalive = 15
+tcp_keepalive_probe = 3
+
+[[endpoints]]
+listen = "10.7.0.146:10001"
+remote = "192.0.2.10:54141"
+through = "10.7.0.146"
+interface = "eth0"
+[已创建并启用] 规则=zouter-jp 单元=liqun-helper-realm@zouter-jp.service PID=426
+转发链路 : 客户端(paid-v4.bgp1.leikwanhost.com:54141) -> 本机(10.7.0.146:10001) -> 经(10.7.0.146@eth0) -> 落地(192.0.2.10:54141)
+出口线路 : 9929 | Realm 2.9.6 (/usr/local/lib/liqun-helper/bin/realm)
+路由实测 : 192.0.2.10 from 10.7.0.146 via 10.7.0.1 dev eth0 table 101 uid 0
+Client probe (9929): LANDING=zouter-jp-mock SRC=10.7.0.146 SPORT=44777 ECHO=TEST_9929 | mangle 9929: 0->1, cn2: 0->0
+[已更新并重启] 规则=zouter-jp 单元=liqun-helper-realm@zouter-jp.service PID=495
+转发链路 : 客户端(paid-v4.bgp1.leikwanhost.com:54141) -> 本机(10.7.0.146:10001) -> 经(10.8.0.146@eth1) -> 落地(192.0.2.10:54141)
+出口线路 : cn2 | Realm 2.9.6 (/usr/local/lib/liqun-helper/bin/realm)
+路由实测 : 192.0.2.10 from 10.8.0.146 via 10.8.0.1 dev eth1 table 102 uid 0
+Client probe (CN2): LANDING=zouter-jp-mock SRC=10.8.0.146 SPORT=35237 ECHO=TEST_CN2 | mangle 9929: 1->1, cn2: 0->1
+=== [T4] Multi-rule coexistence, distinct 3 ports, & isolated update ===
+[已创建并启用] 规则=rfc-hk 单元=liqun-helper-realm@rfc-hk.service PID=562
+转发链路 : 客户端(paid-v4.bgp1.leikwanhost.com:54848) -> 本机(10.7.0.146:10003) -> 经(10.7.0.146@eth0) -> 落地(198.51.100.10:54848)
+出口线路 : 9929 | Realm 2.9.6 (/usr/local/lib/liqun-helper/bin/realm)
+路由实测 : 198.51.100.10 from 10.7.0.146 via 10.7.0.1 dev eth0 table 101 uid 0
+HK probe before updating JP: LANDING=rfc-hk-mock SRC=10.7.0.146 SPORT=45313 ECHO=HK_BEFORE (MainPID=562)
+[已更新并重启] 规则=zouter-jp 单元=liqun-helper-realm@zouter-jp.service PID=636
+转发链路 : 客户端(paid-v4.bgp1.leikwanhost.com:54141) -> 本机(10.7.0.146:10001) -> 经(10.8.0.146@eth1) -> 落地(192.0.2.10:54141)
+出口线路 : cn2 | Realm 2.9.6 (/usr/local/lib/liqun-helper/bin/realm)
+路由实测 : 192.0.2.10 from 10.8.0.146 via 10.8.0.1 dev eth1 table 102 uid 0
+[已创建并启用] 规则=three-ports 单元=liqun-helper-realm@three-ports.service PID=708
+转发链路 : 客户端(paid-v4.bgp1.leikwanhost.com:54999) -> 本机(10.7.0.146:10009) -> 经(10.8.0.146@eth1) -> 落地(198.51.100.10:54848)
+出口线路 : cn2 | Realm 2.9.6 (/usr/local/lib/liqun-helper/bin/realm)
+路由实测 : 198.51.100.10 from 10.8.0.146 via 10.8.0.1 dev eth1 table 102 uid 0
+3-distinct-ports probe (54999->10009->54848 via CN2): LANDING=rfc-hk-mock SRC=10.8.0.146 SPORT=46081 ECHO=THREE_PORTS
+[已删除] 规则=three-ports 单元=liqun-helper-realm@three-ports.service
+  已移除: /etc/liqun-helper/rules.d/three-ports.toml
+  已移除: /var/lib/liqun-helper/realm/three-ports.toml
+  已移除: /var/lib/liqun-helper/realm/three-ports.env
+  已移除: /var/lib/liqun-helper/state/three-ports.json
+Bidirectional multi-turn probe: LANDING=zouter-jp-mock SRC=10.8.0.146 SPORT=42483 ECHO=BIDIR_MSG_1 | LANDING=zouter-jp-mock SRC=10.8.0.146 SPORT=42483 ECHO=BIDIR_MSG_2
+=== [T5] Idempotent re-apply & concurrent lock contention ===
+[幂等跳过（配置与运行状态一致）] 规则=zouter-jp 单元=liqun-helper-realm@zouter-jp.service PID=636
+转发链路 : 客户端(paid-v4.bgp1.leikwanhost.com:54141) -> 本机(10.7.0.146:10001) -> 经(10.8.0.146@eth1) -> 落地(192.0.2.10:54141)
+出口线路 : cn2 | Realm 2.9.6 (/usr/local/lib/liqun-helper/bin/realm)
+rc= 1
+错误: 获取并发写锁超时 (0.3s): /run/liqun-helper.lock，可能有其他 liqun-helper 写操作正在执行
+=== [T6] Exact and wildcard port conflicts (without killing occupying processes) ===
+Pre-existing listeners:
+LISTEN 0      5      10.7.0.146:10006 0.0.0.0:* users:(("python3",pid=792,fd=3))
+LISTEN 0      5         0.0.0.0:10005 0.0.0.0:* users:(("python3",pid=787,fd=3))
+Wildcard conflict: 错误: 监听端口 10.7.0.146:10005 已被占用，已停止应用（不会终止现有占用进程）:
+  - [通配端口冲突] 0.0.0.0:10005 -> python3(pid=787)
+Exact conflict: 错误: 监听端口 10.7.0.146:10006 已被占用，已停止应用（不会终止现有占用进程）:
+  - [精确地址冲突] 10.7.0.146:10006 -> python3(pid=792)
+=== [T7] Route mismatch / missing policy rule must fail loudly without silent line switch ===
+错误: 出口线路 'cn2' 路由核对失败（严禁静默切到其他线路）:
+  命令: ip -4 route get 192.0.2.10 from 10.8.0.146
+  输出: 192.0.2.10 from 10.8.0.146 via 10.7.0.1 dev eth0 uid 0
+  差异: 实际出口网卡 dev=eth0，预期=eth1；实际下一跳网关 via=10.7.0.1，预期=10.8.0.1；实际命中路由表 table=main(默认主表)，预期=102（禁止退回主路由表或静默切线）；`ip -4 rule show` 中未找到 from 10.8.0.146 lookup 102 的源策略路由；指定网卡 oif=eth1 路由结果不符: dev=eth1, via=
+=== [T8] Failure rollback (first create cleanup + existing active rule restore + disabled rule restore) ===
+8a rollback output:
+错误: 应用规则 'fail-new' 失败: systemd 单元启动失败: ActiveState=activating, SubState=start-pre, NRestarts=1 (baseline=0)
+--- journalctl ---
+2026-11-19T05:16:58+0000 1a74f234d158 systemd[1]: Starting liqun-helper-realm@fail-new.service - Liqun Helper Realm IPv4 TCP Relay (fail-new)...
+2026-11-19T05:16:58+0000 1a74f234d158 realm-preflight.sh[953]: [启动前校验通过] 规则=fail-new 线路=9929 (10.7.0.146@eth0 -> gw 10.7.0.1, table 101)
+2026-11-19T05:16:58+0000 1a74f234d158 systemd[1]: Started liqun-helper-realm@fail-new.service - Liqun Helper Realm IPv4 TCP Relay (fail-new).
+2026-11-19T05:16:58+0000 1a74f234d158 realm-exec.sh[960]: simulated realm crash on start
+2026-11-19T05:16:58+0000 1a74f234d158 systemd[1]: liqun-helper-realm@fail-new.service: Main process exited, code=exited, status=42/n/a
+2026-11-19T05:16:58+0000 1a74f234d158 systemd[1]: liqun-helper-realm@fail-new.service: Failed with result 'exit-code'.
+2026-11-19T05:17:01+0000 1a74f234d158 systemd[1]: liqun-helper-realm@fail-new.service: Scheduled restart job, restart counter is at 1.
+2026-11-19T05:17:01+0000 1a74f234d158 systemd[1]: Stopped liqun-helper-realm@fail-new.service - Liqun Helper Realm IPv4 TCP Relay (fail-new).
+2026-11-19T05:17:01+0000 1a74f234d158 systemd[1]: Starting liqun-helper-realm@fail-new.service - Liqun Helper Realm IPv4 TCP Relay (fail-new)...
+--- 回滚结果 ---
+首次创建失败，已停用单元并清理本次生成的规则与运行文件
+8b rollback output:
+错误: 应用规则 'zouter-jp' 失败: systemd 单元启动失败: ActiveState=activating, SubState=start-pre, NRestarts=1 (baseline=0)
+--- journalctl ---
+2026-11-19T05:16:53+0000 1a74f234d158 realm-exec.sh[636]: log: level=warn, output=stdout
+2026-11-19T05:16:53+0000 1a74f234d158 realm-exec.sh[636]: dns: mode=ipv4_only, protocol=tcp+udp, min-ttl=0, max-ttl=86400, cache-size=32, servers=system
+2026-11-19T05:16:53+0000 1a74f234d158 realm-exec.sh[636]: inited: 10.7.0.146:10001 -> [192.0.2.10:54141]; options: ipv6-only=false, accept-mptcp=false; send-iface=eth1, send-through=10.8.0.146:0, send-mptcp=false; send-proxy=false, send-proxy-version=2, accept-proxy=false, accept-proxy-timeout=5s; tcp-keepalive=15s[3] connect-timeout=6s, associate-timeout=30s; balance=off
+2026-11-19T05:17:01+0000 1a74f234d158 systemd[1]: Stopping liqun-helper-realm@zouter-jp.service - Liqun Helper Realm IPv4 TCP Relay (zouter-jp)...
+2026-11-19T05:17:01+0000 1a74f234d158 systemd[1]: liqun-helper-realm@zouter-jp.service: Deactivated successfully.
+2026-11-19T05:17:01+0000 1a74f234d158 systemd[1]: Stopped liqun-helper-realm@zouter-jp.service - Liqun Helper Realm IPv4 TCP Relay (zouter-jp).
+2026-11-19T05:17:01+0000 1a74f234d158 systemd[1]: Starting liqun-helper-realm@zouter-jp.service - Liqun Helper Realm IPv4 TCP Relay (zouter-jp)...
+2026-11-19T05:17:01+0000 1a74f234d158 realm-preflight.sh[1071]: [启动前校验通过] 规则=zouter-jp 线路=cn2 (10.8.0.146@eth1 -> gw 10.8.0.1, table 102)
+2026-11-19T05:17:01+0000 1a74f234d158 systemd[1]: Started liqun-helper-realm@zouter-jp.service - Liqun Helper Realm IPv4 TCP Relay (zouter-jp).
+2026-11-19T05:17:01+0000 1a74f234d158 realm-exec.sh[1078]: simulated realm crash on start
+2026-11-19T05:17:01+0000 1a74f234d158 systemd[1]: liqun-helper-realm@zouter-jp.service: Main process exited, code=exited, status=42/n/a
+2026-11-19T05:17:01+0000 1a74f234d158 systemd[1]: liqun-helper-realm@zouter-jp.service: Failed with result 'exit-code'.
+2026-11-19T05:17:05+0000 1a74f234d158 systemd[1]: liqun-helper-realm@zouter-jp.service: Scheduled restart job, restart counter is at 1.
+2026-11-19T05:17:05+0000 1a74f234d158 systemd[1]: Stopped liqun-helper-realm@zouter-jp.service - Liqun Helper Realm IPv4 TCP Relay (zouter-jp).
+2026-11-19T05:17:05+0000 1a74f234d158 systemd[1]: Starting liqun-helper-realm@zouter-jp.service - Liqun Helper Realm IPv4 TCP Relay (zouter-jp)...
+--- 回滚结果 ---
+已恢复文件: state_json(/var/lib/liqun-helper/state/zouter-jp.json), realm_env(/var/lib/liqun-helper/realm/zouter-jp.env), realm_toml(/var/lib/liqun-helper/realm/zouter-jp.toml), stored_rule(/etc/liqun-helper/rules.d/zouter-jp.toml), managed-rules.json; 已恢复原有规则配置、启用状态并重新拉起原运行实例
+[已创建并启用] 规则=stay-disabled 单元=liqun-helper-realm@stay-disabled.service PID=1209
+转发链路 : 客户端(paid-v4.bgp1.leikwanhost.com:54188) -> 本机(10.7.0.146:10088) -> 经(10.7.0.146@eth0) -> 落地(192.0.2.10:54141)
+出口线路 : 9929 | Realm 2.9.6 (/usr/local/lib/liqun-helper/bin/realm)
+路由实测 : 192.0.2.10 from 10.7.0.146 via 10.7.0.1 dev eth0 table 101 uid 0
+[已停用] 规则=stay-disabled 单元=liqun-helper-realm@stay-disabled.service active=inactive (已保留配置: /etc/liqun-helper/rules.d/stay-disabled.toml)
+=== [T9] Real container reboot recovery (docker restart liqun-lab-e2e-1795065398-69119-ba36-vps) ===
+Post-reboot probes: JP=[LANDING=zouter-jp-mock SRC=10.8.0.146 SPORT=37905 ECHO=REBOOT_JP] HK=[LANDING=rfc-hk-mock SRC=10.7.0.146 SPORT=37621 ECHO=REBOOT_HK]
+=== [T10] Public ingress query, 3-tier classification, selection, client verify, DNS disappearance ===
+查询域名   : paid-v4.bgp1.leikwanhost.com
+查询时间   : 2026-11-19 05:17:12 +0000 (2026-11-19 05:17:12 UTC)
+解析器     : udp://203.0.113.1:53 (/etc/resolv.conf)
+
+候选公网 IP 列表:
+  1. 203.0.113.10:54141  [TCP 端口可达]  (TTL=60s RTT=0.21ms) - TCP 端口可达，落地身份未确认
+  2. 203.0.113.11:54141  [TCP 端口可达]  (TTL=60s RTT=0.13ms) - TCP 端口可达，落地身份未确认
+  3. 203.0.113.12:54141  [TCP 端口可达]  (TTL=60s RTT=0.11ms) - TCP 端口可达，落地身份未确认
+  4. 203.0.113.13:54141  [DNS 候选]  (TTL=60s ) - TCP 端口不可达 ([Errno 111] Connection refused)
+
+客户端可用命令提示:
+  固定选择: liqun-helper ingress select --rule <规则名> --ip <候选IP>
+  客户端验证: liqun-helper ingress verify --host <候选IP> --port 54141 --send "PING\n" --expect "<你的落地标识>"
+查询域名   : paid-v4.bgp1.leikwanhost.com
+查询时间   : 2026-11-19 05:17:12 +0000 (2026-11-19 05:17:12 UTC)
+解析器     : udp://203.0.113.1:53 (/etc/resolv.conf)
+
+候选公网 IP 列表:
+  1. 203.0.113.10:54141  [已验证到达指定落地]  (TTL=60s RTT=0.29ms) - TCP 连通且应用响应匹配指定落地标识
+     回包预览: LANDING=zouter-jp-mock SRC=10.8.0.146 SPORT=44203 ECHO=PING
+  2. 203.0.113.11:54141  [已验证到达指定落地]  (TTL=60s RTT=0.07ms) - TCP 连通且应用响应匹配指定落地标识
+     回包预览: LANDING=zouter-jp-mock SRC=10.8.0.146 SPORT=41029 ECHO=PING
+  3. 203.0.113.12:54141  [TCP 端口可达]  (TTL=60s RTT=0.07ms) - 端口可达但落地身份未确认（响应未匹配预期落地标识）
+     回包预览: LANDING=wrong-decoy-node SRC=203.0.113.50 SPORT=52098 ECHO=PING
+  4. 203.0.113.13:54141  [DNS 候选]  (TTL=60s ) - TCP 端口不可达 ([Errno 111] Connection refused)
+
+客户端可用命令提示:
+  固定选择: liqun-helper ingress select --rule <规则名> --ip <候选IP>
+  客户端验证: liqun-helper ingress verify --host <候选IP> --port 54141 --send "PING\n" --expect "<你的落地标识>"
+[已固定入口 IP] 规则=zouter-jp | 域名=paid-v4.bgp1.leikwanhost.com
+查询时间   : 2026-11-19 05:17:16 +0000 (2026-11-19 05:17:16 UTC)
+当前 A 记录: 203.0.113.10, 203.0.113.11, 203.0.113.12, 203.0.113.13 (所选 IP 在 DNS 中: 是)
+Realm 监听 : 10.7.0.146:10001 (保持不变，未重启 Realm)
+客户端拨号地址/端口: 203.0.113.11:54141
+分开设置拨号 IP 与协议参数说明（禁止把 TLS SNI / Host 改成拨号 IP）:
+  - Clash / Mihomo: server 填固定公网 IP，port 填公网端口；servername / sni / ws-opts.headers.Host 保持原落地域名不变。
+  - sing-box: server 填固定公网 IP，server_port 填公网端口；tls.server_name (含 Reality server_name) 与 transport.headers.Host 保持原域名不变。
+  - Xray / v2ray: address 填固定公网 IP，port 填公网端口；streamSettings.tlsSettings.serverName (或 realitySettings.serverName) 与 ws/http/grpc host 保持原域名不变。
+  - 说明: 固定公网 IP 仅影响客户端拨号目标与连通性诊断，不改动 VPS 上 Realm 的监听配置（域名来源: paid-v4.bgp1.leikwanhost.com）。
+验证时间   : 2026-11-19 05:17:16 +0000 (2026-11-19 05:17:16 UTC)
+参考域名   : paid-v4.bgp1.leikwanhost.com (当前 DNS A 记录: 203.0.113.10, 203.0.113.11, 203.0.113.12, 203.0.113.13)
+  - 203.0.113.11:54141 => [已验证到达指定落地] RTT=0.45ms | TCP 连通且应用响应匹配指定落地标识
+    分层状态: TCP=连通 | TLS=未启用 | 证书(未启用)=未启用 | 应用=匹配预期落地
+    回包预览: LANDING=zouter-jp-mock SRC=10.8.0.146 SPORT=37269 ECHO=PING
+
+客户端拨号地址/端口: 203.0.113.11:54141
+分开设置拨号 IP 与协议参数说明（禁止把 TLS SNI / Host 改成拨号 IP）:
+  - Clash / Mihomo: server 填固定公网 IP，port 填公网端口；servername / sni / ws-opts.headers.Host 保持原落地域名不变。
+  - sing-box: server 填固定公网 IP，server_port 填公网端口；tls.server_name (含 Reality server_name) 与 transport.headers.Host 保持原域名不变。
+  - Xray / v2ray: address 填固定公网 IP，port 填公网端口；streamSettings.tlsSettings.serverName (或 realitySettings.serverName) 与 ws/http/grpc host 保持原域名不变。
+  - 说明: 固定公网 IP 仅影响客户端拨号目标与连通性诊断，不改动 VPS 上 Realm 的监听配置（域名来源: paid-v4.bgp1.leikwanhost.com）。
+查询域名   : paid-v4.bgp1.leikwanhost.com
+查询时间   : 2026-11-19 05:17:16 +0000 (2026-11-19 05:17:16 UTC)
+解析器     : udp://203.0.113.1:53
+当前固定IP : 203.0.113.11
+警告       : 固定公网 IP 203.0.113.11 已从 paid-v4.bgp1.leikwanhost.com 当前 DNS A 记录中消失（当前记录: 203.0.113.10, 203.0.113.12, 203.0.113.13），请人工确认是否切换；已保留现有固定 IP 设置，未自动改动。
+
+候选公网 IP 列表:
+  1. 203.0.113.10:54141  [DNS 候选]  (TTL=60s ) - TCP 端口不可达 ([Errno 111] Connection refused)
+  2. 203.0.113.12:54141  [TCP 端口可达]  (TTL=60s RTT=0.07ms) - TCP 端口可达，落地身份未确认
+  3. 203.0.113.13:54141  [DNS 候选]  (TTL=60s ) - TCP 端口不可达 ([Errno 111] Connection refused)
+
+客户端可用命令提示:
+  固定选择: liqun-helper ingress select --rule <规则名> --ip <候选IP>
+  客户端验证: liqun-helper ingress verify --host <候选IP> --port 54141 --send "PING\n" --expect "<你的落地标识>"
+规则名     : zouter-jp  (Zouter JP rule switched to CN2)
+运行状态   : enabled=True active=active(running) PID=100 restarts=0 listening_ok=True
+转发路径   : 拨号 203.0.113.11:54141 -> 监听 10.7.0.146:10001 -> 线路 cn2(10.8.0.146@eth1) -> 落地 192.0.2.10:54141
+固定公网IP : 203.0.113.11  [域名: paid-v4.bgp1.leikwanhost.com]
+路由状态   : 正常 | 192.0.2.10 from 10.8.0.146 via 10.8.0.1 dev eth1 table 102 uid 0
+Realm 实例 : 2.9.6 @ /usr/local/lib/liqun-helper/bin/realm | systemd=liqun-helper-realm@zouter-jp.service
+入口警告   : 固定公网 IP 203.0.113.11 已从 paid-v4.bgp1.leikwanhost.com 当前 DNS A 记录中消失（当前记录: 203.0.113.10, 203.0.113.12, 203.0.113.13），请人工确认是否切换；已保留现有固定 IP 设置，未自动改动。
+=== [T11] Disable, delete, uninstall & non-interference verification ===
+[已删除] 规则=stay-disabled 单元=liqun-helper-realm@stay-disabled.service
+  已移除: /etc/liqun-helper/rules.d/stay-disabled.toml
+  已移除: /var/lib/liqun-helper/realm/stay-disabled.toml
+  已移除: /var/lib/liqun-helper/realm/stay-disabled.env
+  已移除: /var/lib/liqun-helper/state/stay-disabled.json
+[已停用] 规则=rfc-hk 单元=liqun-helper-realm@rfc-hk.service active=inactive (已保留配置: /etc/liqun-helper/rules.d/rfc-hk.toml)
+[已删除] 规则=rfc-hk 单元=liqun-helper-realm@rfc-hk.service
+  已移除: /etc/liqun-helper/rules.d/rfc-hk.toml
+  已移除: /var/lib/liqun-helper/realm/rfc-hk.toml
+  已移除: /var/lib/liqun-helper/realm/rfc-hk.env
+  已移除: /var/lib/liqun-helper/state/rfc-hk.json
+卸载模式: manifest
+已清理规则: zouter-jp
+卸载完成：仅清理了 liqun-helper 自身拥有并验证归属的资源。
+Legacy Realm forwarding probe after uninstall: LANDING=rfc-hk-mock SRC=10.7.0.146 SPORT=38137 ECHO=LEGACY
+
+========================================================================
+ALL ISOLATED DEBIAN 12 + SYSTEMD E2E TESTS (T1 - T11) PASSED SUCCESSFULLY
+========================================================================
+
+=== [Cleanup] Removing ONLY resources created by RUN_ID=e2e-1795065398-69119-ba36 ===

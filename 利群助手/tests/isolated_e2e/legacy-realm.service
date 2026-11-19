@@ -1,0 +1,13 @@
+[Unit]
+Description=Pre-existing Legacy Realm Instance (must remain untouched)
+After=network-online.target mock-leikwan-pbr.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/run_legacy_realm.sh
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

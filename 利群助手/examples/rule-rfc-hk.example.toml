@@ -1,0 +1,25 @@
+# 示例规则 2：RFC HK 型转发（仅作示例，安装时不启用）
+# 链路示例：官方公网 54848 -> 10.7.0.146:10003 -> (cn2) -> 198.51.100.10:54848
+# 说明：198.51.100.10 为 RFC 5737 文档示例地址，支持从 9929 对应内网地址接入再经 CN2 出口连接落地。
+
+[rule]
+name = "rfc-hk"
+description = "RFC HK 示例规则（从 9929 内网入口接入，经 CN2 连接落地）"
+line = "cn2"
+
+[ingress]
+domain = "paid-v4.bgp1.leikwanhost.com"
+fixed_ip = ""
+public_port = 54848
+
+[forward]
+listen_ip = "10.7.0.146"
+listen_port = 10003
+remote_ip = "198.51.100.10"
+remote_port = 54848
+
+[realm]
+log_level = "warn"
+tcp_timeout = 5
+tcp_keepalive = 15
+tcp_keepalive_probe = 3

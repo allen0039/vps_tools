@@ -1,0 +1,12 @@
+[log]
+level = "warn"
+output = "stdout"
+
+[network]
+no_tcp = false
+use_udp = false
+
+[[endpoints]]
+listen = "10.7.0.146:19999"
+remote = "198.51.100.10:54848"
+through = "10.7.0.146"

@@ -1,0 +1,28 @@
+# 示例规则 1：Zouter JP 型转发（仅作示例，安装时不启用）
+# 链路示例：官方公网 54141 -> 10.7.0.146:10001 -> (9929 或 CN2) -> 192.0.2.10:54141
+# 说明：192.0.2.10 为 RFC 5737 文档示例地址，实际使用请替换为真实落地 IPv4。
+
+[rule]
+name = "zouter-jp"
+description = "Zouter JP 示例规则（9929 内网入口，出口可在 9929 / cn2 间独立选择）"
+line = "9929"
+
+[ingress]
+domain = "paid-v4.bgp1.leikwanhost.com"
+# 留空表示跟随域名解析；显式选择固定 IP 后可填入具体公网 IPv4（如 "203.0.113.10"）
+fixed_ip = ""
+public_port = 54141
+
+[forward]
+# Realm 始终监听利群官方端口映射对应的本机内网 IPv4:端口
+listen_ip = "10.7.0.146"
+listen_port = 10001
+# 落地服务器 IPv4 与端口（公网端口、内网端口、落地端口可各不相同）
+remote_ip = "192.0.2.10"
+remote_port = 54141
+
+[realm]
+log_level = "warn"
+tcp_timeout = 5
+tcp_keepalive = 15
+tcp_keepalive_probe = 3

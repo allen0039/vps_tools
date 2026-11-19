@@ -1,0 +1,33 @@
+# 独立「利群助手」主配置示例 (/etc/liqun-helper/config.toml)
+# 说明：以下地址、网卡、网关与路由表号仅作示例，实际部署时请核对本机 `ip addr` 与 `ip rule` 输出后修改。
+
+[tool]
+# 留空时自动优先发现已安装的兼容 Realm (>= 2.6.0, 主版本 2)；也可显式指定路径
+realm_bin = ""
+rules_dir = "/etc/liqun-helper/rules.d"
+state_dir = "/var/lib/liqun-helper"
+# 受管 systemd 模板单元名必须固定为 liqun-helper-realm@.service
+systemd_unit_template = "liqun-helper-realm@.service"
+lock_file = "/run/liqun-helper.lock"
+# 开机启动时 systemd ExecStartPre 等待源策略路由就绪的最大秒数
+startup_route_wait_seconds = 45
+
+[ingress]
+default_domain = "paid-v4.bgp1.leikwanhost.com"
+# 留空时使用 /etc/resolv.conf 与系统解析器；也可显式指定 DNS 服务器 IPv4
+dns_server = ""
+
+# 出口线路定义：网卡、源 IPv4、下一跳网关与源策略路由表号均可配置
+[lines.9929]
+interface = "eth0"
+source_ip = "10.7.0.146"
+gateway = "10.7.0.1"
+table = 101
+description = "CUII 9929 出口线路"
+
+[lines.cn2]
+interface = "eth1"
+source_ip = "10.8.0.146"
+gateway = "10.8.0.1"
+table = 102
+description = "CN2 GIA 出口线路"

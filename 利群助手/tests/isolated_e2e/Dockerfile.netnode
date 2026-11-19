@@ -1,0 +1,19 @@
+FROM debian:12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        iproute2 \
+        iptables \
+        python3 \
+        ca-certificates \
+        openssl \
+        procps \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY mock_landing.py /opt/lab/mock_landing.py
+COPY mock_tls_landing.py /opt/lab/mock_tls_landing.py
+COPY mock_dns.py /opt/lab/mock_dns.py
+COPY setup_router.sh /opt/lab/setup_router.sh
+RUN chmod 0755 /opt/lab/mock_landing.py /opt/lab/mock_tls_landing.py /opt/lab/mock_dns.py /opt/lab/setup_router.sh

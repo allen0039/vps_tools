@@ -1,0 +1,30 @@
+test_example_configs_validate_and_roundtrip (test_unit.TestConfigValidation) ... ok
+test_independent_ports_and_validation_errors (test_unit.TestConfigValidation) ... ok
+test_dns_wire_query_and_compressed_response (test_unit.TestIngressDnsAndProbing) ... ok
+test_fixed_ip_staleness_warning (test_unit.TestIngressDnsAndProbing) ... ok
+test_probe_three_tier_classification (test_unit.TestIngressDnsAndProbing) ... ok
+test_realm_toml_binds_through_and_interface (test_unit.TestR2ConfigAndRoutePinning) ... ok
+test_reject_foreign_systemd_template (test_unit.TestR2ConfigAndRoutePinning) ... ok
+test_route_get_rejects_oif_mismatch (test_unit.TestR2ConfigAndRoutePinning) ... ok
+test_conservative_legacy_proof_requires_all_markers (test_unit.TestR2OwnershipAndRollback) ... ok
+test_install_realm_refuses_foreign_binary_overwrite (test_unit.TestR2OwnershipAndRollback) ... ok
+test_legacy_template_upgrade_fingerprint_rejects_foreign_unit (test_unit.TestR2OwnershipAndRollback) ... ok
+test_safe_subpath_rejects_symlink_and_traversal (test_unit.TestR2OwnershipAndRollback) ... ok
+test_shared_dir_uninstall_preserves_unrelated_sentinel (test_unit.TestR2OwnershipAndRollback) ... ok
+test_staged_rollback_unit_fault_injections (test_unit.TestR2OwnershipAndRollback) ... ok
+test_systemd_is_active_distinguishes_inactive_from_unknown (test_unit.TestR2OwnershipAndRollback) ... ok
+test_fixed_ip_policy_unified_rules (test_unit.TestR2TlsAndFixedIpPolicy) ... ok
+test_tls_plain_tcp_fails_nonzero (test_unit.TestR2TlsAndFixedIpPolicy) ... ok
+test_file_lock_contention (test_unit.TestRealmAndLock) ... ok
+test_install_realm_rejects_bad_sha256 (test_unit.TestRealmAndLock) ... ok
+test_parse_realm_version (test_unit.TestRealmAndLock) ... ok
+test_link_and_addr_parsers (test_unit.TestRoutingAndPorts) ... ok
+test_route_get_and_policy_rule_verification (test_unit.TestRoutingAndPorts) ... ok
+test_ss_port_conflict_exact_and_wildcard (test_unit.TestRoutingAndPorts) ... ok
+test_fallback_rejects_duplicate_keys (test_unit.TestTomlCompat) ... ok
+test_roundtrip_both_parsers (test_unit.TestTomlCompat) ... ok
+
+----------------------------------------------------------------------
+Ran 25 tests in 0.769s
+
+OK

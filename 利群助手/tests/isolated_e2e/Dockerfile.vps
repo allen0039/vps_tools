@@ -1,0 +1,62 @@
+FROM debian:12-slim
+
+ENV container=docker DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        systemd \
+        systemd-sysv \
+        dbus \
+        iproute2 \
+        iptables \
+        procps \
+        python3 \
+        ca-certificates \
+        curl \
+        tar \
+        gzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && find /etc/systemd/system /lib/systemd/system -name '*udev*' -o -name '*getty*' | xargs rm -f || true
+
+# Download and SHA-256 verify official Realm v2.9.6 release for the container architecture at image build time.
+RUN set -eu; \
+    ARCH="$(uname -m)"; \
+    case "${ARCH}" in \
+        x86_64) \
+            ASSET="realm-x86_64-unknown-linux-musl.tar.gz"; \
+            EXPECTED_SHA="b1cc335547bea8bb2a88178bef12ec7f2363e36200e7ea1d4e1e67627929bf65"; \
+            ;; \
+        aarch64|arm64) \
+            ASSET="realm-aarch64-unknown-linux-musl.tar.gz"; \
+            EXPECTED_SHA="f4c0318dd86854da483dcb7645b4f39cae2cc3f91c688fef969d53220b949488"; \
+            ;; \
+        *) echo "Unsupported arch: ${ARCH}" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /opt/cache; \
+    curl -fsSL "https://github.com/zhboner/realm/releases/download/v2.9.6/${ASSET}" -o /opt/cache/realm-v2.9.6.tar.gz; \
+    echo "${EXPECTED_SHA}  /opt/cache/realm-v2.9.6.tar.gz" | sha256sum -c -; \
+    tar -xzf /opt/cache/realm-v2.9.6.tar.gz -C /usr/local/bin realm; \
+    chmod 0755 /usr/local/bin/realm; \
+    /usr/local/bin/realm --version
+
+# Create tampered archive in /opt/cache for testing SHA-256 rejection.
+RUN python3 -c 'import io, tarfile; tf = tarfile.open("/opt/cache/bad-realm.tar.gz", "w:gz"); info = tarfile.TarInfo("realm"); data = b"tampered"; info.size = len(data); tf.addfile(info, io.BytesIO(data)); tf.close()'
+
+# Pre-existing legacy files that liqun-helper must never modify or delete.
+RUN printf '#!/bin/sh\necho "original Toolkit v1"\n' > /usr/local/bin/Toolkit \
+    && printf '#!/bin/sh\necho "original LeiKwanManager v1"\n' > /usr/local/bin/LeiKwanManager \
+    && printf '#!/bin/sh\necho "original v6-mng.sh v1"\n' > /root/v6-mng.sh \
+    && chmod +x /usr/local/bin/Toolkit /usr/local/bin/LeiKwanManager /root/v6-mng.sh
+
+COPY setup_vps_pbr.sh /usr/local/sbin/setup_vps_pbr.sh
+COPY run_legacy_realm.sh /usr/local/sbin/run_legacy_realm.sh
+COPY mock-leikwan-pbr.service /etc/systemd/system/mock-leikwan-pbr.service
+COPY legacy-realm.toml /etc/legacy-realm.toml
+COPY legacy-realm.service /etc/systemd/system/legacy-realm.service
+
+RUN chmod 0755 /usr/local/sbin/setup_vps_pbr.sh /usr/local/sbin/run_legacy_realm.sh \
+    && chmod 0644 /etc/systemd/system/mock-leikwan-pbr.service /etc/systemd/system/legacy-realm.service /etc/legacy-realm.toml \
+    && systemctl enable mock-leikwan-pbr.service legacy-realm.service
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/lib/systemd/systemd"]
