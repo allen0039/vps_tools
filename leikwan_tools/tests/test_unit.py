@@ -42,6 +42,8 @@ from leikwan_tools.ddns import (  # noqa: E402
     DdnsError,
     DdnsProviderError,
     DnspodProvider,
+    ProfileInspectResult,
+    ProviderSyncResult,
     WebhookProvider,
     _alidns_percent_encode,
     _build_alidns_signed_url,
@@ -51,6 +53,7 @@ from leikwan_tools.ddns import (  # noqa: E402
     parse_ip6_addr_candidates,
     parse_ping_rtt_ms,
     redact_url,
+    save_ddns_config,
     status_ddns,
     test_ddns_profile,
     update_ddns,
@@ -150,7 +153,7 @@ class TestInteractiveShortcut(unittest.TestCase):
                 env=env,
                 check=True,
             )
-            self.assertIn("leikwan_tools 利群转发助手 v0.1.3", menu.stdout)
+            self.assertIn("leikwan_tools 利群转发助手 v0.1.4", menu.stdout)
             self.assertIn("转发规则管理", menu.stdout)
             self.assertNotIn("预览规则部署", menu.stdout)
             self.assertNotIn("应用规则文件", menu.stdout)
@@ -162,7 +165,7 @@ class TestInteractiveShortcut(unittest.TestCase):
                 env=env,
                 check=True,
             )
-            self.assertEqual(version.stdout.strip(), "leikwan_tools 0.1.3")
+            self.assertEqual(version.stdout.strip(), "leikwan_tools 0.1.4")
 
     def test_menu_delete_lists_rules_requires_confirmation_and_returns_after_error(self) -> None:
         cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))
@@ -1310,6 +1313,122 @@ class TestSelfUpdate(unittest.TestCase):
 class TestDdnsSubsystem(unittest.TestCase):
     def setUp(self) -> None:
         self.base_cfg_toml = (REPO_ROOT / "examples" / "config.example.toml").read_text(encoding="utf-8")
+
+    def test_ddns_menu_configures_and_manages_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            config = base / "config.toml"
+            credentials = base / "cloudflare.env"
+            credentials.write_text("CF_API_TOKEN=offline-test-token\n", encoding="utf-8")
+            credentials.chmod(0o600)
+            original = self.base_cfg_toml.replace("/run/leikwan_tools.lock", str(base / "tool.lock"))
+            config.write_text(original, encoding="utf-8")
+            config.chmod(0o640)
+            create = ["2", "ct.edge", "1", "ens3", "1", "example.net", "edge", str(credentials), ""]
+            edit = ["3", "ct.edge", "", "", "", "", "edge-new", "", ""]
+            answers = [
+                "7", "1", *create, "n", *create, "y", "1", "7", "ct.edge", "y", "8", "y",
+                *edit, "y", "4", "1", "5", "ct.edge", "6", "1", "n", "6", "1", "y", "0", "0",
+            ]
+            with (
+                patch("builtins.input", side_effect=answers),
+                patch("leikwan_tools.cli.inspect_ddns", return_value=[]) as inspect,
+                patch("leikwan_tools.cli.test_ddns_profile") as test,
+                patch("leikwan_tools.cli._print_ddns_test"),
+                patch("leikwan_tools.cli.update_ddns", return_value={"results": []}) as sync,
+                redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(main(["--config", str(config), "menu"]), 0)
+            saved = load_global_config(str(config))
+            self.assertTrue(saved.ddns.enabled)
+            profile = saved.ddns.profiles["ct.edge"]
+            self.assertTrue(profile.enabled)
+            self.assertEqual(profile.interface, "ens3")
+            self.assertEqual(profile.fqdn, "edge-new.example.net")
+            self.assertEqual(config.stat().st_mode & 0o777, 0o640)
+            self.assertTrue(config.read_text(encoding="utf-8").startswith(original))
+            self.assertIn("7. IPv6 DDNS 域名管理", output.getvalue())
+            self.assertIn("新建配置默认暂停", output.getvalue())
+            inspect.assert_called_once_with(saved, None)
+            test.assert_called_once_with(saved, "ct.edge")
+            sync.assert_called_once_with(saved, None, force=True)
+
+            with patch("builtins.input", side_effect=["7", "9", "ct.edge", "y", "0", "0"]), redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--config", str(config), "menu"]), 0)
+            remaining = load_global_config(str(config))
+            self.assertEqual(remaining.ddns.profiles, {})
+            self.assertEqual(update_ddns(remaining)["results"], [])
+            self.assertTrue(credentials.is_file())
+
+    def test_ddns_edit_preserves_other_toml_and_guarded_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            config = base / "config.toml"
+            prelude = 'ddns.interval_seconds = 180\n'
+            original = self.base_cfg_toml.replace("/run/leikwan_tools.lock", str(base / "tool.lock"))
+            profile = (
+                "[ddns.'ct.edge']\n"
+                'interface = "ens3"\nprovider = "cloudflare"\nisp = "ct"\n'
+                'domain = "example.net"\nhost = "old"\nenabled = false\n'
+                "verify_interval_seconds = 41\n"
+            )
+            unrelated_root = ""
+            if sys.version_info >= (3, 11):
+                fields = ", ".join(profile.splitlines()[1:])
+                prelude = f"ddns = {{ interval_seconds = 180, 'ct.edge' = {{ {fields} }} }}\n"
+                unrelated_root = 'user_note = """Original\n[ddns]\n# literal text\n"""\n'
+                unrelated_root += 'user_list = [\n  "[ddns]",\n]\n'
+                profile = ""
+            extra = "\n[unrelated]\n# keep this comment\nvalue = 'untouched'\n"
+            config.write_text(prelude + unrelated_root + original + "\n" + profile + extra, encoding="utf-8")
+            before = load_global_config(str(config))
+            save_ddns_config(before, profile_name="ct.edge", changes={"zone": "other.net", "host": "new"})
+            saved = load_global_config(str(config))
+            self.assertEqual(saved.ddns.interval_seconds, 180)
+            self.assertEqual(saved.ddns.profiles["ct.edge"].verify_interval_seconds, 41)
+            self.assertEqual(saved.ddns.profiles["ct.edge"].fqdn, "new.other.net")
+            updated = config.read_text(encoding="utf-8")
+            self.assertIn(extra, updated)
+            self.assertIn(unrelated_root + original, updated)
+            with self.assertRaisesRegex(ConfigError, "主配置已发生变化"):
+                save_ddns_config(before, enabled=False)
+            self.assertEqual(config.read_text(encoding="utf-8"), updated)
+
+    def test_ddns_rechecks_cache_after_domain_change(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            config = base / "config.toml"
+            cred = base / "cloudflare.env"
+            cred.write_text("CF_API_TOKEN=offline-test-token\n", encoding="utf-8")
+            cred.chmod(0o600)
+            config.write_text(
+                self.base_cfg_toml.replace("/run/leikwan_tools.lock", str(base / "tool.lock"))
+                .replace("/var/lib/leikwan_tools", str(base / "state"))
+                + '\n[ddns.ct]\ninterface = "ens3"\nprovider = "cloudflare"\n'
+                + f'credential_file = "{cred}"\nzone = "example.net"\nhost = "old"\n',
+                encoding="utf-8",
+            )
+            before = load_global_config(str(config))
+            inspection = ProfileInspectResult(
+                "ct", True, "ct", "ens3", "cloudflare", "AAAA", "example.net", "old", "old.example.net",
+                "2400:3200::1", 1, "240e::5", 4.0, [], [],
+            )
+            with (
+                patch("leikwan_tools.ddns.inspect_ddns_profile", return_value=inspection),
+                patch.object(CloudflareProvider, "sync_record", return_value=ProviderSyncResult(
+                    "updated", "record", "240e::5", [], "test sync"
+                )) as sync,
+            ):
+                self.assertEqual(update_ddns(before)["results"][0]["action"], "updated")
+                self.assertEqual(update_ddns(before)["results"][0]["action"], "skipped_cached")
+                save_ddns_config(before, profile_name="ct", changes={"host": "new"})
+                with self.assertRaisesRegex(ConfigError, "DDNS 探测期间配置已变化"):
+                    update_ddns(before)
+                saved = load_global_config(str(config))
+                self.assertEqual(update_ddns(saved)["results"][0]["action"], "updated")
+                self.assertEqual([call.args[0].fqdn for call in sync.call_args_list], [
+                    "old.example.net", "new.example.net",
+                ])
 
     def test_ddns_config_validation_and_both_toml_parsers(self) -> None:
         # Backward compatibility: existing configs without [ddns] load cleanly with ddns disabled

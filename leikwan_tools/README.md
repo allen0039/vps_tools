@@ -234,9 +234,15 @@ sudo bash uninstall.sh --purge
 - **AliDNS**：`ALIDNS_ACCESS_KEY_ID=...` 与 `ALIDNS_ACCESS_KEY_SECRET=...`（采用标准 RFC3986 + HMAC-SHA1 HTTPS 签名）。
 - **Webhook**：`WEBHOOK_URL=https://...?ip={ip}&token=...`（将 `{ip}` 替换为选中 IPv6，接受所有 HTTP `2xx`，错误与日志自动脱敏 URL 参数）。
 
-### 3. DDNS 缓存、校验与命令行用法
+### 3. 从交互菜单管理 DDNS
+
+在 VPS 上运行 `sudo lqtool`，选择主菜单第 **7 项「IPv6 DDNS 域名管理」**。选择「新建 DDNS 配置」，填入运营商、入口 IPv6 所在网卡、DNS 服务商、托管域、主机记录和已有的 `0600` 凭据文件路径。新配置默认暂停，可先用「探测网卡 IPv6」和「测试配置与凭据」检查，再启用该配置并开启全局 DDNS。
+
+菜单支持查看状态、修改、暂停、启用及删除配置。选择「立即同步 AAAA 记录」并确认后，工具会重新探测并同步选中的已启用配置。删除操作移除本地配置，远端 DNS 记录和凭据文件可继续使用。
+
+### 4. 自动调度、缓存与命令行
 - 命中 `<state_dir>/ddns/<profile>.json` 且 IPv6 未变化时跳过 API 调用；支持远端查询的 Provider 每隔 `verify_interval_seconds`（默认 600s）自动核对一次远端记录一致性（Webhook 不参与远端核对）。API 失败时不会污染成功缓存。
-- 安装脚本会部署并启用独立的 `leikwan_tools-ddns.timer`，由 `ddns.interval_seconds` 生成 `OnUnitActiveSec` 周期；修改周期或 DDNS 配置后重新运行安装脚本（升级也会重新渲染），不会影响 Realm、入口域名或默认出口路由。更新失败只记录在该 oneshot 服务日志中，不会阻止 Realm 单元运行。
+- 安装脚本会启动独立的 `leikwan_tools-ddns.timer`，其调度周期由 `ddns.interval_seconds` 决定。服务每次运行时读取主配置，修改调度周期后需用原安装参数重新运行安装脚本。DDNS 执行结果可在 `journalctl -u leikwan_tools-ddns.service` 中查看。
 - `uninstall.sh` 仅在 DDNS service/timer 带有 `# Managed-By: leikwan_tools` 标记时停用并删除；同名外部单元会被保留并报告。
 ```bash
 systemctl status leikwan_tools-ddns.timer leikwan_tools-ddns.service

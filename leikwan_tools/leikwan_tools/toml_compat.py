@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Tuple
+
+_STATEMENT_TOKEN = re.compile(
+    r'"""(?:\\[\s\S]|"(?!"")|[^"\\])*"""{1,3}'
+    r"|'''(?:'(?!'')|[^'])*'''{1,3}"
+    r'|"(?:\\.|[^"\\\r\n])*"|\'[^\'\r\n]*\'|#[^\r\n]*|[\[\]{}\n]'
+)
 
 try:
     import tomllib as _stdlib_tomllib
@@ -289,6 +296,39 @@ def loads_toml(text: str) -> Dict[str, Any]:
         except Exception as exc:
             raise TomlParseError(str(exc)) from exc
     return _fallback_loads(text)
+
+
+def without_toml_table(text: str, table: str) -> str:
+    """Remove one top-level table's definitions, keeping other source text intact."""
+    kept = []
+    start = 0
+    depth = 0
+    current_table: List[str] = []
+    for token in _STATEMENT_TOKEN.finditer(text + "\n"):
+        value = token.group()
+        if value in ("[", "{"):
+            depth += 1
+        elif value in ("]", "}"):
+            depth -= 1
+        elif value == "\n" and depth == 0:
+            statement = text[start:token.end()]
+            start = token.end()
+            first_line = _strip_comment(statement.split("\n", 1)[0]).strip()
+            if not first_line:
+                if statement.strip() or current_table[:1] != [table]:
+                    kept.append(statement)
+                continue
+            if first_line.startswith("[["):
+                current_table = _parse_key_path(first_line[2:-2])
+            elif first_line.startswith("["):
+                current_table = _parse_key_path(first_line[1:-1])
+            elif not current_table:
+                key, _ = _split_key_value(first_line)
+                if _parse_key_path(key)[0] == table:
+                    continue
+            if current_table[:1] != [table]:
+                kept.append(statement)
+    return "".join(kept)
 
 
 def dump_toml_string(value: str) -> str:

@@ -20,12 +20,16 @@ from . import (
     __version__,
 )
 from .config import (
+    DDNS_PROFILE_NAME_RE,
+    VALID_DDNS_PROVIDERS,
     ConfigError,
+    DdnsProfileConfig,
     GlobalConfig,
     RuleConfig,
     format_endpoint,
     load_global_config,
     load_rule_config,
+    normalize_ddns_fqdn,
     parse_rule_config_dict,
     validate_ipv4,
 )
@@ -34,6 +38,7 @@ from .ddns import (
     DdnsError,
     ProfileInspectResult,
     inspect_ddns,
+    save_ddns_config,
     status_ddns,
     test_ddns_profile,
     update_ddns,
@@ -96,6 +101,7 @@ _MENU_ERRORS = (
     LockTimeoutError,
     SystemErrorBase,
     UpdateError,
+    DdnsError,
     OSError,
 )
 
@@ -536,16 +542,16 @@ def _menu_field(label: str, default: Any = "") -> str:
     return input(f"{label}{hint}：").strip() or str(default)
 
 
-def _menu_domain(value: str) -> str:
+def _menu_domain(value: str, label: str = "入口域名") -> str:
     try:
         hostname = value.removesuffix(".").encode("idna").decode("ascii")
     except UnicodeError as exc:
-        raise ConfigError(f"入口域名无效: {value!r}") from exc
+        raise ConfigError(f"{label}无效: {value!r}") from exc
     labels = hostname.split(".")
     if len(hostname) > 253 or len(labels) < 2 or labels[-1].isdigit() or any(
         not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in labels
     ):
-        raise ConfigError(f"入口域名无效: {value!r}")
+        raise ConfigError(f"{label}无效: {value!r}")
     return value
 
 
@@ -928,6 +934,9 @@ def _print_ddns_update(res: Dict[str, Any]) -> None:
     if not res.get("ddns_enabled", True):
         print("DDNS 状态  : 全局 [ddns].enabled = false，已跳过所有更新")
         return
+    if not res["results"]:
+        print("当前没有已配置的 DDNS 线路。")
+        return
     for item in res["results"]:
         isp_zh = ISP_LABELS.get(item["isp"], item["isp"])
         target_name = item["fqdn"] or "(Webhook)"
@@ -1004,6 +1013,139 @@ def _print_ddns_status(res: Dict[str, Any]) -> None:
             print(f"最近错误   : {item['last_error']}")
 
 
+def _menu_ddns_profile(cfg: GlobalConfig, *, allow_all: bool = False) -> str:
+    profiles = cfg.ddns.profiles
+    if not profiles:
+        print("请先新建 DDNS 配置。")
+        return ""
+    labels = [
+        f"{profile.name} | {ISP_LABELS[profile.isp]} @ {profile.interface} | "
+        f"{profile.fqdn or '(Webhook)'} | {'启用' if profile.enabled else '暂停'}"
+        for profile in profiles.values()
+    ]
+    names = list(profiles)
+    if allow_all:
+        names.insert(0, "*")
+        labels.insert(0, "全部线路")
+    return _menu_pick(names, "选择 DDNS 配置", labels=labels)
+
+
+def _menu_ddns_edit(cfg: GlobalConfig, profile: Optional[DdnsProfileConfig] = None) -> None:
+    if profile is None:
+        name = input("配置名（如 ct、cu，留空返回）：").strip()
+        if not name:
+            return
+        if not DDNS_PROFILE_NAME_RE.fullmatch(name) or name in cfg.ddns.profiles:
+            raise ConfigError("配置名称非法或已存在")
+    else:
+        name = profile.name
+
+    isp = _menu_pick(list(ISP_LABELS), "选择运营商", profile.isp if profile else "", list(ISP_LABELS.values()))
+    if not isp:
+        return
+    interface = _menu_field("入口 IPv6 所在网卡", profile.interface if profile else "")
+    provider = _menu_pick(
+        list(VALID_DDNS_PROVIDERS), "选择 DNS 服务商", profile.provider if profile else ""
+    )
+    if not provider:
+        return
+    zone = _menu_field("DNS 托管域（如 example.com）", profile.zone if profile else "")
+    host = _menu_field("主机记录（如 ct，根域填 @）", profile.host if profile else "@") if zone else ""
+    if zone or provider != "webhook":
+        zone = _menu_domain(zone, "DDNS 托管域").removesuffix(".").encode("idna").decode("ascii")
+        host = host.removesuffix(".").encode("idna").decode("ascii")
+        _menu_domain(normalize_ddns_fqdn(zone, host), "DDNS 记录域名")
+    credential_file = _menu_field("已有 0600 凭据文件路径", profile.credential_file if profile else "")
+    if not credential_file:
+        raise ConfigError("请填写独立的凭据文件路径")
+    changes = {
+        "isp": isp,
+        "interface": interface,
+        "provider": provider,
+        "zone": zone,
+        "host": host,
+        "credential_file": os.path.abspath(os.path.expanduser(credential_file)),
+    }
+    if profile is None:
+        changes["enabled"] = False
+    if provider == "cloudflare":
+        auth_modes = {"auto": "从凭据识别", "token": "API Token", "global_key": "Global API Key"}
+        auth_mode = _menu_pick(
+            list(auth_modes), "选择 Cloudflare 认证", (profile.auth_mode if profile else "") or "auto",
+            list(auth_modes.values()),
+        )
+        if not auth_mode:
+            return
+        changes["auth_mode"] = "" if auth_mode == "auto" else auth_mode
+    target = normalize_ddns_fqdn(zone, host) if zone else "(Webhook)"
+    print(f"{name} | {ISP_LABELS[isp]} @ {interface} | {provider} | AAAA → {target}")
+    if _confirm("保存 DDNS 配置"):
+        save_ddns_config(cfg, profile_name=name, changes=changes)
+        print("DDNS 配置已保存。新建配置默认暂停，可测试后启用。" if profile is None else "DDNS 配置已保存。")
+
+
+def _menu_ddns_group(config_path: str) -> None:
+    while True:
+        print(f"\nleikwan_tools v{__version__} > IPv6 DDNS 域名管理")
+        print("  1. 查看配置与同步状态")
+        print("  2. 新建 DDNS 配置")
+        print("  3. 修改 DDNS 配置")
+        print("  4. 探测网卡 IPv6")
+        print("  5. 测试配置与凭据")
+        print("  6. 立即同步 AAAA 记录")
+        print("  7. 暂停 / 启用单条配置")
+        print("  8. 关闭 / 开启全局 DDNS")
+        print("  9. 删除 DDNS 配置")
+        print("  0. 返回主菜单")
+        selected = input("请选择：").strip()
+        if selected == "0":
+            return
+        if len(selected) != 1 or selected not in "123456789":
+            print("无效选项，请重新输入。")
+            continue
+        try:
+            cfg = load_global_config(config_path)
+            if selected == "1":
+                _print_ddns_status(status_ddns(cfg))
+                continue
+            if selected == "2":
+                _menu_ddns_edit(cfg)
+                continue
+            if selected == "8":
+                action = "关闭" if cfg.ddns.enabled else "开启"
+                if _confirm(f"{action}全局 DDNS"):
+                    save_ddns_config(cfg, enabled=not cfg.ddns.enabled)
+                    print(f"全局 DDNS 已{action}。")
+                continue
+            name = _menu_ddns_profile(cfg, allow_all=selected in ("4", "6"))
+            if not name:
+                continue
+            if selected == "4":
+                _print_ddns_inspect(inspect_ddns(cfg, None if name == "*" else name))
+            elif selected == "6":
+                if _confirm(f"同步 {'全部已启用线路' if name == '*' else name} 的 AAAA 记录"):
+                    _print_ddns_update(update_ddns(cfg, None if name == "*" else name, force=True))
+            else:
+                profile = cfg.ddns.profiles[name]
+                if selected == "3":
+                    _menu_ddns_edit(cfg, profile)
+                elif selected == "5":
+                    _print_ddns_test(test_ddns_profile(cfg, name))
+                elif selected == "7":
+                    action = "暂停" if profile.enabled else "启用"
+                    if _confirm(f"{action} DDNS 配置 {name}"):
+                        save_ddns_config(cfg, profile_name=name, changes={"enabled": not profile.enabled})
+                        print(f"DDNS 配置 {name} 已{action}。")
+                        if not profile.enabled and not cfg.ddns.enabled:
+                            print("请通过选项 8 开启全局 DDNS。")
+                elif selected == "9":
+                    if _confirm(f"删除本地配置 {name}（保留远端记录和凭据文件）"):
+                        save_ddns_config(cfg, profile_name=name)
+                        print(f"DDNS 配置 {name} 已删除。")
+        except _MENU_ERRORS + (UnicodeError,) as exc:
+            print(f"错误: {exc}", file=sys.stderr)
+
+
 def _run_menu(config_path: str) -> int:
     try:
         while True:
@@ -1014,6 +1156,7 @@ def _run_menu(config_path: str) -> int:
             print("  4. 查询并设置转发的客户端入口 IP")
             print("  5. 初始化与环境排查（双线路由 / 环境检查）")
             print("  6. 从仓库检查并更新工具")
+            print("  7. IPv6 DDNS 域名管理")
             print("  0. 退出")
             selected = input("请选择：").strip()
             if selected == "0":
@@ -1039,6 +1182,8 @@ def _run_menu(config_path: str) -> int:
                     print(f"错误: {exc}", file=sys.stderr)
                 if updated:
                     _reexec_updated_menu(config_path)
+            elif selected == "7":
+                _menu_ddns_group(config_path)
             else:
                 print("无效选项，请重新输入。")
     except (EOFError, KeyboardInterrupt):

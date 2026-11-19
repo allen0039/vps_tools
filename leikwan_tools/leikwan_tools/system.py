@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import time
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
@@ -135,19 +136,28 @@ class FileLock:
                 self._fd = None
 
 
-def atomic_write_text(path: Path, content: str, mode: int = 0o644) -> None:
+def atomic_write_text(
+    path: Path, content: str, mode: int = 0o644, *, owner: Optional[Tuple[int, int]] = None
+) -> None:
     """Atomically write UTF-8 text to disk using temp file + fsync + os.replace."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    tmp = None
     try:
-        with tmp.open("w", encoding="utf-8") as fh:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="", prefix=f".{path.name}.", dir=path.parent, delete=False
+        ) as fh:
+            tmp = Path(fh.name)
             fh.write(content)
             fh.flush()
+            if owner is not None:
+                file_stat = os.fstat(fh.fileno())
+                if (file_stat.st_uid, file_stat.st_gid) != owner:
+                    os.fchown(fh.fileno(), *owner)
+            os.fchmod(fh.fileno(), mode)
             os.fsync(fh.fileno())
-        os.chmod(tmp, mode)
         os.replace(tmp, path)
     finally:
-        if tmp.exists():
+        if tmp is not None:
             tmp.unlink(missing_ok=True)
 
 

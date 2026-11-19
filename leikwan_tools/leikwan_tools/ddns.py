@@ -20,9 +20,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .config import ConfigError, DdnsProfileConfig, GlobalConfig
+from .config import (
+    ConfigError,
+    DdnsProfileConfig,
+    GlobalConfig,
+    load_global_config,
+    parse_global_config_dict,
+)
 from .ownership import ensure_safe_subpath, resolve_lock_file
 from .system import FileLock, SystemErrorBase, atomic_write_text, run_cmd
+from .toml_compat import TomlParseError, dump_toml_string, loads_toml, without_toml_table
 
 CT_IPV6_NETWORK = ipaddress.IPv6Network("240e::/16")
 CU_IPV6_NETWORK = ipaddress.IPv6Network("2408::/16")
@@ -1235,6 +1242,90 @@ def get_ddns_provider(name: str) -> DdnsProvider:
     return prov
 
 
+def _render_ddns_config(ddns: Dict[str, Any]) -> str:
+    tables = [("ddns", ddns)]
+    tables.extend(
+        (f"ddns.{dump_toml_string(name)}", fields)
+        for name, fields in ddns.items() if isinstance(fields, dict)
+    )
+    sections = []
+    for name, fields in tables:
+        lines = [f"[{name}]"]
+        for key, value in fields.items():
+            if isinstance(value, dict):
+                continue
+            if isinstance(value, str):
+                rendered = dump_toml_string(value)
+            elif isinstance(value, bool):
+                rendered = str(value).lower()
+            else:
+                rendered = str(value)
+            lines.append(f"{key} = {rendered}")
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections) + "\n"
+
+
+def save_ddns_config(
+    expected: GlobalConfig,
+    *,
+    profile_name: Optional[str] = None,
+    changes: Optional[Dict[str, Any]] = None,
+    enabled: Optional[bool] = None,
+) -> None:
+    """Apply confirmed DDNS edits to the active TOML under the shared write lock."""
+    path = Path(expected.config_path)
+    with FileLock(resolve_lock_file(global_cfg=expected)):
+        file_stat = path.lstat()
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ConfigError(f"主配置必须是普通文件，才能通过菜单修改: {path}")
+        with path.open(encoding="utf-8", newline="") as config_file:
+            original = config_file.read()
+        try:
+            data = loads_toml(original)
+            if parse_global_config_dict(data, expected.config_path) != expected:
+                raise ConfigError("主配置已发生变化，请重新进入操作并确认")
+            ddns = data.setdefault("ddns", {"enabled": expected.ddns.enabled})
+            if enabled is not None:
+                ddns["enabled"] = enabled
+            if profile_name is not None:
+                if changes is None:
+                    del ddns[profile_name]
+                else:
+                    profile = ddns.setdefault(profile_name, {})
+                    if not isinstance(profile, dict):
+                        raise ConfigError(f"DDNS 配置名与全局字段冲突: {profile_name}")
+                    if "zone" in changes:
+                        profile.pop("domain", None)
+                    profile.update(changes)
+
+            desired = parse_global_config_dict(data, expected.config_path)
+            if desired == expected:
+                return
+            if profile_name is not None and changes and ("credential_file" in changes or changes.get("enabled")):
+                profile_cfg = desired.ddns.profiles[profile_name]
+                credentials, secret_values = load_credential_file(profile_cfg.credential_file)
+                try:
+                    get_ddns_provider(profile_cfg.provider).validate_credentials(profile_cfg, credentials)
+                except (DdnsError, ValueError) as exc:
+                    raise DdnsError(sanitize_secrets(str(exc), secret_values)) from exc
+
+            retained = without_toml_table(original, "ddns")
+            newline = "\r\n" if "\r\n" in original else "\n"
+            if not retained.endswith("\n"):
+                retained += newline
+            if not retained.endswith(newline * 2):
+                retained += newline
+            updated = retained + _render_ddns_config(ddns).replace("\n", newline)
+            if loads_toml(updated) != data:
+                raise ConfigError("无法在保留主配置其余内容的情况下保存 DDNS")
+        except TomlParseError as exc:
+            raise ConfigError(f"保存 DDNS 配置时 TOML 解析失败: {path}") from exc
+        atomic_write_text(
+            path, updated, mode=stat.S_IMODE(file_stat.st_mode),
+            owner=(file_stat.st_uid, file_stat.st_gid),
+        )
+
+
 def _ddns_state_path(global_cfg: GlobalConfig, profile_name: str) -> Path:
     state_root = Path(global_cfg.tool.state_dir)
     return ensure_safe_subpath(state_root, state_root / "ddns" / f"{profile_name}.json")
@@ -1252,6 +1343,13 @@ def _load_ddns_state(path: Path) -> Dict[str, Any]:
 
 def _write_ddns_state(path: Path, payload: Dict[str, Any]) -> None:
     atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n", mode=0o644)
+
+
+def _profile_signature(profile: DdnsProfileConfig) -> str:
+    fields = asdict(profile)
+    for key in ("enabled", "probe_target", "probe_timeout_seconds", "verify_interval_seconds"):
+        del fields[key]
+    return hashlib.sha256(json.dumps(fields, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _select_profiles(global_cfg: GlobalConfig, profile_name: Optional[str]) -> List[DdnsProfileConfig]:
@@ -1281,6 +1379,8 @@ def update_ddns(
     api_timeout: float = 15.0,
 ) -> Dict[str, Any]:
     """Scan candidates and synchronize one or all DDNS profiles using state cache & FileLock."""
+    if not profile_name and not global_cfg.ddns.profiles:
+        return {"ddns_enabled": global_cfg.ddns.enabled, "ok": True, "results": []}
     targets = _select_profiles(global_cfg, profile_name)
     if not global_cfg.ddns.enabled:
         return {
@@ -1315,9 +1415,16 @@ def update_ddns(
     any_error = False
 
     with FileLock(lock_file, timeout=lock_timeout):
+        if global_cfg.config_path:
+            latest = load_global_config(global_cfg.config_path)
+            if latest.ddns != global_cfg.ddns or latest.tool != global_cfg.tool:
+                raise ConfigError("DDNS 探测期间配置已变化，请重新运行同步")
         for prof in targets:
             state_path = _ddns_state_path(global_cfg, prof.name)
             prev = _load_ddns_state(state_path)
+            signature = _profile_signature(prof)
+            if prev.get("profile_signature") != signature:
+                prev = {}
             now_dt = datetime.now(timezone.utc)
             now_iso = now_dt.isoformat()
             now_epoch = int(time.time())
@@ -1325,6 +1432,7 @@ def update_ddns(
             base_state: Dict[str, Any] = {
                 "schema_version": 1,
                 "profile": prof.name,
+                "profile_signature": signature,
                 "isp": prof.isp,
                 "interface": prof.interface,
                 "provider": prof.provider,
@@ -1535,6 +1643,9 @@ def status_ddns(global_cfg: GlobalConfig, profile_name: Optional[str] = None) ->
     items: List[Dict[str, Any]] = []
     for prof in targets:
         state = _load_ddns_state(_ddns_state_path(global_cfg, prof.name))
+        signature = state.get("profile_signature")
+        if signature and signature != _profile_signature(prof):
+            state = {}
         items.append(
             {
                 "profile": prof.name,
