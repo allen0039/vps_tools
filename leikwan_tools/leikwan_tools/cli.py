@@ -29,6 +29,15 @@ from .config import (
     parse_rule_config_dict,
     validate_ipv4,
 )
+from .ddns import (
+    ISP_LABELS,
+    DdnsError,
+    ProfileInspectResult,
+    inspect_ddns,
+    status_ddns,
+    test_ddns_profile,
+    update_ddns,
+)
 from .ingress import (
     DnsQueryResult,
     IngressError,
@@ -884,6 +893,117 @@ def _reexec_updated_menu(config_path: str) -> None:
     print("更新完成，请重新运行 lqtool 打开新版菜单。")
 
 
+def _print_ddns_inspect(items: List[ProfileInspectResult]) -> None:
+    print("协议说明   : 当前仅支持 IPv6 AAAA 记录（配置模型已预留 A 记录扩展）")
+    print("安全模式   : 只读候选过滤（不删除系统网卡上的 deprecated / preferred_lft 0 地址）")
+    for idx, item in enumerate(items):
+        if idx > 0:
+            print("-" * 72)
+        isp_zh = ISP_LABELS.get(item.isp, item.isp)
+        state_zh = "启用" if item.enabled else "已禁用"
+        target_name = item.fqdn or "(Webhook 通知)"
+        print(f"配置名     : {item.profile} ({isp_zh} | {state_zh} | {item.provider} {item.record_type} -> {target_name})")
+        print(f"网卡与探测 : dev={item.interface} | ping -6 -c 1 -w {item.probe_timeout_seconds} -I <候选IP> {item.probe_target}")
+        if item.error:
+            print(f"扫描错误   : {item.error}")
+            continue
+        if item.selected_ip:
+            rtt_str = f" (RTT={item.selected_rtt_ms:.2f}ms)" if item.selected_rtt_ms is not None else ""
+            print(f"选中最佳IP : {item.selected_ip}{rtt_str}")
+        else:
+            print("选中最佳IP : (无可用公网 IPv6)")
+        if item.candidates:
+            print("探测候选   :")
+            for cand in item.candidates:
+                mark = "可用" if cand.probe_ok else "不可达"
+                print(f"  - {cand.ip} [{mark}] {cand.detail}")
+        if item.filtered_out:
+            print("已过滤地址 :")
+            for skipped in item.filtered_out:
+                print(f"  - {skipped.raw} ({skipped.reason})")
+
+
+def _print_ddns_update(res: Dict[str, Any]) -> None:
+    print("协议说明   : 当前仅支持 IPv6 AAAA 记录（配置模型已预留 A 记录扩展）")
+    if not res.get("ddns_enabled", True):
+        print("DDNS 状态  : 全局 [ddns].enabled = false，已跳过所有更新")
+        return
+    for item in res["results"]:
+        isp_zh = ISP_LABELS.get(item["isp"], item["isp"])
+        target_name = item["fqdn"] or "(Webhook)"
+        print(
+            f"[{item['action']}] 配置={item['profile']} ({isp_zh}@{item['interface']} | "
+            f"{item['provider']} {item['record_type']} -> {target_name})"
+        )
+        if item.get("selected_ip"):
+            rtt = f" RTT={item['selected_rtt_ms']:.2f}ms" if item.get("selected_rtt_ms") is not None else ""
+            print(f"  选用 IPv6: {item['selected_ip']}{rtt}")
+        if item.get("deleted_duplicates"):
+            print(f"  清理重复 : {', '.join(item['deleted_duplicates'])}")
+        print(f"  详情     : {item['detail']}")
+
+
+def _print_ddns_test(res: Dict[str, Any]) -> None:
+    print("协议说明   : 当前仅支持 IPv6 AAAA 记录（配置模型已预留 A 记录扩展）")
+    insp = res["inspection"]
+    isp_zh = ISP_LABELS.get(res["isp"], res["isp"])
+    print(
+        f"DDNS 联调检查 [{res['profile']}]: {isp_zh}@{res['interface']} | "
+        f"{res['provider']} {res['record_type']} -> {res['fqdn'] or '(Webhook)'}"
+    )
+    print(f"凭据校验   : 通过 (0600 权限与字段校验合格)")
+    if insp["error"]:
+        print(f"地址扫描   : 失败 - {insp['error']}")
+    elif insp["selected_ip"]:
+        rtt = f" (RTT={insp['selected_rtt_ms']:.2f}ms)" if insp.get("selected_rtt_ms") is not None else ""
+        print(f"最佳 IPv6  : {insp['selected_ip']}{rtt}")
+    else:
+        print("最佳 IPv6  : 未找到探测可达的公网 IPv6 候选")
+    remote = res["remote"]
+    if remote.get("supports_remote_verify") is False:
+        print(f"远端校验   : Webhook 不支持远端查询，模板校验通过 ({remote.get('webhook_preview', '')})")
+    else:
+        print(
+            f"远端记录   : {remote.get('fqdn', res['fqdn'])} -> "
+            f"{remote.get('remote_ip') or '(尚无记录)'} "
+            f"(记录数={remote.get('record_count', 0)}, id={remote.get('record_id') or '-'})"
+        )
+
+
+def _print_ddns_status(res: Dict[str, Any]) -> None:
+    print("协议说明   : 当前仅支持 IPv6 AAAA 记录（配置模型已预留 A 记录扩展）")
+    profiles = res.get("profiles") or []
+    if not profiles:
+        print("当前未配置独立 DDNS（主配置中无 [ddns.<名称>] 配置节）。")
+        return
+    print(
+        f"全局状态   : {'启用' if res['ddns_enabled'] else '禁用'} | "
+        f"扫描周期={res['interval_seconds']}s | 远端校对={res['verify_interval_seconds']}s | "
+        f"探测目标={res['probe_target']} (超时 {res['probe_timeout_seconds']}s)"
+    )
+    for item in profiles:
+        print("-" * 72)
+        isp_zh = ISP_LABELS.get(item["isp"], item["isp"])
+        state_zh = "启用" if item["enabled"] else "禁用"
+        print(f"配置名称   : {item['profile']} ({isp_zh} | {state_zh})")
+        print(f"接口/服务  : dev={item['interface']} | {item['provider']} {item['record_type']} -> {item['fqdn'] or '(Webhook)'}")
+        print(f"凭据文件   : {item['credential_file'] or '(未配置)'}")
+        print(
+            f"当前选择   : {item['selected_ip'] or '(无)'}"
+            + (f" (RTT={item['selected_rtt_ms']:.2f}ms)" if item.get("selected_rtt_ms") is not None else "")
+        )
+        print(
+            f"上次成功   : {item['last_success_ip'] or '(从未成功)'} "
+            f"[时间={item['last_success_at_utc'] or '-'} | 记录ID={item['record_id'] or '-'}]"
+        )
+        print(
+            f"最近动作   : {item['last_action'] or '(尚未运行)'} "
+            f"[尝试={item['last_attempt_at_utc'] or '-'} | 远端核对={item['last_verified_at_utc'] or '-'}]"
+        )
+        if item.get("last_error"):
+            print(f"最近错误   : {item['last_error']}")
+
+
 def _run_menu(config_path: str) -> int:
     try:
         while True:
@@ -1050,6 +1170,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_update.add_argument("--check", action="store_true", help="仅检查仓库最新版本，不执行安装")
     p_update.add_argument("--timeout", type=float, default=20.0, help="单次网络请求超时秒数 (默认 20)")
+
+    p_ddns = sub.add_parser("ddns", help="独立双线路 IPv6 DDNS 检查、测试、状态与同步（仅支持 AAAA）")
+    ddns_sub = p_ddns.add_subparsers(dest="ddns_cmd", required=True)
+
+    p_di = ddns_sub.add_parser("inspect", help="只读扫描网卡公网 IPv6 候选并主动 ping 探测最低 RTT")
+    p_di.add_argument("--profile", default="", help="可选 DDNS 配置名（如 ct / cu）；省略则检查全部")
+
+    p_du = ddns_sub.add_parser("update", help="按最优 IPv6 同步 DDNS（带缓存、600s 远端校验与并发锁）")
+    p_du.add_argument("--profile", default="", help="可选 DDNS 配置名（如 ct / cu）；省略则同步全部")
+    p_du.add_argument("--force", action="store_true", help="忽略本地缓存强制与远端核对/更新")
+    p_du.add_argument("--lock-timeout", type=float, default=15.0, help="并发写锁等待秒数 (默认 15)")
+    p_du.add_argument("--timeout", type=float, default=15.0, help="DNS API 请求超时秒数 (默认 15)")
+
+    p_dt = ddns_sub.add_parser("test", help="验证指定 DDNS 配置、0600 凭据、IPv6 探测及只读远端连通性")
+    p_dt.add_argument("--profile", required=True, help="要检查的 DDNS 配置名（如 ct / cu）")
+    p_dt.add_argument("--timeout", type=float, default=15.0, help="DNS API 请求超时秒数 (默认 15)")
+
+    p_ds = ddns_sub.add_parser("status", help="查看独立 DDNS 配置与持久化运行状态")
+    p_ds.add_argument("--profile", default="", help="可选 DDNS 配置名（如 ct / cu）；省略则显示全部")
 
     return parser
 
@@ -1258,6 +1397,48 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.ingress_cmd == "verify":
                 return _cmd_ingress_verify(args)
 
+        if args.command == "ddns":
+            cfg = load_global_config(args.config)
+            if args.ddns_cmd == "inspect":
+                items = inspect_ddns(cfg, profile_name=args.profile or None)
+                if args.json:
+                    _print_json(
+                        {
+                            "supported_record_types": ["AAAA"],
+                            "profiles": [asdict(item) for item in items],
+                        }
+                    )
+                else:
+                    _print_ddns_inspect(items)
+                return 1 if any(item.error for item in items) else 0
+            if args.ddns_cmd == "update":
+                res = update_ddns(
+                    cfg,
+                    profile_name=args.profile or None,
+                    force=args.force,
+                    lock_timeout=args.lock_timeout,
+                    api_timeout=args.timeout,
+                )
+                if args.json:
+                    _print_json(res)
+                else:
+                    _print_ddns_update(res)
+                return 0 if res["ok"] else 1
+            if args.ddns_cmd == "test":
+                res = test_ddns_profile(cfg, profile_name=args.profile, api_timeout=args.timeout)
+                if args.json:
+                    _print_json(res)
+                else:
+                    _print_ddns_test(res)
+                return 0 if res["ok"] else 1
+            if args.ddns_cmd == "status":
+                res = status_ddns(cfg, profile_name=args.profile or None)
+                if args.json:
+                    _print_json(res)
+                else:
+                    _print_ddns_status(res)
+                return 0
+
         if args.command == "update":
             if args.check:
                 info = check_for_update(channel=args.channel, timeout=args.timeout)
@@ -1285,6 +1466,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         LockTimeoutError,
         SystemErrorBase,
         UpdateError,
+        DdnsError,
     ) as exc:
         if args.json:
             _print_json({"error": str(exc)})

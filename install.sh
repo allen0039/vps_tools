@@ -15,12 +15,13 @@ FILES=(vpstools.sh install.sh safe-ssh-port/safe-ssh-port.sh dns_tool/dns_tool.s
        leikwan_tools/examples/config.example.toml leikwan_tools/examples/rule-rfc-hk.example.toml
        leikwan_tools/examples/rule-zouter-jp.example.toml
        leikwan_tools/leikwan_tools/__init__.py leikwan_tools/leikwan_tools/cli.py
-       leikwan_tools/leikwan_tools/config.py leikwan_tools/leikwan_tools/ingress.py
+       leikwan_tools/leikwan_tools/config.py leikwan_tools/leikwan_tools/ddns.py leikwan_tools/leikwan_tools/ingress.py
        leikwan_tools/leikwan_tools/manager.py leikwan_tools/leikwan_tools/ownership.py
        leikwan_tools/leikwan_tools/realm.py leikwan_tools/leikwan_tools/routing.py
        leikwan_tools/leikwan_tools/updater.py leikwan_tools/leikwan_tools/leikwan_tools-routing.service
        leikwan_tools/leikwan_tools/system.py
-       leikwan_tools/leikwan_tools/toml_compat.py leikwan_tools/systemd/leikwan_tools-realm@.service)
+       leikwan_tools/leikwan_tools/toml_compat.py leikwan_tools/systemd/leikwan_tools-realm@.service
+       leikwan_tools/systemd/leikwan_tools-ddns.service leikwan_tools/systemd/leikwan_tools-ddns.timer)
 
 die() { printf '[vpstools] 错误：%s\n' "$*" >&2; exit 1; }
 usage() {

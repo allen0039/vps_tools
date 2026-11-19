@@ -41,6 +41,10 @@ from .system import (
 )
 
 TEMPLATE_UNIT_PATH = f"/etc/systemd/system/{FIXED_SYSTEMD_UNIT_TEMPLATE}"
+DDNS_SERVICE_UNIT = "leikwan_tools-ddns.service"
+DDNS_TIMER_UNIT = "leikwan_tools-ddns.timer"
+DDNS_SERVICE_PATH = f"/etc/systemd/system/{DDNS_SERVICE_UNIT}"
+DDNS_TIMER_PATH = f"/etc/systemd/system/{DDNS_TIMER_UNIT}"
 BIN_LAUNCHER_PATH = "/usr/local/bin/leikwan_tools"
 SHORTCUT_PATH = "/usr/local/bin/lqtool"
 
@@ -134,6 +138,22 @@ def verify_template_unit_owned(unit_path: str = TEMPLATE_UNIT_PATH) -> Tuple[boo
         return False, f"无法读取 systemd 模板单元 ({unit_path}): {exc}"
     if MANAGED_MARKER not in content:
         return False, f"systemd 模板单元缺少归属标记 ({MANAGED_MARKER}): {unit_path}"
+    return True, ""
+
+
+def verify_fixed_unit_owned(unit_path: str) -> Tuple[bool, str]:
+    """Check a standalone systemd unit is a regular file carrying our marker."""
+    p = Path(unit_path)
+    if not p.exists():
+        return False, f"systemd 单元不存在: {unit_path}"
+    if p.is_symlink() or not p.is_file():
+        return False, f"systemd 单元异常（非普通文件或为符号链接）: {unit_path}"
+    try:
+        content = p.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return False, f"无法读取 systemd 单元 ({unit_path}): {exc}"
+    if MANAGED_MARKER not in content:
+        return False, f"systemd 单元缺少归属标记 ({MANAGED_MARKER}): {unit_path}"
     return True, ""
 
 
@@ -494,6 +514,10 @@ def write_install_artifacts(
         "shortcut_path": SHORTCUT_PATH,
         "systemd_template_path": TEMPLATE_UNIT_PATH,
         "systemd_template_unit": FIXED_SYSTEMD_UNIT_TEMPLATE,
+        "ddns_service_path": DDNS_SERVICE_PATH,
+        "ddns_timer_path": DDNS_TIMER_PATH,
+        "ddns_service_unit": DDNS_SERVICE_UNIT,
+        "ddns_timer_unit": DDNS_TIMER_UNIT,
         "config_dir": os.path.realpath(str(cfg_dir)),
         "rules_dir": os.path.realpath(str(cfg_dir / "rules.d")),
         "examples_dir": os.path.realpath(str(cfg_dir / "examples")),
@@ -646,6 +670,31 @@ def uninstall_tool(
 
         removed_files.extend(uninstall_routing(str(st_dir)))
 
+        # Stop and remove each independent DDNS unit only when it carries our
+        # ownership marker; never disable or overwrite a foreign unit.
+        ddns_units = (
+            (DDNS_TIMER_UNIT, DDNS_TIMER_PATH),
+            (DDNS_SERVICE_UNIT, DDNS_SERVICE_PATH),
+        )
+        ddns_changed = False
+        for unit_name, unit_path in ddns_units:
+            unit_file = Path(unit_path)
+            if not (unit_file.exists() or unit_file.is_symlink()):
+                continue
+            owned, reason = verify_fixed_unit_owned(unit_path)
+            if not owned:
+                skipped_items.append(f"保留非本工具 DDNS 单元 {unit_path}: {reason}")
+                continue
+            systemd_disable(unit_name, now=True)
+            systemd_stop(unit_name)
+            systemd_reset_failed(unit_name)
+            if unit_file.exists() and not unit_file.is_symlink():
+                unit_file.unlink()
+                removed_files.append(unit_path)
+                ddns_changed = True
+        if ddns_changed:
+            systemd_daemon_reload()
+
         # Remove owned state metadata files item-by-item (NEVER rm -rf st_dir).
         reg_p = registry_path_for_state_dir(str(st_dir))
         try:
@@ -666,6 +715,27 @@ def uninstall_tool(
                     skipped_items.append(f"保留非本工具格式的 {src_rec}")
             except (OSError, json.JSONDecodeError, OwnershipError) as exc:
                 skipped_items.append(f"保留 {src_rec}: {exc}")
+
+        ddns_dir = st_dir / "ddns"
+        if ddns_dir.is_dir() and not ddns_dir.is_symlink():
+            for cand in sorted(ddns_dir.glob("*.json")):
+                if cand.is_symlink() or not cand.is_file():
+                    skipped_items.append(f"保留异常 DDNS 状态项: {cand}")
+                    continue
+                try:
+                    ddns_data = json.loads(cand.read_text(encoding="utf-8"))
+                    if (
+                        isinstance(ddns_data, dict)
+                        and ddns_data.get("schema_version") == 1
+                        and isinstance(ddns_data.get("profile"), str)
+                        and ddns_data["profile"].strip()
+                    ):
+                        if safe_unlink_owned_file(st_dir, cand):
+                            removed_files.append(str(cand))
+                    else:
+                        skipped_items.append(f"保留非本工具格式的 {cand}")
+                except (OSError, json.JSONDecodeError, OwnershipError) as exc:
+                    skipped_items.append(f"保留 {cand}: {exc}")
 
         # Remove owned Realm binary ONLY if recorded as managed_install by leikwan_tools.
         if manifest is not None:
@@ -767,6 +837,7 @@ def uninstall_tool(
         dirs_to_try = [
             st_dir / "realm",
             st_dir / "state",
+            st_dir / "ddns",
             st_dir,
             lib_root / "bin",
             lib_root,
@@ -844,6 +915,14 @@ def _cli_main(argv: Optional[List[str]] = None) -> int:
                     if not legacy_ok:
                         raise OwnershipError(f"拒绝覆盖非本工具 systemd 模板: {reason}")
                     print(f"  识别到旧版 leikwan_tools 模板，允许原位迁移: {legacy_reason}")
+            for unit_path, label in (
+                (DDNS_SERVICE_PATH, "DDNS 服务"),
+                (DDNS_TIMER_PATH, "DDNS 定时器"),
+            ):
+                if Path(unit_path).exists() or Path(unit_path).is_symlink():
+                    ok, reason = verify_fixed_unit_owned(unit_path)
+                    if not ok:
+                        raise OwnershipError(f"拒绝覆盖非本工具 {label}: {reason}")
             cfg_p = Path(args.config_dir)
             st_p = Path(args.state_dir)
             for d in (

@@ -1,0 +1,12 @@
+# Managed-By: leikwan_tools
+[Unit]
+Description=leikwan_tools independent IPv6 DDNS update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/usr/local/lib/leikwan_tools/install.env
+ExecStart=/usr/local/bin/leikwan_tools ddns update
+NoNewPrivileges=true
+

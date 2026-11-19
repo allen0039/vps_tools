@@ -8,6 +8,10 @@ SHORTCUT_PATH="/usr/local/bin/lqtool"
 SYSTEMD_UNIT_PATH="/etc/systemd/system/leikwan_tools-realm@.service"
 ROUTING_UNIT_PATH="/etc/systemd/system/leikwan_tools-routing.service"
 ROUTING_UNIT_SOURCE="${SCRIPT_DIR}/leikwan_tools/leikwan_tools-routing.service"
+DDNS_SERVICE_PATH="/etc/systemd/system/leikwan_tools-ddns.service"
+DDNS_TIMER_PATH="/etc/systemd/system/leikwan_tools-ddns.timer"
+DDNS_SERVICE_SOURCE="${SCRIPT_DIR}/systemd/leikwan_tools-ddns.service"
+DDNS_TIMER_SOURCE="${SCRIPT_DIR}/systemd/leikwan_tools-ddns.timer"
 CONFIG_DIR="/etc/leikwan_tools"
 STATE_DIR="/var/lib/leikwan_tools"
 LOCK_FILE="/run/leikwan_tools.lock"
@@ -98,6 +102,16 @@ if [[ -L "${ROUTING_UNIT_PATH}" || -n "${ROUTING_DROPINS}" ||
     exit 1
 fi
 
+for unit_name in leikwan_tools-ddns.service leikwan_tools-ddns.timer; do
+    unit_path="/etc/systemd/system/${unit_name}"
+    fragment="$(systemctl show -p FragmentPath --value "${unit_name}" || true)"
+    dropins="$(systemctl show -p DropInPaths --value "${unit_name}" || true)"
+    if [[ -n "${dropins}" || ( -n "${fragment}" && "${fragment}" != "${unit_path}" ) ]]; then
+        echo "错误: 拒绝覆盖非本工具 DDNS 单元 ${unit_name} (${fragment})" >&2
+        exit 1
+    fi
+done
+
 echo "[1/5] 安装 leikwan_tools 程序文件到 ${INSTALL_LIB_DIR}..."
 mkdir -p "${INSTALL_LIB_DIR}/bin"
 rm -rf "${INSTALL_LIB_DIR}/leikwan_tools"
@@ -112,6 +126,7 @@ install -m 0755 "${SCRIPT_DIR}/bin/leikwan_tools" "${SHORTCUT_PATH}"
 echo "[2/5] 安装 systemd 模板单元 ${SYSTEMD_UNIT_PATH}..."
 install -m 0644 "${SCRIPT_DIR}/systemd/leikwan_tools-realm@.service" "${SYSTEMD_UNIT_PATH}"
 install -m 0644 "${ROUTING_UNIT_SOURCE}" "${ROUTING_UNIT_PATH}"
+install -m 0644 "${DDNS_SERVICE_SOURCE}" "${DDNS_SERVICE_PATH}"
 systemctl daemon-reload
 systemctl enable leikwan_tools-routing.service
 
@@ -174,6 +189,30 @@ PY
 else
     echo "  保留已有主配置: ${CONFIG_DIR}/config.toml"
 fi
+
+# Render the DDNS timer interval from the independent [ddns] configuration.
+# A later config change takes effect after rerunning install.sh (or an update).
+DDNS_INTERVAL_SECONDS="$(python3 - "${CONFIG_DIR}/config.toml" <<'PY'
+from leikwan_tools.config import load_global_config
+import sys
+print(load_global_config(sys.argv[1]).ddns.interval_seconds)
+PY
+)"
+python3 - "${CONFIG_DIR}/config.toml" "${DDNS_TIMER_SOURCE}" "${DDNS_TIMER_PATH}" "${DDNS_INTERVAL_SECONDS}" <<'PY'
+import pathlib, re, sys
+
+_, source_path, target_path, interval_text = sys.argv[1:5]
+interval = int(interval_text)
+text = pathlib.Path(source_path).read_text(encoding="utf-8")
+text, count = re.subn(r"(?m)^OnUnitActiveSec=.*$", f"OnUnitActiveSec={interval}s", text, count=1)
+if count != 1:
+    raise SystemExit("DDNS timer 模板缺少 OnUnitActiveSec")
+pathlib.Path(target_path).write_text(text, encoding="utf-8")
+pathlib.Path(target_path).chmod(0o644)
+print(f"  DDNS 自动更新周期: {interval}s")
+PY
+systemctl daemon-reload
+systemctl enable --now leikwan_tools-ddns.timer
 
 echo "[4/5] 检查并准备兼容的 Realm 二进制（保留系统已有二进制，不覆盖）..."
 export PYTHONPATH="${INSTALL_LIB_DIR}"
@@ -304,5 +343,6 @@ echo "[5/5] 安装完成验证..."
 echo "安装完成："
 echo "  - 输入 lqtool 打开交互菜单。"
 echo "  - 已写入资源归属清单: ${INSTALL_LIB_DIR}/install-manifest.json"
+echo "  - 已启用独立 DDNS 定时器: leikwan_tools-ddns.timer（周期 ${DDNS_INTERVAL_SECONDS}s；未配置或 disabled 时自动跳过）"
 echo "  - 未启用任何示例规则；未修改 Toolkit / LeiKwanManager / v6-mng.sh / 现有 Realm / 路由 / 防火墙。"
 echo "  - 核对 ${CONFIG_DIR}/config.toml 后，用 lqtool routing plan 预览源策略路由，或从菜单进入「5. 初始化与环境排查 -> 1. 初始化双线出口路由」。"

@@ -47,6 +47,8 @@ REQUIRED_UPDATE_FILES = (
     "leikwan_tools/__init__.py",
     "leikwan_tools/cli.py",
     "systemd/leikwan_tools-realm@.service",
+    "systemd/leikwan_tools-ddns.service",
+    "systemd/leikwan_tools-ddns.timer",
 )
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 NUMERIC_VER_RE = re.compile(r"^v?(\d+(?:\.\d+)*)$", re.IGNORECASE)
@@ -375,6 +377,13 @@ def _validate_staged_files(stage_dir: Path, rel_paths: List[str]) -> None:
                 raise UpdateError(f"systemd 单元文件解码失败 ({rel}): {exc}") from exc
             if "[Unit]" not in text or "[Service]" not in text:
                 raise UpdateError(f"systemd 单元文件格式异常 ({rel})")
+        elif rel.endswith(".timer"):
+            try:
+                text = target.read_text(encoding="utf-8")
+            except UnicodeDecodeError as exc:
+                raise UpdateError(f"systemd 定时器文件解码失败 ({rel}): {exc}") from exc
+            if "[Unit]" not in text or "[Timer]" not in text:
+                raise UpdateError(f"systemd 定时器文件格式异常 ({rel})")
 
 
 def _build_install_args(manifest: Optional[Dict[str, Any]]) -> List[str]:

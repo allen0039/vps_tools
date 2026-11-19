@@ -25,13 +25,35 @@ from leikwan_tools import MANAGED_MARKER, REALM_RELEASES  # noqa: E402
 from leikwan_tools.cli import main  # noqa: E402
 from leikwan_tools.config import (  # noqa: E402
     ConfigError,
+    DdnsProfileConfig,
     LineConfig,
     load_global_config,
     load_rule_config,
+    normalize_ddns_fqdn,
+    normalize_ddns_subdomain,
     parse_global_config_dict,
     parse_rule_config_dict,
     render_realm_toml,
     render_rule_toml,
+)
+from leikwan_tools.ddns import (  # noqa: E402
+    AliDnsProvider,
+    CloudflareProvider,
+    DdnsError,
+    DdnsProviderError,
+    DnspodProvider,
+    WebhookProvider,
+    _alidns_percent_encode,
+    _build_alidns_signed_url,
+    classify_ipv6_isp,
+    inspect_ddns_profile,
+    load_credential_file,
+    parse_ip6_addr_candidates,
+    parse_ping_rtt_ms,
+    redact_url,
+    status_ddns,
+    test_ddns_profile,
+    update_ddns,
 )
 from leikwan_tools.ingress import (  # noqa: E402
     STATUS_DNS_CANDIDATE,
@@ -128,7 +150,7 @@ class TestInteractiveShortcut(unittest.TestCase):
                 env=env,
                 check=True,
             )
-            self.assertIn("leikwan_tools 利群转发助手 v0.1.2", menu.stdout)
+            self.assertIn("leikwan_tools 利群转发助手 v0.1.3", menu.stdout)
             self.assertIn("转发规则管理", menu.stdout)
             self.assertNotIn("预览规则部署", menu.stdout)
             self.assertNotIn("应用规则文件", menu.stdout)
@@ -140,7 +162,7 @@ class TestInteractiveShortcut(unittest.TestCase):
                 env=env,
                 check=True,
             )
-            self.assertEqual(version.stdout.strip(), "leikwan_tools 0.1.2")
+            self.assertEqual(version.stdout.strip(), "leikwan_tools 0.1.3")
 
     def test_menu_delete_lists_rules_requires_confirmation_and_returns_after_error(self) -> None:
         cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))
@@ -1105,13 +1127,15 @@ class TestSelfUpdate(unittest.TestCase):
                         {"path": "leikwan_tools/__init__.py", "type": "blob", "mode": "100644"},
                         {"path": "leikwan_tools/cli.py", "type": "blob", "mode": "100644"},
                         {"path": "systemd/leikwan_tools-realm@.service", "type": "blob", "mode": "100644"},
+                        {"path": "systemd/leikwan_tools-ddns.service", "type": "blob", "mode": "100644"},
+                        {"path": "systemd/leikwan_tools-ddns.timer", "type": "blob", "mode": "100644"},
                     ],
                 },
             ]
         )
         with patch("leikwan_tools.updater._http_get_json", side_effect=lambda *a, **kw: next(responses)):
             discovered = _discover_remote_files("github", "2" * 40)
-        self.assertEqual(len(discovered), 5)
+        self.assertEqual(len(discovered), 7)
         self.assertIn(("leikwan_tools/cli.py", "100644"), discovered)
 
     def test_validate_staged_files_rejects_bad_syntax(self) -> None:
@@ -1281,6 +1305,706 @@ class TestSelfUpdate(unittest.TestCase):
             self.assertEqual(main(["update", "--channel", "gitee"]), 0)
         m_upd.assert_called_once_with(channel="gitee", timeout=20.0)
         self.assertIn("已从 v0.1.2 更新到 v0.1.3", buf2.getvalue())
+
+
+class TestDdnsSubsystem(unittest.TestCase):
+    def setUp(self) -> None:
+        self.base_cfg_toml = (REPO_ROOT / "examples" / "config.example.toml").read_text(encoding="utf-8")
+
+    def test_ddns_config_validation_and_both_toml_parsers(self) -> None:
+        # Backward compatibility: existing configs without [ddns] load cleanly with ddns disabled
+        g_no_ddns = parse_global_config_dict(loads_toml(self.base_cfg_toml))
+        self.assertFalse(g_no_ddns.ddns.enabled)
+        self.assertEqual(g_no_ddns.ddns.profiles, {})
+
+        ddns_toml = (
+            self.base_cfg_toml
+            + """
+[ddns]
+enabled = true
+interval_seconds = 120
+verify_interval_seconds = 600
+probe_target = "2400:3200::1"
+probe_timeout_seconds = 1
+
+[ddns.ct]
+enabled = true
+interface = "eth0"
+provider = "cloudflare"
+record_type = "AAAA"
+zone = "example.com"
+host = "ct"
+credential_file = "/etc/leikwan_tools/secrets/ddns-ct.env"
+
+[ddns.cu]
+enabled = true
+interface = "eth1"
+provider = "dnspod"
+record_type = "AAAA"
+zone = "example.com"
+host = "cu"
+ttl = 300
+record_line = "联通"
+credential_file = "/etc/leikwan_tools/secrets/ddns-cu.env"
+"""
+        )
+        d1 = loads_toml(ddns_toml)
+        d2 = _fallback_loads(ddns_toml)
+        self.assertEqual(d1, d2)
+        gcfg = parse_global_config_dict(d2)
+        self.assertTrue(gcfg.ddns.enabled)
+        self.assertEqual(gcfg.ddns.profiles["ct"].isp, "ct")
+        self.assertEqual(gcfg.ddns.profiles["ct"].fqdn, "ct.example.com")
+        self.assertEqual(gcfg.ddns.profiles["cu"].isp, "cu")
+        self.assertEqual(gcfg.ddns.profiles["cu"].ttl, 300)
+        self.assertEqual(gcfg.ddns.profiles["cu"].record_line, "联通")
+
+        # Reject A record explicitly
+        bad_a = loads_toml(ddns_toml)
+        bad_a["ddns"]["ct"]["record_type"] = "A"
+        with self.assertRaises(ConfigError) as ctx_a:
+            parse_global_config_dict(bad_a)
+        self.assertIn("仅支持 IPv6 AAAA", str(ctx_a.exception))
+
+        # Reject plaintext secret in config.toml
+        bad_secret = loads_toml(ddns_toml)
+        bad_secret["ddns"]["ct"]["token"] = "cf-secret-token"
+        with self.assertRaises(ConfigError) as ctx_sec:
+            parse_global_config_dict(bad_secret)
+        self.assertIn("credential_file", str(ctx_sec.exception))
+
+        # Reject duplicate zone+host+record_type even across different host notations ("ct" vs "ct.example.com.")
+        bad_dup = loads_toml(ddns_toml)
+        bad_dup["ddns"]["cu"]["host"] = "ct.example.com."
+        with self.assertRaises(ConfigError) as ctx_dup:
+            parse_global_config_dict(bad_dup)
+        self.assertIn("冲突", str(ctx_dup.exception))
+
+        # Do NOT fall back to ingress.default_domain when zone is missing
+        bad_no_zone = loads_toml(ddns_toml)
+        del bad_no_zone["ddns"]["ct"]["zone"]
+        with self.assertRaises(ConfigError) as ctx_nz:
+            parse_global_config_dict(bad_no_zone)
+        self.assertIn("不得复用 [ingress].default_domain", str(ctx_nz.exception))
+
+    def test_ipv6_candidate_filtering_classification_and_probing(self) -> None:
+        ip_output = """
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP qlen 1000
+    inet6 240e:3b4:1::dead/64 scope global deprecated
+       valid_lft 100sec preferred_lft 0sec
+    inet6 240e:3b4:1::bad1/64 scope global tentative
+       valid_lft 3600sec preferred_lft 3600sec
+    inet6 240e:3b4:1::bad2/64 scope global dadfailed
+       valid_lft 3600sec preferred_lft 3600sec
+    inet6 240e:3b4:1::zero/64 scope global dynamic
+       valid_lft 3600sec preferred_lft 0sec
+    inet6 240e:3b4:1::10/64 scope global dynamic noprefixroute
+       valid_lft 2591990sec preferred_lft 604790sec
+    inet6 240e:3b4:1::20/64 scope global dynamic
+       valid_lft 2591990sec preferred_lft 604790sec
+    inet6 2408:820c:1::30/64 scope global dynamic
+       valid_lft 2591990sec preferred_lft 604790sec
+    inet6 2409:8000::1/64 scope global
+       valid_lft forever preferred_lft forever
+    inet6 fd00::1/64 scope global
+       valid_lft forever preferred_lft forever
+    inet6 fe80::1/64 scope link
+       valid_lft forever preferred_lft forever
+    inet6 not-an-ipv6/64 scope global
+       valid_lft forever preferred_lft forever
+"""
+        ct_cands, ct_filtered = parse_ip6_addr_candidates(ip_output, "ct")
+        self.assertEqual(ct_cands, ["240e:3b4:1::10", "240e:3b4:1::20"])
+        reasons = {f.raw: f.reason for f in ct_filtered}
+        self.assertIn("deprecated", reasons["240e:3b4:1::dead/64"])
+        self.assertIn("tentative", reasons["240e:3b4:1::bad1/64"])
+        self.assertIn("dadfailed", reasons["240e:3b4:1::bad2/64"])
+        self.assertIn("preferred_lft 为 0", reasons["240e:3b4:1::zero/64"])
+        self.assertIn("联通", reasons["2408:820c:1::30"])
+        self.assertIn("忽略", reasons["2409:8000::1"])
+        self.assertIn("非公网全局", reasons["fd00::1/64"])
+        self.assertIn("scope link", reasons["fe80::1/64"])
+        self.assertIn("不可解析为合法 IPv6", reasons["not-an-ipv6/64"])
+
+        # Prefix classification is independent of interface name
+        self.assertEqual(classify_ipv6_isp("240e:1234::1"), "ct")
+        self.assertEqual(classify_ipv6_isp("2408:5678::1"), "cu")
+        self.assertIsNone(classify_ipv6_isp("2409:8000::1"))
+
+        # RTT parser handles both Linux iputils and single-line ping outputs
+        self.assertEqual(parse_ping_rtt_ms("rtt min/avg/max/mdev = 11.200/14.500/18.100/2.000 ms"), 14.5)
+        self.assertEqual(parse_ping_rtt_ms("64 bytes from 2400:3200::1: time=9.42 ms"), 9.42)
+
+        gcfg = parse_global_config_dict(
+            loads_toml(
+                self.base_cfg_toml
+                + """
+[ddns]
+enabled = true
+probe_target = "2400:3200::1"
+probe_timeout_seconds = 1
+
+[ddns.ct]
+enabled = true
+interface = "eth0"
+provider = "cloudflare"
+zone = "example.com"
+host = "ct"
+credential_file = "/tmp/ct.env"
+
+[ddns.cu]
+enabled = true
+interface = "eth1"
+provider = "cloudflare"
+zone = "example.com"
+host = "cu"
+credential_file = "/tmp/cu.env"
+"""
+            )
+        )
+
+        executed_cmds = []
+
+        def fake_run_cmd(cmd, timeout=15.0):
+            executed_cmds.append(cmd)
+            class Res:
+                def __init__(self, rc, out, err=""):
+                    self.returncode = rc
+                    self.stdout = out
+                    self.stderr = err
+
+            if cmd[:3] == ["ip", "-6", "addr"] and "eth0" in cmd:
+                return Res(0, ip_output)
+            if cmd[:3] == ["ip", "-6", "addr"] and "eth1" in cmd:
+                return Res(
+                    0,
+                    "3: eth1    inet6 2408:820c:1::99/64 scope global \\       valid_lft forever preferred_lft forever\n",
+                )
+            if cmd[0] == "ping":
+                src = cmd[cmd.index("-I") + 1]
+                self.assertNotIn("/", src)  # Never pass CIDR to ping!
+                if src == "240e:3b4:1::10":
+                    return Res(0, "rtt min/avg/max/mdev = 28.1/28.1/28.1/0.0 ms\n")
+                if src == "240e:3b4:1::20":
+                    return Res(0, "rtt min/avg/max/mdev = 9.3/9.3/9.3/0.0 ms\n")
+                if src == "2408:820c:1::99":
+                    return Res(1, "", "100% packet loss")
+            raise AssertionError(cmd)
+
+        with patch("leikwan_tools.ddns.run_cmd", side_effect=fake_run_cmd):
+            res_ct = inspect_ddns_profile(gcfg, gcfg.ddns.profiles["ct"])
+            res_cu = inspect_ddns_profile(gcfg, gcfg.ddns.profiles["cu"])
+
+        # Non-destructive: never calls `ip -6 addr del`
+        self.assertFalse(any("del" in c for c in executed_cmds))
+        # Picks lowest RTT reachable candidate for CT
+        self.assertEqual(res_ct.selected_ip, "240e:3b4:1::20")
+        self.assertEqual(res_ct.selected_rtt_ms, 9.3)
+        # Failed probe for CU returns empty IP
+        self.assertEqual(res_cu.selected_ip, "")
+        self.assertFalse(res_cu.candidates[0].probe_ok)
+
+    def test_credential_permissions_cf_modes_and_secret_redaction(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cred = Path(td) / "ddns.env"
+            cred.write_text('CF_API_TOKEN="super-secret-cf-token-12345"\n', encoding="utf-8")
+            os.chmod(cred, 0o644)
+            with self.assertRaises(DdnsError) as ctx_perm:
+                load_credential_file(str(cred))
+            self.assertIn("chmod 600", str(ctx_perm.exception))
+
+            os.chmod(cred, 0o600)
+            kv, sec_vals = load_credential_file(str(cred))
+            self.assertEqual(kv["CF_API_TOKEN"], "super-secret-cf-token-12345")
+            self.assertIn("super-secret-cf-token-12345", sec_vals)
+
+            link = Path(td) / "link.env"
+            link.symlink_to(cred)
+            with self.assertRaises(DdnsError):
+                load_credential_file(str(link))
+
+        prof = DdnsProfileConfig(
+            name="ct",
+            enabled=True,
+            isp="ct",
+            interface="eth0",
+            provider="cloudflare",
+            zone="example.com",
+            host="ct",
+            credential_file="/etc/leikwan_tools/secrets/ct.env",
+        )
+        cf = CloudflareProvider()
+        h_tok = cf._resolve_headers(prof, {"CF_API_TOKEN": "tok123"})
+        self.assertEqual(h_tok["Authorization"], "Bearer tok123")
+        h_gk = cf._resolve_headers(prof, {"CF_EMAIL": "a@b.com", "CF_GLOBAL_API_KEY": "gk123"})
+        self.assertEqual(h_gk["X-Auth-Key"], "gk123")
+        with self.assertRaises(DdnsError):
+            cf._resolve_headers(prof, {"CF_API_TOKEN": "tok123", "CF_EMAIL": "a@b.com", "CF_GLOBAL_API_KEY": "gk123"})
+
+        redacted = redact_url("https://user:pass@hook.example.com/webhook/my-secret-path?token=abc999&ip=240e::1")
+        self.assertNotIn("pass", redacted)
+        self.assertNotIn("abc999", redacted)
+        self.assertNotIn("my-secret-path", redacted)
+        self.assertIn("***@hook.example.com", redacted)
+
+    def test_cloudflare_provider_lifecycle_and_dedup(self) -> None:
+        self.assertEqual(normalize_ddns_fqdn("example.com", "@"), "example.com")
+        self.assertEqual(normalize_ddns_fqdn("example.com", ""), "example.com")
+        self.assertEqual(normalize_ddns_fqdn("example.com", "example.com."), "example.com")
+        self.assertEqual(normalize_ddns_fqdn("example.com", "ct"), "ct.example.com")
+        self.assertEqual(normalize_ddns_fqdn("example.com", "ct.example.com."), "ct.example.com")
+
+        prof = DdnsProfileConfig(
+            name="ct",
+            enabled=True,
+            isp="ct",
+            interface="eth0",
+            provider="cloudflare",
+            zone="example.com",
+            host="ct",
+            credential_file="/tmp/cf.env",
+        )
+        cf = CloudflareProvider()
+        creds = {"CF_API_TOKEN": "cf-secret-token"}
+        calls = []
+
+        def fake_http_json(method, url, headers=None, body=None, timeout=15.0, secrets_values=()):
+            calls.append((method, url, json.loads(body.decode("utf-8")) if body else None))
+            if method == "GET" and "/zones?name=" in url:
+                return 200, {"success": True, "result": [{"id": "zone-1"}]}
+            if method == "GET" and "/dns_records?" in url:
+                return 200, {
+                    "success": True,
+                    "result": [
+                        {"id": "rec-1", "content": "240e::1", "proxied": False},
+                        {"id": "rec-dup", "content": "240e::2", "proxied": False},
+                    ],
+                }
+            if method == "DELETE":
+                return 200, {"success": True, "result": {"id": "rec-dup"}}
+            if method == "PUT":
+                return 200, {"success": True, "result": {"id": "rec-1"}}
+            if method == "POST":
+                return 200, {"success": True, "result": {"id": "rec-new"}}
+            raise AssertionError((method, url))
+
+        with patch("leikwan_tools.ddns._http_json", side_effect=fake_http_json):
+            res_upd = cf.sync_record(prof, "240e::99", creds)
+        self.assertEqual(res_upd.action, "updated")
+        self.assertEqual(res_upd.deleted_duplicates, ["rec-dup"])
+        put_payload = [c[2] for c in calls if c[0] == "PUT"][0]
+        self.assertFalse(put_payload["proxied"])
+        self.assertEqual(put_payload["name"], "ct.example.com")
+        self.assertEqual(put_payload["content"], "240e::99")
+
+        # Unchanged IP skips PUT/POST
+        def fake_http_noop(method, url, headers=None, body=None, timeout=15.0, secrets_values=()):
+            if method == "GET" and "/zones?name=" in url:
+                return 200, {"success": True, "result": [{"id": "zone-1"}]}
+            if method == "GET" and "/dns_records?" in url:
+                return 200, {"success": True, "result": [{"id": "rec-1", "content": "240e::99", "proxied": False}]}
+            raise AssertionError((method, url))
+
+        with patch("leikwan_tools.ddns._http_json", side_effect=fake_http_noop):
+            res_noop = cf.sync_record(prof, "240e::99", creds)
+        self.assertEqual(res_noop.action, "noop")
+
+        # Empty records creates via POST
+        post_calls = []
+
+        def fake_http_create(method, url, headers=None, body=None, timeout=15.0, secrets_values=()):
+            post_calls.append(method)
+            if method == "GET" and "/zones?name=" in url:
+                return 200, {"success": True, "result": [{"id": "zone-1"}]}
+            if method == "GET" and "/dns_records?" in url:
+                return 200, {"success": True, "result": []}
+            if method == "POST":
+                return 200, {"success": True, "result": {"id": "rec-created"}}
+            raise AssertionError((method, url))
+
+        with patch("leikwan_tools.ddns._http_json", side_effect=fake_http_create):
+            res_create = cf.sync_record(prof, "240e::99", creds)
+        self.assertEqual(res_create.action, "created")
+        self.assertEqual(res_create.record_id, "rec-created")
+        self.assertIn("POST", post_calls)
+
+    def test_dnspod_alidns_and_webhook_providers(self) -> None:
+        # 1) DNSPod: Create on code 10, noop on same IP, Modify on changed IP with custom TTL & line
+        dp_prof = DdnsProfileConfig(
+            name="cu",
+            enabled=True,
+            isp="cu",
+            interface="eth1",
+            provider="dnspod",
+            zone="example.com",
+            host="cu",
+            ttl=300,
+            record_line="联通",
+            credential_file="/tmp/dp.env",
+        )
+        dp = DnspodProvider()
+        dp_creds = {"DNSPOD_TOKEN": "12345,secret-dp-token"}
+        dp_calls = []
+
+        def fake_dp_json(method, url, headers=None, body=None, timeout=15.0, secrets_values=()):
+            self.assertTrue(url.startswith("https://dnsapi.cn/"))
+            dp_calls.append((url, body.decode("utf-8")))
+            if url.endswith("/Record.List"):
+                return 200, {"status": {"code": "10", "message": "No records"}}
+            if url.endswith("/Record.Create"):
+                return 200, {"status": {"code": "1"}, "record": {"id": "dp-1"}}
+            raise AssertionError(url)
+
+        with patch("leikwan_tools.ddns._http_json", side_effect=fake_dp_json):
+            dp_created = dp.sync_record(dp_prof, "2408::1", dp_creds)
+        self.assertEqual(dp_created.action, "created")
+        self.assertEqual(dp_created.record_id, "dp-1")
+        self.assertIn("ttl=300", dp_calls[1][1])
+
+        def fake_dp_modify(method, url, headers=None, body=None, timeout=15.0, secrets_values=()):
+            if url.endswith("/Record.List"):
+                return 200, {"status": {"code": "1"}, "records": [{"id": "dp-1", "name": "cu", "type": "AAAA", "value": "2408::1"}]}
+            if url.endswith("/Record.Modify"):
+                return 200, {"status": {"code": "1"}, "record": {"id": "dp-1"}}
+            raise AssertionError(url)
+
+        with patch("leikwan_tools.ddns._http_json", side_effect=fake_dp_modify):
+            self.assertEqual(dp.sync_record(dp_prof, "2408::1", dp_creds).action, "noop")
+            self.assertEqual(dp.sync_record(dp_prof, "2408::2", dp_creds).action, "updated")
+
+        # 2) AliDNS: RFC3986 encoding + deterministic HMAC-SHA1 signature + exact RR filtering + CRUD
+        self.assertEqual(_alidns_percent_encode("a b~*"), "a%20b~%2A")
+        signed_url = _build_alidns_signed_url(
+            {"Action": "DescribeDomainRecords", "DomainName": "example.com"},
+            "testid",
+            "testsecret",
+            timestamp="2016-03-29T12:00:00Z",
+            nonce="123456",
+        )
+        self.assertTrue(signed_url.startswith("https://alidns.aliyuncs.com/?"))
+        self.assertIn("&Signature=", signed_url)
+        # Compute independent HMAC-SHA1 check for the exact canonicalized string
+        import base64 as _b64
+        import hashlib as _hl
+        import hmac as _hm
+        import urllib.parse as _up
+
+        qs_part, sig_part = signed_url.split("?", 1)[1].rsplit("&Signature=", 1)
+        expected_sig = _b64.b64encode(
+            _hm.new(b"testsecret&", f"GET&%2F&{_up.quote(qs_part, safe='-_.~')}".encode(), _hl.sha1).digest()
+        ).decode()
+        self.assertEqual(_up.unquote(sig_part), expected_sig)
+
+        ali_prof = DdnsProfileConfig(
+            name="ct",
+            enabled=True,
+            isp="ct",
+            interface="eth0",
+            provider="alidns",
+            zone="example.com",
+            host="ct",
+            credential_file="/tmp/ali.env",
+        )
+        ali = AliDnsProvider()
+        ali_creds = {"ALIDNS_ACCESS_KEY_ID": "testid", "ALIDNS_ACCESS_KEY_SECRET": "testsecret"}
+
+        def fake_ali_create(method, url, headers=None, body=None, timeout=15.0, secrets_values=()):
+            self.assertTrue(url.startswith("https://alidns.aliyuncs.com/"))
+            if "Action=DescribeDomainRecords" in url:
+                # Include fuzzy match ct2 that must be ignored for RR="ct"!
+                return 200, {
+                    "DomainRecords": {
+                        "Record": [{"RecordId": "other", "RR": "ct2", "Type": "AAAA", "Value": "240e::999"}]
+                    }
+                }
+            if "Action=AddDomainRecord" in url:
+                return 200, {"RecordId": "ali-new"}
+            raise AssertionError(url)
+
+        with patch("leikwan_tools.ddns._http_json", side_effect=fake_ali_create):
+            ali_created = ali.sync_record(ali_prof, "240e::10", ali_creds)
+        self.assertEqual(ali_created.action, "created")
+        self.assertEqual(ali_created.record_id, "ali-new")
+
+        def fake_ali_update(method, url, headers=None, body=None, timeout=15.0, secrets_values=()):
+            if "Action=DescribeDomainRecords" in url:
+                return 200, {
+                    "DomainRecords": {
+                        "Record": [{"RecordId": "ali-1", "RR": "ct", "Type": "AAAA", "Value": "240e::10"}]
+                    }
+                }
+            if "Action=UpdateDomainRecord" in url:
+                return 200, {"RecordId": "ali-1"}
+            raise AssertionError(url)
+
+        with patch("leikwan_tools.ddns._http_json", side_effect=fake_ali_update):
+            self.assertEqual(ali.sync_record(ali_prof, "240e::10", ali_creds).action, "noop")
+            self.assertEqual(ali.sync_record(ali_prof, "240e::20", ali_creds).action, "updated")
+
+        # 3) Webhook: {ip} substitution, accepts all 2xx, rejects 500 with redacted URL
+        wh_prof = DdnsProfileConfig(
+            name="cu",
+            enabled=True,
+            isp="cu",
+            interface="eth1",
+            provider="webhook",
+            credential_file="/tmp/wh.env",
+        )
+        wh = WebhookProvider()
+        wh_creds = {"WEBHOOK_URL": "https://hook.example.com/ddns?token=supersecret999&ip={ip}"}
+        seen_urls = []
+
+        def fake_wh_req(method, url, headers=None, body=None, timeout=15.0, secrets_values=()):
+            seen_urls.append(url)
+            if len(seen_urls) == 1:
+                return 204, b""
+            if len(seen_urls) == 2:
+                return 201, b"ok"
+            return 500, b"err"
+
+        with patch("leikwan_tools.ddns._http_request", side_effect=fake_wh_req):
+            r204 = wh.sync_record(wh_prof, "2408::55", wh_creds, secrets_values=["supersecret999"])
+            r201 = wh.sync_record(wh_prof, "2408::55", wh_creds, secrets_values=["supersecret999"])
+            self.assertEqual(r204.action, "triggered")
+            self.assertEqual(r201.action, "triggered")
+            self.assertNotIn("supersecret999", r204.detail)
+            with self.assertRaises(DdnsProviderError) as ctx_500:
+                wh.sync_record(wh_prof, "2408::55", wh_creds, secrets_values=["supersecret999"])
+            self.assertNotIn("supersecret999", str(ctx_500.exception))
+        self.assertEqual(seen_urls[0], "https://hook.example.com/ddns?token=supersecret999&ip=2408::55")
+
+    def test_ddns_cache_periodic_verify_failure_isolation_and_uninstall(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            state_dir = base / "state"
+            cfg_dir = base / "cfg"
+            secrets_dir = cfg_dir / "secrets"
+            cfg_dir.mkdir(parents=True)
+            secrets_dir.mkdir(parents=True)
+            (state_dir / "realm").mkdir(parents=True)
+            (state_dir / "state").mkdir(parents=True)
+
+            ct_cred = secrets_dir / "ct.env"
+            ct_cred.write_text("CF_API_TOKEN=cf-secret-xyz\n", encoding="utf-8")
+            os.chmod(ct_cred, 0o600)
+            cu_cred = secrets_dir / "cu.env"
+            cu_cred.write_text("WEBHOOK_URL=https://hook.example.com/u?token=wh-secret-abc&ip={ip}\n", encoding="utf-8")
+            os.chmod(cu_cred, 0o600)
+
+            cfg_file = cfg_dir / "config.toml"
+            cfg_file.write_text(
+                f'[tool]\nrules_dir = "{cfg_dir / "rules.d"}"\nstate_dir = "{state_dir}"\n'
+                f'lock_file = "{base / "tool.lock"}"\n'
+                '[lines.9929]\ninterface = "eth0"\nsource_ip = "10.7.0.146"\ngateway = "10.7.0.1"\ntable = 101\n'
+                '[ddns]\nenabled = true\nverify_interval_seconds = 600\n'
+                '[ddns.ct]\nenabled = true\ninterface = "eth0"\nprovider = "cloudflare"\nzone = "example.com"\nhost = "ct"\n'
+                f'credential_file = "{ct_cred}"\n'
+                '[ddns.cu]\nenabled = true\ninterface = "eth1"\nprovider = "webhook"\n'
+                f'credential_file = "{cu_cred}"\n',
+                encoding="utf-8",
+            )
+            gcfg = load_global_config(str(cfg_file))
+
+            # Run 1: Initial sync for both CT and CU
+            sync_calls = []
+
+            class FakeCF:
+                supports_remote_verify = True
+                def sync_record(self, prof, ip, creds, timeout=15.0, secrets_values=()):
+                    sync_calls.append(("ct", ip))
+                    from leikwan_tools.ddns import ProviderSyncResult
+                    return ProviderSyncResult("created", "cf-id-1", ip, [], "ok")
+
+            class FakeWH:
+                supports_remote_verify = False
+                def sync_record(self, prof, ip, creds, timeout=15.0, secrets_values=()):
+                    sync_calls.append(("cu", ip))
+                    from leikwan_tools.ddns import ProviderSyncResult
+                    return ProviderSyncResult("triggered", "", ip, [], "ok")
+
+            def fake_inspect(cfg, prof):
+                from leikwan_tools.ddns import ProfileInspectResult
+                ip_val = "240e::10" if prof.name == "ct" else "2408::20"
+                return ProfileInspectResult(prof.name, True, prof.isp, prof.interface, prof.provider, "AAAA", prof.zone, prof.host, prof.fqdn, "2400:3200::1", 1, ip_val, 5.0, [], [])
+
+            with (
+                patch("leikwan_tools.ddns.inspect_ddns_profile", side_effect=fake_inspect),
+                patch("leikwan_tools.ddns.get_ddns_provider", side_effect=lambda name: FakeCF() if name == "cloudflare" else FakeWH()),
+                patch("leikwan_tools.ddns.time.time", return_value=1000.0),
+            ):
+                r1 = update_ddns(gcfg)
+            self.assertTrue(r1["ok"])
+            self.assertEqual(sync_calls, [("ct", "240e::10"), ("cu", "2408::20")])
+
+            # Run 2: Same IP within 600s -> both skipped_cached
+            sync_calls.clear()
+            with (
+                patch("leikwan_tools.ddns.inspect_ddns_profile", side_effect=fake_inspect),
+                patch("leikwan_tools.ddns.get_ddns_provider", side_effect=lambda name: FakeCF() if name == "cloudflare" else FakeWH()),
+                patch("leikwan_tools.ddns.time.time", return_value=1200.0),
+            ):
+                r2 = update_ddns(gcfg)
+            self.assertEqual(sync_calls, [])
+            self.assertEqual([x["action"] for x in r2["results"]], ["skipped_cached", "skipped_cached"])
+
+            # Run 3: Same IP after >600s -> CT runs remote verify, Webhook NEVER runs remote verify!
+            sync_calls.clear()
+            with (
+                patch("leikwan_tools.ddns.inspect_ddns_profile", side_effect=fake_inspect),
+                patch("leikwan_tools.ddns.get_ddns_provider", side_effect=lambda name: FakeCF() if name == "cloudflare" else FakeWH()),
+                patch("leikwan_tools.ddns.time.time", return_value=1700.0),
+            ):
+                r3 = update_ddns(gcfg)
+            self.assertEqual(sync_calls, [("ct", "240e::10")])
+            self.assertEqual(r3["results"][1]["action"], "skipped_cached")
+
+            # Run 4: CT fails while CU changes IP -> CT preserves last_success_ip=240e::10, CU updates independently
+            class FailCF:
+                supports_remote_verify = True
+                def sync_record(self, prof, ip, creds, timeout=15.0, secrets_values=()):
+                    raise DdnsProviderError("API failed with secret cf-secret-xyz")
+
+            def fake_inspect_changed(cfg, prof):
+                from leikwan_tools.ddns import ProfileInspectResult
+                ip_val = "240e::99" if prof.name == "ct" else "2408::88"
+                return ProfileInspectResult(prof.name, True, prof.isp, prof.interface, prof.provider, "AAAA", prof.zone, prof.host, prof.fqdn, "2400:3200::1", 1, ip_val, 5.0, [], [])
+
+            with (
+                patch("leikwan_tools.ddns.inspect_ddns_profile", side_effect=fake_inspect_changed),
+                patch("leikwan_tools.ddns.get_ddns_provider", side_effect=lambda name: FailCF() if name == "cloudflare" else FakeWH()),
+                patch("leikwan_tools.ddns.time.time", return_value=1800.0),
+            ):
+                r4 = update_ddns(gcfg)
+            self.assertFalse(r4["ok"])
+            self.assertEqual(r4["results"][0]["action"], "error")
+            self.assertNotIn("cf-secret-xyz", r4["results"][0]["error"])
+            self.assertEqual(r4["results"][1]["action"], "triggered")
+            ct_state = json.loads((state_dir / "ddns" / "ct.json").read_text(encoding="utf-8"))
+            self.assertEqual(ct_state["last_success_ip"], "240e::10")
+            self.assertNotIn("cf-secret-xyz", ct_state["last_error"])
+
+            # Run 5: Empty selected IP -> skipped_no_ip, preserves last_success_ip
+            def fake_inspect_empty(cfg, prof):
+                from leikwan_tools.ddns import ProfileInspectResult
+                return ProfileInspectResult(prof.name, True, prof.isp, prof.interface, prof.provider, "AAAA", prof.zone, prof.host, prof.fqdn, "2400:3200::1", 1, "", None, [], [])
+
+            with patch("leikwan_tools.ddns.inspect_ddns_profile", side_effect=fake_inspect_empty):
+                r5 = update_ddns(gcfg, profile_name="ct")
+            self.assertEqual(r5["results"][0]["action"], "skipped_no_ip")
+            ct_state_after = json.loads((state_dir / "ddns" / "ct.json").read_text(encoding="utf-8"))
+            self.assertEqual(ct_state_after["last_success_ip"], "240e::10")
+
+            # Uninstall preserves foreign file in ddns/ and user secrets in secrets/, cleans owned state JSONs
+            foreign_ddns = state_dir / "ddns" / "foreign.json"
+            foreign_ddns.write_text('{"other": true}\n', encoding="utf-8")
+            lib_dir = base / "lib"
+            (lib_dir / "leikwan_tools").mkdir(parents=True)
+            write_install_artifacts(
+                install_lib_dir=str(lib_dir),
+                config_dir=str(cfg_dir),
+                state_dir=str(state_dir),
+                config_file=str(cfg_file),
+                lock_file=str(base / "tool.lock"),
+                realm_bin_path="/usr/local/bin/realm",
+                realm_managed_install=False,
+                example_files=[],
+                created_config_file=True,
+            )
+            with patch("leikwan_tools.ownership.TEMPLATE_UNIT_PATH", str(base / "missing.service")), patch(
+                "leikwan_tools.ownership.BIN_LAUNCHER_PATH", str(base / "missing-bin")
+            ), patch("leikwan_tools.ownership.SHORTCUT_PATH", str(base / "missing-lq")), patch(
+                "leikwan_tools.ownership.systemd_daemon_reload"
+            ):
+                uninstall_tool(
+                    purge=False,
+                    config_dir_arg=str(cfg_dir),
+                    state_dir_arg=str(state_dir),
+                    install_lib_dir=str(lib_dir),
+                    manifest_path=str(lib_dir / "install-manifest.json"),
+                )
+            self.assertFalse((state_dir / "ddns" / "ct.json").exists())
+            self.assertFalse((state_dir / "ddns" / "cu.json").exists())
+            self.assertTrue(foreign_ddns.is_file())
+            self.assertTrue(ct_cred.is_file())
+
+    def test_cli_ddns_subcommands_and_json_output(self) -> None:
+        from leikwan_tools.ddns import FilteredAddress, ProbedCandidate, ProfileInspectResult
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            state_dir = base / "state"
+            cred = base / "ct.env"
+            cred.write_text("CF_API_TOKEN=cli-secret-9876\n", encoding="utf-8")
+            os.chmod(cred, 0o600)
+            cfg_file = base / "config.toml"
+            cfg_file.write_text(
+                f'[tool]\nrules_dir = "{base / "rules.d"}"\nstate_dir = "{state_dir}"\n'
+                f'lock_file = "{base / "lock"}"\n'
+                '[lines.9929]\ninterface = "eth0"\nsource_ip = "10.7.0.146"\ngateway = "10.7.0.1"\ntable = 101\n'
+                '[ddns]\nenabled = true\n'
+                '[ddns.ct]\nenabled = true\ninterface = "eth0"\nprovider = "cloudflare"\nzone = "example.com"\nhost = "ct"\n'
+                f'credential_file = "{cred}"\n',
+                encoding="utf-8",
+            )
+
+            insp = ProfileInspectResult(
+                profile="ct",
+                enabled=True,
+                isp="ct",
+                interface="eth0",
+                provider="cloudflare",
+                record_type="AAAA",
+                zone="example.com",
+                host="ct",
+                fqdn="ct.example.com",
+                probe_target="2400:3200::1",
+                probe_timeout_seconds=1,
+                selected_ip="240e::10",
+                selected_rtt_ms=11.5,
+                candidates=[ProbedCandidate("240e::10", "ct", "eth0", True, 11.5, "RTT=11.50ms")],
+                filtered_out=[FilteredAddress("240e::dead/64", "deprecated 地址")],
+            )
+            out_insp = io.StringIO()
+            with patch("leikwan_tools.ddns.inspect_ddns_profile", return_value=insp), redirect_stdout(out_insp):
+                self.assertEqual(main(["--config", str(cfg_file), "ddns", "inspect", "--profile", "ct"]), 0)
+            self.assertIn("仅支持 IPv6 AAAA", out_insp.getvalue())
+            self.assertIn("240e::10", out_insp.getvalue())
+            self.assertNotIn("cli-secret-9876", out_insp.getvalue())
+
+            out_test = io.StringIO()
+            with (
+                patch("leikwan_tools.ddns.inspect_ddns_profile", return_value=insp),
+                patch.object(CloudflareProvider, "query_remote", return_value={"fqdn": "ct.example.com", "record_count": 1, "record_id": "r1", "remote_ip": "240e::10"}),
+                redirect_stdout(out_test),
+            ):
+                self.assertEqual(main(["--config", str(cfg_file), "ddns", "test", "--profile", "ct"]), 0)
+            self.assertIn("凭据校验   : 通过", out_test.getvalue())
+            self.assertNotIn("cli-secret-9876", out_test.getvalue())
+
+            out_upd = io.StringIO()
+            with (
+                patch("leikwan_tools.ddns.inspect_ddns_profile", return_value=insp),
+                patch.object(
+                    CloudflareProvider,
+                    "sync_record",
+                    side_effect=lambda *a, **kw: __import__("leikwan_tools.ddns", fromlist=["ProviderSyncResult"]).ProviderSyncResult("updated", "r1", "240e::10", [], "ok"),
+                ),
+                redirect_stdout(out_upd),
+            ):
+                self.assertEqual(main(["--config", str(cfg_file), "--json", "ddns", "update", "--profile", "ct"]), 0)
+            upd_json = json.loads(out_upd.getvalue())
+            self.assertTrue(upd_json["ok"])
+            self.assertEqual(upd_json["results"][0]["selected_ip"], "240e::10")
+
+            out_st = io.StringIO()
+            with redirect_stdout(out_st):
+                self.assertEqual(main(["--config", str(cfg_file), "ddns", "status"]), 0)
+            self.assertIn("240e::10", out_st.getvalue())
+            self.assertNotIn("cli-secret-9876", out_st.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
 
 
 if __name__ == "__main__":

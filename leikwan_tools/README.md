@@ -217,7 +217,39 @@ sudo bash uninstall.sh --purge
 
 ---
 
-## 八、测试复跑命令与验收边界
+## 八、独立双线路 IPv6 DDNS（与 `[ingress]` / Realm 转发解耦）
+
+`leikwan_tools` 内置独立的双线路（电信 `240e:` / 联通 `2408:`）IPv6 DDNS 子系统。第一版**仅支持 IPv6 `AAAA` 记录**（配置模型已为 `A` 记录预留校验扩展），不会因为 DDNS 更新而修改默认 IPv6 路由或重启任何 Realm 转发实例。
+
+### 1. 地址筛选与主动探测原则
+- 从各配置指定的 `interface` 执行只读 `ip -6 addr show dev <interface> scope global` 扫描（**只过滤、不删除系统网卡地址**）：
+  - 排除非 `scope global`、`deprecated`、`tentative`、`dadfailed`、`preferred_lft 0`、链路本地及非法 IPv6 地址，并剥离 `/64` 等 CIDR 后缀；
+  - 依据 IPv6 前缀识别运营商（`240e:` 归属电信 `ct`，`2408:` 归属联通 `cu`，其余前缀忽略）；
+  - 对每个符合条件的候选执行 `ping -6 -c 1 -w <timeout> -I <候选IPv6> <probe_target>`，剔除不可达地址并按各线路独立选取 RTT 最低者；无可达地址时不更新对应 DDNS。
+
+### 2. 配置与 `0600` 凭据文件
+在主配置 `/etc/leikwan_tools/config.toml` 中配置 `[ddns]`、`[ddns.ct]`、`[ddns.cu]`（完整字段见 `examples/config.example.toml`）。主配置禁止保存明文 Token/Secret，必须指向权限为 `0600` 的独立 `credential_file`（`chmod 600`）：
+- **Cloudflare**：`CF_API_TOKEN=...`（或同时配置 `CF_EMAIL=...` 与 `CF_GLOBAL_API_KEY=...` 并设置 `auth_mode = "global_key"`）；支持根域/子域 FQDN 规范化、清理重复记录及 `proxied` 控制（默认 `false`）。
+- **DNSPod**：`DNSPOD_TOKEN=<ID>,<Token>`（支持配置 `ttl` 与 `record_line`）。
+- **AliDNS**：`ALIDNS_ACCESS_KEY_ID=...` 与 `ALIDNS_ACCESS_KEY_SECRET=...`（采用标准 RFC3986 + HMAC-SHA1 HTTPS 签名）。
+- **Webhook**：`WEBHOOK_URL=https://...?ip={ip}&token=...`（将 `{ip}` 替换为选中 IPv6，接受所有 HTTP `2xx`，错误与日志自动脱敏 URL 参数）。
+
+### 3. DDNS 缓存、校验与命令行用法
+- 命中 `<state_dir>/ddns/<profile>.json` 且 IPv6 未变化时跳过 API 调用；支持远端查询的 Provider 每隔 `verify_interval_seconds`（默认 600s）自动核对一次远端记录一致性（Webhook 不参与远端核对）。API 失败时不会污染成功缓存。
+- 安装脚本会部署并启用独立的 `leikwan_tools-ddns.timer`，由 `ddns.interval_seconds` 生成 `OnUnitActiveSec` 周期；修改周期或 DDNS 配置后重新运行安装脚本（升级也会重新渲染），不会影响 Realm、入口域名或默认出口路由。更新失败只记录在该 oneshot 服务日志中，不会阻止 Realm 单元运行。
+- `uninstall.sh` 仅在 DDNS service/timer 带有 `# Managed-By: leikwan_tools` 标记时停用并删除；同名外部单元会被保留并报告。
+```bash
+systemctl status leikwan_tools-ddns.timer leikwan_tools-ddns.service
+leikwan_tools ddns inspect                   # 只读扫描并探测各线路最佳公网 IPv6
+sudo leikwan_tools ddns test --profile ct    # 校验配置、0600 凭据、IPv6 探测与只读远端查询
+sudo leikwan_tools ddns update               # 同步所有启用中的线路
+sudo leikwan_tools ddns update --profile cu  # 仅同步指定线路
+leikwan_tools ddns status                    # 查看当前选路与持久化状态
+```
+
+---
+
+## 九、测试复跑命令与验收边界
 
 首轮原始输出保留在 `test-results/`；第二轮修复回归测试原始输出统一写入 `test-results-r2/`：
 

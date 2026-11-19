@@ -32,3 +32,35 @@ source_ip = "10.8.0.146"
 gateway = "10.8.0.1"
 table = 102
 description = "CN2 GIA 出口线路"
+
+# ----------------------------------------------------------------------
+# 独立双线路 IPv6 DDNS（可选；默认未启用，与 [ingress] 和转发规则完全解耦）
+# 说明：第一版仅支持 IPv6 AAAA 记录（配置模型已预留 A 记录扩展）；
+#       明文 Token/Secret 请存放在 chmod 600 的独立凭据文件中，切勿写入主配置。
+# ----------------------------------------------------------------------
+# [ddns]
+# enabled = true
+# interval_seconds = 120
+# verify_interval_seconds = 600
+# probe_target = "2400:3200::1"
+# probe_timeout_seconds = 1
+#
+# [ddns.ct]
+# enabled = true
+# isp = "ct"
+# interface = "eth0"
+# provider = "cloudflare"        # cloudflare | dnspod | alidns | webhook
+# record_type = "AAAA"
+# zone = "example.com"
+# host = "ct"
+# credential_file = "/etc/leikwan_tools/secrets/ddns-ct.env"
+#
+# [ddns.cu]
+# enabled = true
+# isp = "cu"
+# interface = "eth1"
+# provider = "cloudflare"
+# record_type = "AAAA"
+# zone = "example.com"
+# host = "cu"
+# credential_file = "/etc/leikwan_tools/secrets/ddns-cu.env"

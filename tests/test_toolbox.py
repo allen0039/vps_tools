@@ -322,7 +322,9 @@ class ToolboxTests(unittest.TestCase):
         result = subprocess.run(["bash", "-c", 'source "$1/install.sh"; prepare_sources; '
                                  'for f in "$1"/leikwan_tools/leikwan_tools/*.py '
                                  '"$1"/leikwan_tools/leikwan_tools/*.service; do '
-                                 'test -s "$STAGE/leikwan_tools/leikwan_tools/${f##*/}" || exit 9; done',
+                                 'test -s "$STAGE/leikwan_tools/leikwan_tools/${f##*/}" || exit 9; done; '
+                                 'for f in "$1"/leikwan_tools/systemd/*.service "$1"/leikwan_tools/systemd/*.timer; do '
+                                 'test -s "$STAGE/leikwan_tools/systemd/${f##*/}" || exit 9; done',
                                  "test", str(ROOT)], text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("本地", result.stdout)

@@ -22,6 +22,7 @@ usage() {
 说明:
   依据安装清单与规则归属记录执行加锁清理，只删除 leikwan_tools 自身创建的资源；
   共享目录中的无关文件、复用的 Realm、非托管同名服务、Toolkit、LeiKwanManager、v6-mng.sh、路由和防火墙均保持原样。
+  DDNS 定时器与服务同样按 # Managed-By: leikwan_tools 标记校验，外部同名单元不会被停用或删除。
 EOF
 }
 

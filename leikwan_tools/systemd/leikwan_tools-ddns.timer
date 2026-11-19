@@ -1,0 +1,12 @@
+# Managed-By: leikwan_tools
+[Unit]
+Description=Schedule leikwan_tools independent IPv6 DDNS updates
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=120s
+Persistent=true
+Unit=leikwan_tools-ddns.service
+
+[Install]
+WantedBy=timers.target

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import ipaddress
 from pathlib import Path
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from . import (
     DEFAULT_COORDINATED_LOCK_FILE,
@@ -22,6 +22,33 @@ RULE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$")
 LINE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}$")
 IFACE_NAME_RE = re.compile(r"^[a-zA-Z0-9._:-]{1,32}$")
 VALID_LOG_LEVELS = ("off", "error", "warn", "info", "debug", "trace")
+
+DEFAULT_DDNS_INTERVAL_SECONDS = 120
+DEFAULT_DDNS_VERIFY_INTERVAL_SECONDS = 600
+DEFAULT_DDNS_PROBE_TARGET = "2400:3200::1"
+DEFAULT_DDNS_PROBE_TIMEOUT_SECONDS = 1
+DEFAULT_DDNS_TTL = 600
+DEFAULT_DNSPOD_RECORD_LINE = "默认"
+VALID_DDNS_PROVIDERS = ("cloudflare", "dnspod", "alidns", "webhook")
+VALID_DDNS_ISPS = ("ct", "cu")
+KNOWN_DDNS_RECORD_TYPES = ("AAAA", "A")
+SUPPORTED_DDNS_RECORD_TYPES = ("AAAA",)
+VALID_CF_AUTH_MODES = ("", "token", "global_key")
+FORBIDDEN_DDNS_SECRET_KEYS = frozenset(
+    {
+        "token",
+        "api_token",
+        "api_key",
+        "global_api_key",
+        "secret",
+        "access_key_secret",
+        "login_token",
+        "webhook_url",
+        "url",
+        "password",
+    }
+)
+DDNS_PROFILE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}$")
 
 
 class ConfigError(ValueError):
@@ -70,6 +97,67 @@ def validate_non_negative_int(value: Any, field_name: str) -> int:
     return value
 
 
+def validate_bool(value: Any, field_name: str) -> bool:
+    """Validate strict boolean value."""
+    if not isinstance(value, bool):
+        raise ConfigError(f"{field_name} 必须是布尔值 (true/false)，当前为 {value!r}")
+    return value
+
+
+def validate_positive_int(value: Any, field_name: str) -> int:
+    """Validate positive integer >= 1 (rejecting bool)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ConfigError(f"{field_name} 必须是大于等于 1 的正整数，当前为 {value!r}")
+    return value
+
+
+def validate_ipv6(value: Any, field_name: str) -> str:
+    """Validate an explicit public/global IPv6 address (no scope ID, link-local, multicast, or IPv4-mapped)."""
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{field_name} 不能为空且必须是 IPv6 地址字符串")
+    raw = value.strip()
+    try:
+        addr = ipaddress.IPv6Address(raw)
+    except ipaddress.AddressValueError as exc:
+        raise ConfigError(f"{field_name} 不是合法的 IPv6 地址: {raw!r}") from exc
+    if (
+        addr.is_unspecified
+        or addr.is_multicast
+        or addr.is_link_local
+        or addr.is_loopback
+        or addr.scope_id
+        or addr.ipv4_mapped is not None
+    ):
+        raise ConfigError(f"{field_name} 必须是有效的公网 IPv6 地址: {raw!r}")
+    return str(addr)
+
+
+def normalize_ddns_fqdn(zone: str, host: str) -> str:
+    """Normalize (zone, host) into a canonical lowercase FQDN without trailing dot."""
+    clean_zone = zone.strip().rstrip(".").lower()
+    clean_host = host.strip().rstrip(".").lower()
+    if not clean_zone:
+        return clean_host
+    if clean_host in ("", "@", clean_zone):
+        return clean_zone
+    if clean_host.endswith(f".{clean_zone}"):
+        return clean_host
+    return f"{clean_host}.{clean_zone}"
+
+
+def normalize_ddns_subdomain(zone: str, host: str) -> str:
+    """Normalize (zone, host) into a relative subdomain ('@' for zone apex)."""
+    clean_zone = zone.strip().rstrip(".").lower()
+    clean_host = host.strip().rstrip(".").lower()
+    if clean_host in ("", "@", clean_zone):
+        return "@"
+    suffix = f".{clean_zone}"
+    if clean_zone and clean_host.endswith(suffix):
+        rel = clean_host[: -len(suffix)]
+        return rel or "@"
+    return clean_host
+
+
 def validate_table_id(value: Any, field_name: str) -> int:
     """Validate Linux IPv4 routing table ID."""
     if isinstance(value, bool) or not isinstance(value, int):
@@ -113,6 +201,48 @@ class LineConfig:
 
 
 @dataclass(frozen=True)
+class DdnsProfileConfig:
+    """Single independent ISP IPv6 DDNS profile bound to a specific network interface."""
+
+    name: str
+    enabled: bool
+    isp: str
+    interface: str
+    provider: str
+    record_type: str = "AAAA"
+    zone: str = ""
+    host: str = ""
+    credential_file: str = ""
+    proxied: bool = False
+    ttl: int = DEFAULT_DDNS_TTL
+    record_line: str = DEFAULT_DNSPOD_RECORD_LINE
+    auth_mode: str = ""
+    probe_target: Optional[str] = None
+    probe_timeout_seconds: Optional[int] = None
+    verify_interval_seconds: Optional[int] = None
+
+    @property
+    def fqdn(self) -> str:
+        return normalize_ddns_fqdn(self.zone, self.host) if self.zone else ""
+
+    @property
+    def subdomain(self) -> str:
+        return normalize_ddns_subdomain(self.zone, self.host) if self.zone else ""
+
+
+@dataclass(frozen=True)
+class DdnsSettings:
+    """Independent dual-ISP IPv6 DDNS subsystem settings."""
+
+    enabled: bool = False
+    interval_seconds: int = DEFAULT_DDNS_INTERVAL_SECONDS
+    verify_interval_seconds: int = DEFAULT_DDNS_VERIFY_INTERVAL_SECONDS
+    probe_target: str = DEFAULT_DDNS_PROBE_TARGET
+    probe_timeout_seconds: int = DEFAULT_DDNS_PROBE_TIMEOUT_SECONDS
+    profiles: Dict[str, DdnsProfileConfig] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class GlobalConfig:
     """Top-level configuration loaded from config.toml."""
 
@@ -120,6 +250,7 @@ class GlobalConfig:
     ingress: IngressSettings
     lines: Dict[str, LineConfig]
     config_path: str = ""
+    ddns: DdnsSettings = field(default_factory=DdnsSettings)
 
 
 @dataclass(frozen=True)
@@ -167,6 +298,206 @@ def _require_str(mapping: Dict[str, Any], key: str, context: str, allow_empty: b
     if not stripped and not allow_empty:
         raise ConfigError(f"{context}.{key} 不能为空")
     return stripped
+
+
+def _parse_ddns_settings(raw: Any) -> DdnsSettings:
+    """Validate and parse the optional independent [ddns] subsystem section."""
+    if raw is None:
+        return DdnsSettings(enabled=False)
+    if not isinstance(raw, dict):
+        raise ConfigError("[ddns] 必须是配置表")
+
+    allowed_top_keys = {
+        "enabled",
+        "interval_seconds",
+        "verify_interval_seconds",
+        "probe_target",
+        "probe_timeout_seconds",
+    }
+    for key, val in raw.items():
+        if isinstance(val, dict):
+            continue
+        if key.lower() in FORBIDDEN_DDNS_SECRET_KEYS:
+            raise ConfigError(f"ddns.{key} 不允许在主配置文件中明文保存凭据，请改用凭据文件路径 credential_file (0600)")
+        if key not in allowed_top_keys:
+            raise ConfigError(f"未知的 [ddns] 配置项: {key!r}")
+
+    ddns_enabled = validate_bool(raw.get("enabled", True), "ddns.enabled")
+    interval_seconds = validate_positive_int(
+        raw.get("interval_seconds", DEFAULT_DDNS_INTERVAL_SECONDS),
+        "ddns.interval_seconds",
+    )
+    verify_interval_seconds = validate_non_negative_int(
+        raw.get("verify_interval_seconds", DEFAULT_DDNS_VERIFY_INTERVAL_SECONDS),
+        "ddns.verify_interval_seconds",
+    )
+    probe_target = validate_ipv6(
+        raw.get("probe_target", DEFAULT_DDNS_PROBE_TARGET),
+        "ddns.probe_target",
+    )
+    probe_timeout_seconds = validate_positive_int(
+        raw.get("probe_timeout_seconds", DEFAULT_DDNS_PROBE_TIMEOUT_SECONDS),
+        "ddns.probe_timeout_seconds",
+    )
+
+    profiles: Dict[str, DdnsProfileConfig] = {}
+    seen_records: Dict[tuple, str] = {}
+    allowed_profile_keys = {
+        "enabled",
+        "isp",
+        "interface",
+        "provider",
+        "record_type",
+        "zone",
+        "domain",
+        "host",
+        "credential_file",
+        "proxied",
+        "ttl",
+        "record_line",
+        "auth_mode",
+        "probe_target",
+        "probe_timeout_seconds",
+        "verify_interval_seconds",
+    }
+
+    for pname, prof_raw in raw.items():
+        if not isinstance(prof_raw, dict):
+            continue
+        if not DDNS_PROFILE_NAME_RE.match(pname):
+            raise ConfigError(f"DDNS 配置名称非法: {pname!r} (仅支持字母数字和 ._-) ")
+        ctx = f"ddns.{pname}"
+
+        for pkey in prof_raw:
+            if pkey.lower() in FORBIDDEN_DDNS_SECRET_KEYS:
+                raise ConfigError(
+                    f"{ctx}.{pkey} 不允许在主配置文件中明文保存凭据，请保存到 0600 权限的 {ctx}.credential_file 中"
+                )
+            if pkey not in allowed_profile_keys:
+                raise ConfigError(f"未知的 [{ctx}] 配置项: {pkey!r}")
+
+        p_enabled = validate_bool(prof_raw.get("enabled", True), f"{ctx}.enabled")
+
+        default_isp = pname.lower() if pname.lower() in VALID_DDNS_ISPS else ""
+        isp_raw = prof_raw.get("isp", default_isp)
+        if not isinstance(isp_raw, str) or not isp_raw.strip():
+            raise ConfigError(f"缺少必填字段 {ctx}.isp（必须为 ct 或 cu）")
+        isp = isp_raw.strip().lower()
+        if isp not in VALID_DDNS_ISPS:
+            raise ConfigError(f"{ctx}.isp 无效: {isp!r}（仅支持: {', '.join(VALID_DDNS_ISPS)}）")
+
+        iface = _require_str(prof_raw, "interface", ctx)
+        if not IFACE_NAME_RE.match(iface):
+            raise ConfigError(f"{ctx}.interface 网卡名非法: {iface!r}")
+
+        provider = _require_str(prof_raw, "provider", ctx).lower()
+        if provider not in VALID_DDNS_PROVIDERS:
+            raise ConfigError(
+                f"{ctx}.provider 无效: {provider!r}（支持: {', '.join(VALID_DDNS_PROVIDERS)}）"
+            )
+
+        record_type_raw = prof_raw.get("record_type", "AAAA")
+        if not isinstance(record_type_raw, str) or not record_type_raw.strip():
+            raise ConfigError(f"{ctx}.record_type 必须是非空字符串")
+        record_type = record_type_raw.strip().upper()
+        if record_type == "A":
+            raise ConfigError(
+                f"{ctx}.record_type = \"A\" 当前暂未实现：第一版 DDNS 仅支持 IPv6 AAAA 记录（配置模型已预留扩展）"
+            )
+        if record_type not in KNOWN_DDNS_RECORD_TYPES:
+            raise ConfigError(
+                f"{ctx}.record_type 无效: {record_type!r}（当前仅支持: {', '.join(SUPPORTED_DDNS_RECORD_TYPES)}）"
+            )
+
+        zone_val = _require_str(prof_raw, "zone", ctx, allow_empty=True).rstrip(".").lower()
+        domain_val = _require_str(prof_raw, "domain", ctx, allow_empty=True).rstrip(".").lower()
+        if zone_val and domain_val and zone_val != domain_val:
+            raise ConfigError(f"{ctx}.zone ({zone_val!r}) 与 {ctx}.domain ({domain_val!r}) 冲突，请只配置其中一个")
+        zone = zone_val or domain_val
+        if any(ch.isspace() or ch in "/\\" for ch in zone):
+            raise ConfigError(f"{ctx}.zone 域名格式非法: {zone!r}")
+
+        host = _require_str(prof_raw, "host", ctx, allow_empty=True).rstrip(".")
+        if any(ch.isspace() or ch in "/\\" for ch in host):
+            raise ConfigError(f"{ctx}.host 主机记录格式非法: {host!r}")
+
+        if provider != "webhook":
+            if not zone:
+                raise ConfigError(f"{ctx}.zone 不能为空（不得复用 [ingress].default_domain）")
+            if not host:
+                host = "@"
+
+        cred_raw = prof_raw.get("credential_file", "")
+        if not isinstance(cred_raw, str):
+            raise ConfigError(f"{ctx}.credential_file 必须是字符串")
+        credential_file = cred_raw.strip()
+        if p_enabled and not credential_file:
+            raise ConfigError(f"启用的 DDNS 配置 {ctx} 必须指定 credential_file（0600 凭据文件路径）")
+
+        proxied = validate_bool(prof_raw.get("proxied", False), f"{ctx}.proxied")
+        ttl = validate_positive_int(prof_raw.get("ttl", DEFAULT_DDNS_TTL), f"{ctx}.ttl")
+        record_line = _require_str(prof_raw, "record_line", ctx, allow_empty=True) or DEFAULT_DNSPOD_RECORD_LINE
+
+        auth_mode_raw = prof_raw.get("auth_mode", "")
+        if not isinstance(auth_mode_raw, str):
+            raise ConfigError(f"{ctx}.auth_mode 必须是字符串")
+        auth_mode = auth_mode_raw.strip().lower()
+        if auth_mode not in VALID_CF_AUTH_MODES:
+            raise ConfigError(f"{ctx}.auth_mode 无效: {auth_mode!r}（可选: token, global_key）")
+
+        p_probe_target: Optional[str] = None
+        if "probe_target" in prof_raw and str(prof_raw["probe_target"]).strip():
+            p_probe_target = validate_ipv6(prof_raw["probe_target"], f"{ctx}.probe_target")
+
+        p_probe_timeout: Optional[int] = None
+        if "probe_timeout_seconds" in prof_raw:
+            p_probe_timeout = validate_positive_int(
+                prof_raw["probe_timeout_seconds"], f"{ctx}.probe_timeout_seconds"
+            )
+
+        p_verify_interval: Optional[int] = None
+        if "verify_interval_seconds" in prof_raw:
+            p_verify_interval = validate_non_negative_int(
+                prof_raw["verify_interval_seconds"], f"{ctx}.verify_interval_seconds"
+            )
+
+        profile = DdnsProfileConfig(
+            name=pname,
+            enabled=p_enabled,
+            isp=isp,
+            interface=iface,
+            provider=provider,
+            record_type=record_type,
+            zone=zone,
+            host=host,
+            credential_file=credential_file,
+            proxied=proxied,
+            ttl=ttl,
+            record_line=record_line,
+            auth_mode=auth_mode,
+            probe_target=p_probe_target,
+            probe_timeout_seconds=p_probe_timeout,
+            verify_interval_seconds=p_verify_interval,
+        )
+        if profile.provider != "webhook":
+            dedup_key = (profile.fqdn, profile.record_type)
+            if dedup_key in seen_records:
+                other = seen_records[dedup_key]
+                raise ConfigError(
+                    f"DDNS 配置冲突: ddns.{other} 与 {ctx} 重复指向同一记录 "
+                    f"{profile.fqdn} ({profile.record_type})，请避免相互覆盖"
+                )
+            seen_records[dedup_key] = pname
+        profiles[pname] = profile
+
+    return DdnsSettings(
+        enabled=ddns_enabled,
+        interval_seconds=interval_seconds,
+        verify_interval_seconds=verify_interval_seconds,
+        probe_target=probe_target,
+        probe_timeout_seconds=probe_timeout_seconds,
+        profiles=profiles,
+    )
 
 
 def parse_global_config_dict(data: Dict[str, Any], config_path: str = "") -> GlobalConfig:
@@ -238,7 +569,8 @@ def parse_global_config_dict(data: Dict[str, Any], config_path: str = "") -> Glo
             description=desc,
         )
 
-    return GlobalConfig(tool=tool, ingress=ingress, lines=lines, config_path=config_path)
+    ddns = _parse_ddns_settings(data.get("ddns"))
+    return GlobalConfig(tool=tool, ingress=ingress, lines=lines, config_path=config_path, ddns=ddns)
 
 
 def load_global_config(path: str) -> GlobalConfig:
