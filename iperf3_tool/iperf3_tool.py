@@ -874,7 +874,7 @@ def install_signal_handlers():
             already_interrupted[0] = True
             raise Cancelled()
 
-    for number in (signal.SIGTERM, signal.SIGHUP):
+    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, interrupted)
 
 
