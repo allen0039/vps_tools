@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -40,6 +41,7 @@ from .ddns import (
     DdnsError,
     ProfileInspectResult,
     inspect_ddns,
+    inspect_ddns_profile,
     save_ddns_config,
     status_ddns,
     test_ddns_profile,
@@ -600,9 +602,40 @@ def _menu_forward(cfg: GlobalConfig, *, edit: bool) -> None:
     default_entry = cfg.ingress.default_domain
     if old:
         default_entry = old.listen_ip if old.direct_ipv6 else old.ingress_domain
-    entry = _menu_field("入口地址（默认官方域名；IPv6 直连请填本机公网 IPv6）", default_entry)
+        if old.ddns_profile in cfg.ddns.profiles:
+            default_entry = cfg.ddns.profiles[old.ddns_profile].fqdn or default_entry
+    entry = _menu_field("入口地址（映射域名、IPv6 DDNS 域名或本机公网 IPv6）", default_entry)
     direct = ":" in entry
     domain = "" if direct else _menu_domain(entry)
+    ddns_profile = ""
+    matches = [profile for profile in cfg.ddns.profiles.values() if domain and profile.fqdn.lower() == domain.rstrip(".").lower()]
+    if matches:
+        if len(matches) != 1:
+            raise ConfigError("多个 DDNS 配置对应此域名，请先消除歧义")
+        profile = matches[0]
+        if not cfg.ddns.enabled or not profile.enabled:
+            raise ConfigError(f"请先启用 DDNS 配置 {profile.name} 和全局 DDNS，再绑定自动跟随")
+        inspection = inspect_ddns_profile(cfg, profile)
+        if inspection.error or not inspection.selected_ip:
+            raise ConfigError(inspection.error or f"{profile.name} 未探测到可用的本机公网 IPv6")
+        entry, ddns_profile = inspection.selected_ip, profile.name
+        print(f"IPv6 直连：{domain} → {entry}；监听地址将自动跟随 DDNS 配置 {profile.name}。")
+        direct, domain = True, ""
+    elif domain and domain.rstrip(".").lower() not in (
+        DEFAULT_INGRESS_DOMAIN.lower(), cfg.ingress.default_domain.rstrip(".").lower(),
+    ) and _confirm(
+        "此域名是否用于本机 IPv6 DDNS 直连（y：解析 IPv6；N：IPv4 端口映射）"
+    ):
+        try:
+            records = socket.getaddrinfo(domain, None, socket.AF_INET6, socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            raise ConfigError(f"无法解析 {domain} 的 IPv6 地址，请检查 AAAA 记录：{exc}") from exc
+        addresses = {record[4][0] for record in records}
+        if len(addresses) != 1:
+            raise ConfigError(f"{domain} 未解析到唯一 IPv6 地址，请直接填写要监听的本机公网 IPv6")
+        entry = validate_ipv6(addresses.pop(), "forward.listen_ip")
+        print(f"IPv6 直连：{domain} → {entry}；规则绑定当前地址，AAAA 变化后需重新修改转发。")
+        direct, domain = True, ""
     public_port = _menu_port("客户端连接的公网端口（外部端口）", old.public_port if old else "")
     listen_ip, listen_port = entry, public_port
     if not direct:
@@ -635,7 +668,7 @@ def _menu_forward(cfg: GlobalConfig, *, edit: bool) -> None:
         return
     rule = parse_rule_config_dict({
         "rule": {"name": name, "line": line},
-        "ingress": {"domain": domain, "public_port": public_port},
+        "ingress": {"domain": domain, "public_port": public_port, "ddns_profile": ddns_profile},
         "forward": {
             "listen_ip": listen_ip, "listen_port": listen_port, "remote_ip": remote_ip, "remote_port": remote_port,
         },
@@ -1151,6 +1184,43 @@ def _menu_ddns_edit(cfg: GlobalConfig, profile: Optional[DdnsProfileConfig] = No
             print(f"首次同步未完成：{exc}。配置已保存，定时器运行时将自动重试。", file=sys.stderr)
 
 
+def _menu_ddns_toggle(cfg: GlobalConfig) -> None:
+    global_action = "暂停" if cfg.ddns.enabled else "启用"
+    profiles = cfg.ddns.profiles
+    labels = [f"{global_action}全局 DDNS"]
+    labels.extend(
+        f"{'暂停' if profile.enabled else '启用'} {profile.name} | {profile.fqdn or '(Webhook)'}"
+        for profile in profiles.values()
+    )
+    name = _menu_pick(["*", *profiles], "选择要启用或暂停的 DDNS", labels=labels)
+    if not name:
+        return
+    if name == "*":
+        if not _confirm(f"{global_action}全局 DDNS"):
+            return
+        save_ddns_config(cfg, enabled=not cfg.ddns.enabled)
+        print(f"全局 DDNS 已{global_action}。")
+        if not cfg.ddns.enabled and any(profile.enabled for profile in profiles.values()):
+            print("正在立即同步已启用的 DDNS 配置。")
+            _print_ddns_update(update_ddns(load_global_config(cfg.config_path), force=True))
+        return
+
+    profile = profiles[name]
+    target_enabled = not profile.enabled
+    action = "启用" if target_enabled else "暂停"
+    enable_global = target_enabled and not cfg.ddns.enabled
+    prompt = f"{action} DDNS 配置 {name}"
+    if enable_global:
+        prompt += "并开启全局 DDNS（其他已启用配置也将恢复定时同步）"
+    if not _confirm(prompt):
+        return
+    save_ddns_config(cfg, profile_name=name, changes={"enabled": target_enabled}, enabled=True if enable_global else None)
+    print(f"DDNS 配置 {name} 已{action}。")
+    if target_enabled:
+        print("正在立即同步该 DDNS 配置。")
+        _print_ddns_update(update_ddns(load_global_config(cfg.config_path), name, force=True))
+
+
 def _menu_ddns_group(config_path: str) -> None:
     while True:
         print(f"\nleikwan_tools v{__version__} > IPv6 DDNS 域名管理")
@@ -1160,14 +1230,13 @@ def _menu_ddns_group(config_path: str) -> None:
         print("  4. 探测网卡 IPv6")
         print("  5. 测试配置与凭据")
         print("  6. 立即同步 AAAA 记录")
-        print("  7. 暂停 / 启用单条配置")
-        print("  8. 关闭 / 开启全局 DDNS")
-        print("  9. 删除 DDNS 配置")
+        print("  7. 启用 / 暂停 DDNS")
+        print("  8. 删除 DDNS 配置")
         print("  0. 返回主菜单")
         selected = input("请选择：").strip()
         if selected == "0":
             return
-        if len(selected) != 1 or selected not in "123456789":
+        if len(selected) != 1 or selected not in "12345678":
             print("无效选项，请重新输入。")
             continue
         try:
@@ -1178,14 +1247,8 @@ def _menu_ddns_group(config_path: str) -> None:
             if selected == "2":
                 _menu_ddns_edit(cfg)
                 continue
-            if selected == "8":
-                action = "关闭" if cfg.ddns.enabled else "开启"
-                if _confirm(f"{action}全局 DDNS"):
-                    save_ddns_config(cfg, enabled=not cfg.ddns.enabled)
-                    print(f"全局 DDNS 已{action}。")
-                    if not cfg.ddns.enabled and any(item.enabled for item in cfg.ddns.profiles.values()):
-                        print("正在立即同步已启用的 DDNS 配置。")
-                        _print_ddns_update(update_ddns(load_global_config(config_path), force=True))
+            if selected == "7":
+                _menu_ddns_toggle(cfg)
                 continue
             name = _menu_ddns_profile(cfg, allow_all=selected in ("4", "6"))
             if not name:
@@ -1201,14 +1264,7 @@ def _menu_ddns_group(config_path: str) -> None:
                     _menu_ddns_edit(cfg, profile)
                 elif selected == "5":
                     _print_ddns_test(test_ddns_profile(cfg, name))
-                elif selected == "7":
-                    action = "暂停" if profile.enabled else "启用"
-                    if _confirm(f"{action} DDNS 配置 {name}"):
-                        save_ddns_config(cfg, profile_name=name, changes={"enabled": not profile.enabled})
-                        print(f"DDNS 配置 {name} 已{action}。")
-                        if not profile.enabled and not cfg.ddns.enabled:
-                            print("请通过选项 8 开启全局 DDNS。")
-                elif selected == "9":
+                elif selected == "8":
                     if _confirm(f"删除本地配置 {name}（保留远端记录和凭据文件）"):
                         save_ddns_config(cfg, profile_name=name)
                         print(f"DDNS 配置 {name} 已删除。")

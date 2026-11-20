@@ -6,7 +6,7 @@ import hashlib
 import io
 import json
 from contextlib import redirect_stdout
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 import os
 import subprocess
@@ -1346,6 +1346,31 @@ class TestSelfUpdate(unittest.TestCase):
 
 
 class TestDdnsSubsystem(unittest.TestCase):
+    def test_rebind_only_changed_enabled_rules_for_profile(self):
+        from leikwan_tools.manager import reconcile_ddns_rules_locked
+
+        rule = parse_rule_config_dict({
+            "rule": {"name": "edge", "line": "9929"},
+            "ingress": {"public_port": 51012, "ddns_profile": "ct"},
+            "forward": {"listen_ip": "240e::1", "listen_port": 51012,
+                        "remote_ip": "192.0.2.1", "remote_port": 443},
+        })
+        self.assertEqual(parse_rule_config_dict(loads_toml(render_rule_toml(rule))), rule)
+        rules = [rule, replace(rule, ddns_profile="cu"), replace(rule, ddns_profile=""),
+                 replace(rule, listen_ip="240e::2"), replace(rule, name="disabled")]
+        cfg = parse_global_config_dict(loads_toml(self.base_cfg_toml))
+        applied_line = cfg.lines[rule.line]
+        pending_line = replace(applied_line, gateway="10.7.0.2")
+        cfg = replace(cfg, lines={**cfg.lines, rule.line: pending_line})
+        with (patch("leikwan_tools.manager.list_managed_rules", return_value=rules),
+              patch("leikwan_tools.manager.systemd_is_enabled", side_effect=[True, False]),
+              patch("leikwan_tools.manager._load_state_json", return_value={"applied_line": asdict(applied_line)}),
+              patch("leikwan_tools.manager._apply_with_lock") as apply):
+            self.assertEqual(reconcile_ddns_rules_locked(cfg, "ct", "240e::2"), (["edge"], []))
+            apply.assert_called_once()
+            self.assertEqual(apply.call_args.args[1], replace(rule, listen_ip="240e::2"))
+            self.assertEqual(apply.call_args.args[0].lines[rule.line], applied_line)
+
     def setUp(self) -> None:
         self.base_cfg_toml = (REPO_ROOT / "examples" / "config.example.toml").read_text(encoding="utf-8")
 
@@ -1424,7 +1449,7 @@ class TestDdnsSubsystem(unittest.TestCase):
             self.assertIn("配置已保存", error.getvalue())
             self.assertIn("定时器运行时将自动重试", error.getvalue())
 
-    def test_enabling_existing_global_ddns_syncs_enabled_profiles(self) -> None:
+    def test_ddns_toggle_menu_controls_global_and_individual_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             config = base / "config.toml"
@@ -1438,15 +1463,32 @@ class TestDdnsSubsystem(unittest.TestCase):
                 f'zone = "example.net"\nhost = "edge"\ncredential_file = "{cred}"\n'
             )
             config.write_text(text, encoding="utf-8")
-            with (
-                patch("builtins.input", side_effect=["7", "8", "y", "0", "0"]),
-                patch("leikwan_tools.cli.update_ddns", return_value={"results": []}) as sync,
-                redirect_stdout(io.StringIO()),
-            ):
-                self.assertEqual(main(["--config", str(config), "menu"]), 0)
-            saved = load_global_config(str(config))
-            self.assertTrue(saved.ddns.enabled)
-            sync.assert_called_once_with(saved, force=True)
+            steps = [
+                ("1", "y", True, True, ()),
+                ("1", "y", False, True, None),
+                ("2", "y", False, False, None),
+                ("2", "n", False, False, None),
+                ("2", "y", True, True, ("ct",)),
+            ]
+            for choice, confirm, global_enabled, profile_enabled, sync_args in steps:
+                with self.subTest(choice=choice, confirm=confirm, enabled=profile_enabled):
+                    answers = ["7", "7", choice, confirm, "0", "0"]
+                    with (
+                        patch("builtins.input", side_effect=answers) as menu_input,
+                        patch("leikwan_tools.cli.update_ddns", return_value={"results": []}) as sync,
+                        redirect_stdout(io.StringIO()) as output,
+                    ):
+                        self.assertEqual(main(["--config", str(config), "menu"]), 0)
+                    saved = load_global_config(str(config))
+                    self.assertIs(saved.ddns.enabled, global_enabled)
+                    self.assertIs(saved.ddns.profiles["ct"].enabled, profile_enabled)
+                    self.assertIn(" ct | edge.example.net", output.getvalue())
+                    if sync_args is None:
+                        sync.assert_not_called()
+                    else:
+                        sync.assert_called_once_with(saved, *sync_args, force=True)
+                    if sync_args == ("ct",):
+                        self.assertIn("并开启全局 DDNS", menu_input.call_args_list[3].args[0])
 
     def test_menu_save_syncs_record_and_persists_result(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1522,7 +1564,7 @@ class TestDdnsSubsystem(unittest.TestCase):
             self.assertEqual(sync.call_args_list[2].args[1], None)
             self.assertTrue(all(call.kwargs["force"] for call in sync.call_args_list))
 
-            with patch("builtins.input", side_effect=["7", "9", "ct.edge", "y", "0", "0"]), redirect_stdout(io.StringIO()):
+            with patch("builtins.input", side_effect=["7", "8", "ct.edge", "y", "0", "0"]), redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["--config", str(config), "menu"]), 0)
             remaining = load_global_config(str(config))
             self.assertEqual(remaining.ddns.profiles, {})
@@ -1589,8 +1631,12 @@ class TestDdnsSubsystem(unittest.TestCase):
                     "updated", "record", "240e::5", [], "test sync"
                 )) as sync,
             ):
-                self.assertEqual(update_ddns(before)["results"][0]["action"], "updated")
-                self.assertEqual(update_ddns(before)["results"][0]["action"], "skipped_cached")
+                with patch("leikwan_tools.ddns.reconcile_ddns_rules_locked", side_effect=[([], ["edge: failed"]), (["edge"], [])]) as reconcile:
+                    self.assertFalse(update_ddns(before)["ok"])
+                    retry = update_ddns(before)
+                    self.assertTrue(retry["ok"])
+                    self.assertEqual(retry["results"][0]["action"], "skipped_cached")
+                    self.assertEqual(reconcile.call_count, 2)
                 save_ddns_config(before, profile_name="ct", changes={"host": "new"})
                 with self.assertRaisesRegex(ConfigError, "DDNS 探测期间配置已变化"):
                     update_ddns(before)

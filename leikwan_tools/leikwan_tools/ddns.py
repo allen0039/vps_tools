@@ -29,6 +29,7 @@ from .config import (
     parse_global_config_dict,
 )
 from .ownership import ensure_safe_subpath, resolve_lock_file
+from .manager import reconcile_ddns_rules_locked
 from .system import FileLock, SystemErrorBase, atomic_write_text, parse_ip_addr_ipv6, run_cmd
 from .toml_compat import TomlParseError, dump_toml_string, loads_toml, without_toml_table
 
@@ -1436,6 +1437,7 @@ def update_ddns(
             latest = load_global_config(global_cfg.config_path)
             if latest.ddns != global_cfg.ddns or latest.tool != global_cfg.tool:
                 raise ConfigError("DDNS 探测期间配置已变化，请重新运行同步")
+            global_cfg = latest
         for prof in targets:
             state_path = _ddns_state_path(global_cfg, prof.name)
             prev = _load_ddns_state(state_path)
@@ -1610,6 +1612,17 @@ def update_ddns(
                         "error": safe_err,
                     }
                 )
+
+        for result in results:
+            if result["error"] or not result["selected_ip"]:
+                continue
+            updated, errors = reconcile_ddns_rules_locked(global_cfg, result["profile"], result["selected_ip"])
+            if updated:
+                result["detail"] += "；已更新转发：" + ", ".join(updated)
+            if errors:
+                any_error = True
+                result["error"] = "；".join(errors)
+                result["detail"] += "；转发更新失败，下次同步重试：" + result["error"]
 
     return {
         "ddns_enabled": True,

@@ -325,6 +325,7 @@ class RuleConfig:
     tcp_keepalive: int = 15
     tcp_keepalive_probe: int = 3
     source_path: str = field(default="", compare=False)
+    ddns_profile: str = ""
 
     @property
     def direct_ipv6(self) -> bool:
@@ -694,6 +695,9 @@ def parse_rule_config_dict(
     if not isinstance(ingress_sec, dict):
         raise ConfigError("[ingress] 必须是配置表")
     ingress_domain = _require_str(ingress_sec, "domain", "ingress", allow_empty=True)
+    ddns_profile = _require_str(ingress_sec, "ddns_profile", "ingress", allow_empty=True)
+    if ddns_profile and not DDNS_PROFILE_NAME_RE.fullmatch(ddns_profile):
+        raise ConfigError("ingress.ddns_profile 不是有效的 DDNS 配置名")
     ingress_fixed_ip = validate_ipv4(
         ingress_sec.get("fixed_ip", ""), "ingress.fixed_ip", allow_empty=True
     )
@@ -718,6 +722,8 @@ def parse_rule_config_dict(
         listen_ip = str(listen_address)
     else:
         listen_ip = validate_ipv4(listen_ip, "forward.listen_ip")
+        if ddns_profile:
+            raise ConfigError("只有 IPv6 直连入口可以跟随 DDNS")
         ingress_domain = ingress_domain or default_domain
     listen_port = validate_port(forward_sec.get("listen_port"), "forward.listen_port")
     if ":" in listen_ip and listen_port != public_port:
@@ -752,6 +758,7 @@ def parse_rule_config_dict(
         description=description,
         ingress_domain=ingress_domain,
         ingress_fixed_ip=ingress_fixed_ip,
+        ddns_profile=ddns_profile,
         log_level=log_level,
         tcp_timeout=tcp_timeout,
         tcp_keepalive=tcp_keepalive,
@@ -787,6 +794,7 @@ def render_rule_toml(rule: RuleConfig) -> str:
         "[ingress]",
         f"domain = {dump_toml_string(rule.ingress_domain)}",
         f"fixed_ip = {dump_toml_string(rule.ingress_fixed_ip)}",
+        *([f"ddns_profile = {dump_toml_string(rule.ddns_profile)}"] if rule.ddns_profile else []),
         f"public_port = {rule.public_port}",
         "",
         "[forward]",

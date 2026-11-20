@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -719,7 +720,34 @@ def apply_rule(
 ) -> Dict[str, Any]:
     """Deploy or update a forwarding rule idempotently with staged commits and fault-tolerant rollback."""
     lock_file = resolve_lock_file(global_cfg=global_cfg)
-    with FileLock(lock_file, timeout=lock_timeout):
+    return _apply_with_lock(global_cfg, rule_file, FileLock(lock_file, timeout=lock_timeout),
+                            allow_non_dns, dns_server, expected_rule, create_only)
+
+
+def reconcile_ddns_rules_locked(global_cfg: GlobalConfig, profile: str, address: str) -> Tuple[List[str], List[str]]:
+    """Rebind opted-in rules while the caller owns the shared mutation lock."""
+    updated, errors = [], []
+    for rule in list_managed_rules(global_cfg):
+        if rule.ddns_profile != profile or rule.listen_ip == address:
+            continue
+        try:
+            unit = unit_name_for_rule(global_cfg.tool.systemd_unit_template, rule.name)
+            if not systemd_is_enabled(unit):
+                continue
+            state = _load_state_json(_rule_paths(global_cfg, rule.name)["state_json"])
+            if not state.get("applied_line"):
+                raise ApplyError("缺少已应用线路记录，请手动重新应用规则")
+            line = _applied_line(global_cfg, rule, state)
+            bound_cfg = replace(global_cfg, lines={**global_cfg.lines, rule.line: line})
+            _apply_with_lock(bound_cfg, replace(rule, listen_ip=address), nullcontext(), expected_rule=rule)
+            updated.append(rule.name)
+        except (RuntimeError, ValueError, OSError) as exc:
+            errors.append(f"{rule.name}: {exc}")
+    return updated, errors
+
+
+def _apply_with_lock(global_cfg, rule_file, lock, allow_non_dns=False, dns_server="", expected_rule=None, create_only=False):
+    with lock:
         _assert_live_install_intact(global_cfg)
         rule = rule_file if isinstance(rule_file, RuleConfig) else load_rule_config(
             rule_file, default_domain=global_cfg.ingress.default_domain
