@@ -1,288 +1,167 @@
 # VPS Tools
 
-面向 Linux VPS 的中文运维工具箱，把 SSH、防火墙、Fail2ban、DNS、Swap、TCP / BBR 调优、妙妙屋 Agent 重启、利群助手、网址检测、iperf3 测速、TCP 参数导入和“Ipv4/ipv6管理工具”整合到一个菜单中。安装后输入 `vpstools`，即可选择需要的功能；各工具也保留独立命令，方便单独使用。
+面向 Linux VPS 的中文运维工具箱。统一安装后运行 `vpstools` 打开菜单，也可以单独调用各工具。项目提供 GitHub 和 Gitee 两个安装来源。
 
-[GitHub 仓库](https://github.com/allen0039/vps_tools) · [Gitee 镜像](https://gitee.com/allen0039/vps_tools)
+- GitHub：<https://github.com/allen0039/vps_tools>
+- Gitee：<https://gitee.com/allen0039/vps_tools>
 
-## 工具一览
+## 功能
 
-| 功能 | 能做什么 | 独立命令 | 详细文档 |
-| --- | --- | --- | --- |
-| SSH 管理 | 切换 SSH 单端口、查看状态、从历史备份恢复配置 | `allentool` / `safe-ssh-port` | [SSH 使用指南](safe-ssh-port/README.md) |
-| SSH 密钥登录 | 准确识别认证状态、导入或生成密钥、两阶段切换和定时回退 | `sshkeytool` | [密钥登录指南](ssh-key/README.md) |
-| SSH 密码登录管理 | 临时或永久开放指定用户密码；一键禁止系统所有 SSH 密码、仅保留密钥 | `sshpasswdtool` | [使用指南](ssh-password/README.md) |
-| 防火墙管理 | 管理 TCP/UDP 端口、保护 SSH、配置 IP 与国家黑白名单 | `allentool` 内的防火墙菜单 | [防火墙说明](safe-ssh-port/README.md#交互式防火墙管理) |
-| Fail2ban 防护 | 配置 SSH 防暴力破解、白名单和解封，与 iptables 防火墙联动 | `f2btool` | [Fail2ban 使用指南](Fail2ban/README.md) |
-| DNS 切换 | 切换公共或自定义 IPv4/IPv6 DNS，恢复首次安装前的配置 | `dnstool` | [DNS 使用指南](dns_tool/README.md) |
-| Swap 管理 | 创建或调整 `/swapfile`，支持 Btrfs、ext4/XFS，检查实际启用状态 | `swaptool` | [Swap 使用指南](swap_tool/README.md) |
-| TCP / BBR 调优 | 测试 TCP 参数、管理出口队列、应用历史参数与回滚 | `bbrtcp` / `bbr-tune` | [BBR 使用指南](bbr-tune/README.md) |
-| SOCKS5 / TLS 代理 | 部署认证代理、TLS 隧道，管理凭据、端口与服务 | `socks5`（代理部署后） | [SOCKS5 使用指南](socks5/README.md) |
-| 妙妙屋 Agent 重启 | 重启并验证 `mmw-agent.service`，展示 PID、内存与 TCP 连接变化 | `restart-mmw-agent` | [Agent 使用指南](restart-mmw-agent/README.md) |
-| 利群助手 | 基于 Realm 的 IPv4 TCP 转发部署、规则管理与连通性诊断 | `leikwan_tools` | [利群助手指南](leikwan_tools/README.md) |
-| 网址与网络检测 | 解析域名 IP，检测 Ping 延迟、丢包、TCP 端口和 HTTP / HTTPS | `netcheck` | [检测使用指南](web_tool/README.md) |
-| iperf3 测速 | 本地与 VPS 双向测速，1 / 4 / 8 连接、随机端口与自动清理 | `iperfprobe` | [测速使用指南](iperf3_tool/README.md) |
-| TCP 参数导入 | 粘贴或导入 sysctl 参数，预检查、备份、应用与回滚 | `tcptool` | [TCP 使用指南](tcp-tool/README.md) |
-| Ipv4/ipv6管理工具 | 设置 IPv4/IPv6 优先级、临时禁用或备份后彻底关闭 IPv6、恢复配置 | `ipv6tool` | [使用指南](system_tool/README.md) |
+| 分类 | 功能 | 入口 |
+| --- | --- | --- |
+| SSH 与访问防护 | SSH 端口管理、配置恢复、防火墙、IP 规则与 Fail2ban 防护 | `allentool`、`f2btool` |
+| SSH 登录 | SSH 密钥管理、连接确认、临时或永久密码登录管理 | `sshkeytool`、`sshpasswdtool` |
+| 网络基础 | DNS 切换与恢复、IPv4/IPv6 优先级和状态管理 | `dnstool`、`ipv6tool` |
+| 系统资源 | Swap 创建、调整与状态检查 | `swaptool` |
+| 网络调优 | TCP / BBR 调优、队列管理、参数备份回滚、TCP 参数导入 | `bbrtcp`、`tcptool` |
+| 网络检测 | 域名解析、Ping、TCP 端口和 HTTP / HTTPS 检查 | `netcheck` |
+| 带宽测试 | 本机与 VPS 之间的 iperf3 测速和结果管理 | `iperfprobe` |
+| 代理与转发 | SOCKS5 / TLS 代理管理、基于 Realm 的 IPv4 TCP 转发 | `socks5`、`leikwan_tools` |
+| 服务管理 | 检查并重启 `mmw-agent.service` | `restart-mmw-agent` |
 
-“Ipv4/ipv6管理工具”已接入统一安装器和菜单；安装仅部署程序，网络与引导配置在子工具中按需修改。
+统一安装部署程序和工具入口、备份初始 DNS 配置，并注册利群助手的 systemd 单元；未配置的 DDNS 任务会自动跳过。修改 SSH、DNS、网络参数、IPv6、代理或转发规则等操作，需进入对应工具后按提示执行。
 
-## 快速安装
+## 一键部署
 
-在 **Linux VPS 终端**执行，任选一个下载渠道。需要 Bash、root 或 sudo 权限、Python 3.8+，以及 `flock`（通常由 `util-linux` 提供）；下列命令使用 `curl` 下载。网址检测的 Ping 功能需要系统 `ping`，`dig` 仅用于可选 CNAME 查询。
+在运行 systemd 的 Linux VPS 上执行以下任一命令。安装需要 root 或 sudo、Bash、Python 3.8+ 和 `flock`；下面的下载示例使用 `curl`。
 
-**GitHub：**
+**从 GitHub 安装：**
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/install.sh' -o /tmp/vpstools-install.sh && sudo bash /tmp/vpstools-install.sh --channel github
+curl -fsSL 'https://raw.githubusercontent.com/allen0039/vps_tools/main/install.sh' -o /tmp/vpstools-install.sh &&
+  sudo bash /tmp/vpstools-install.sh --channel github
 ```
 
-**Gitee：**
+**从 Gitee 安装：**
 
 ```bash
-curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/install.sh' -o /tmp/vpstools-install.sh && sudo bash /tmp/vpstools-install.sh --channel gitee
+curl -fsSL 'https://gitee.com/allen0039/vps_tools/raw/main/install.sh' -o /tmp/vpstools-install.sh &&
+  sudo bash /tmp/vpstools-install.sh --channel gitee
 ```
 
-安装完成后打开工具箱：
+安装完成后启动菜单：
 
 ```bash
 vpstools
 ```
 
-已登录 root 的用户可以省略 `sudo`。建议先下载并检查安装器，再运行安装步骤。
-
-只需 SSH 的 Fail2ban 防护时，可以使用 [Fail2ban 一键部署脚本](Fail2ban/README.md#一键部署)，安装并配置 Fail2ban 与配套防火墙工具，无需安装整个工具箱。
-
-统一安装会部署全部独立工具，并由 DNS 工具保存初始配置备份；安装阶段不会切换 SSH 端口或认证方式、生成密钥、切换 DNS、创建 Swap、应用 TCP 调优参数、重启 Agent、修改 IPv6 / GRUB 配置或创建 SOCKS5 服务，也不会启用利群助手的示例转发规则。利群助手安装会保留已有 Realm，并在未找到 Realm 时跳过自动下载，后续可按其文档单独执行 `leikwan_tools install-realm`。BBR 安装器可能通过系统包管理器补齐基础依赖；iperf3 测速启动时会自动检测并安装缺失的 iperf3，Debian/Ubuntu 会选择不启动常驻服务。Fail2ban 系统包和防护规则在子菜单中按需安装与启用。SSH 与 DNS 工具升级时可能要求确认覆盖，请在交互终端中执行。
-
-也可以克隆仓库后安装本地文件：
+已登录 root 的用户可去掉 `sudo`。也可以先克隆仓库，再从本地运行安装器：
 
 ```bash
 git clone https://github.com/allen0039/vps_tools.git
 cd vps_tools
 sudo bash install.sh
-vpstools
 ```
 
-从完整本地仓库运行时，安装器使用本地文件；`--channel` 只决定需要远程下载时的来源。
+本地仓库安装会使用检出目录中的脚本。远程安装会固定到所选渠道 `main` 分支的同一个提交，下载并检查所需文件后再部署。
 
-## 中文菜单
+## 菜单与常用命令
 
-```text
-VPS Tools 工具箱
-  1. 系统管理
-  2. 网络检测与测速
-  3. 网络调优
-  4. 服务管理
-
-  5. 查看工具安装状态
-  6. 安装 / 更新工具箱
-  0. 退出
-```
-
-系统管理按用途分组，标题只帮助阅读，输入数字即可打开对应工具：
-
-```text
-VPS Tools > 系统管理
-
-  SSH 与访问防护
-    1. SSH 端口与配置恢复
-    2. SSH 密钥登录管理
-    3. SSH 密码登录管理
-    4. 防火墙管理
-    5. Fail2ban 防暴力破解
-
-  网络基础配置
-    6. DNS 设置与恢复
-    7. Ipv4/ipv6管理工具
-
-  系统资源
-    8. Swap 管理
-
-    0. 返回主菜单
-```
-
-其他分类的入口：
-
-| 分类 | 第 1 项 | 第 2 项 | 第 3 项 |
-| --- | --- | --- | --- |
-| 网络检测与测速 | 网址与网络检测 | iperf3 带宽测速 | — |
-| 网络调优 | TCP / BBR 调优 | TCP 参数导入与回滚 | — |
-| 服务管理 | 妙妙屋 Agent 重启 | SOCKS5 / TLS 代理管理 | 利群助手 |
-
-退出子工具后回到所属分类，分类页选择 `0` 返回主菜单，首页选择 `0` 退出。分类页展示当前位置；未安装的工具标注 `[未安装]`，选择后提示返回首页安装，不自动启动安装。Agent 重启仍需单独确认，直接回车默认取消。其他系统修改遵循各工具自己的权限检查、备份及确认流程。
-
-菜单需要交互终端；脚本或自动化场景可使用下面的命令模式。分类调整不改变 `vpstools run` 的工具名称、参数、退出码和独立命令。
-
-工具箱主菜单、分类菜单、Agent 重启确认和下载渠道选择启用 Bash Readline 行编辑，兼容发送 BS（`^H`）或 DEL（`^?`）的退格键，输入错误时可直接按退格键修改，无需配合 Ctrl。
-
-## 常用命令
-
-查看安装状态、版本和帮助：
+工具箱首页提供系统管理、网络检测与测速、网络调优、服务管理、安装状态查询和更新入口。菜单需要交互终端；自动化或远程命令可用命令模式：
 
 ```bash
 vpstools list
 vpstools --version
 vpstools --help
-```
 
-通过统一入口调用工具：
-
-```bash
-# SSH 与防火墙菜单
+# 打开指定工具
 vpstools run ssh interactive
 vpstools run firewall
-
-# SSH 密钥状态与管理菜单
-sudo vpstools run sshkey status
-vpstools run sshkey
-
-# SSH 临时密码：30 分钟或服务器重启后恢复
-sudo vpstools run sshpass enable --minutes 30 --yes
-sudo vpstools run sshpass close --yes
-# SSH 永久密码：重启后保留，直到手动关闭
-sudo vpstools run sshpass enable --permanent --yes
-sudo vpstools run sshpass close --yes
-# 永久禁止系统所有 SSH 密码登录；先确认密钥新连接可用
-sudo vpstools run sshpass disable
-
-# SSH 防暴力破解菜单
 vpstools run fail2ban
-
-# 查看 IPv6 状态（修改配置需在子工具中确认）
-sudo vpstools run ipv6 status
-
-# TCP 参数检查、应用和回滚
-vpstools run tcp check params.conf
-sudo vpstools run tcp apply params.conf
-sudo vpstools run tcp rollback
-
-# 查看 DNS、Swap 和 BBR 状态
-sudo vpstools run dns status
+vpstools run dns status
 vpstools run swap status
 vpstools run bbr status
-
-# SOCKS5 部署与管理菜单（统一安装仅部署入口，不创建代理服务）
-vpstools run socks5
-sudo vpstools run socks5 status
-
-# 利群助手（统一安装会部署程序，但不启用示例转发规则）
-sudo vpstools run leikwan
-sudo vpstools run leikwan_tools status
-
-# 查看 Agent 帮助，不执行重启
-vpstools run agent --help
-
-# 轻量检测，不需要 root
 vpstools run netcheck check example.com
-vpstools run netcheck dns example.com --json
-
-# 配置测速，随后在本地执行屏幕显示的命令
 vpstools run iperf --host 203.0.113.10 --streams 1,4,8 --direction both
 ```
 
-`vpstools run <工具> [参数]` 会把参数传给对应工具，并返回其退出码。工具名称为 `ssh`、`sshkey`、`sshpass`、`firewall`、`dns`、`swap`、`bbr`、`agent`、`netcheck`、`iperf`、`fail2ban`、`ipv6`、`tcp`（别名 `tcptool`）、`socks5`、`leikwan`（别名 `leikwan_tools`）。直接执行 `vpstools run agent` 会重启服务；服务管理菜单中的额外确认只适用于菜单操作。
-
-也可使用独立命令，例如：
+需要管理员权限的操作请使用 `sudo`，例如：
 
 ```bash
-dnstool
-swaptool
-bbrtcp
-allentool
-netcheck
-iperfprobe
+sudo vpstools run tcp apply params.conf
+sudo vpstools run ipv6 status
+sudo vpstools run socks5 status
+sudo vpstools run leikwan_tools status
 ```
 
-需要管理员权限的操作请按提示使用 `sudo`；非交互运行时建议显式加上 `sudo`。只想安装某个工具时，使用上表对应文档中的独立安装命令。
+`vpstools run <工具> [参数]` 会将参数传给对应工具，并返回工具的退出码。各子工具支持的参数、菜单项目和系统要求见下方文档索引。
 
-## 更新与安装机制
+## 更新
 
-从 v0.3.0 或更早版本升级并安装新增 SOCKS5 入口，建议重新执行上方快速安装命令。旧版保存的安装器使用旧工具清单；若使用 `vpstools update`，第一次会更新安装器，再执行一次即可部署新增入口。
-
-更新全部工具：
+更新整个工具箱及其独立工具：
 
 ```bash
 vpstools update github
-# 或使用 Gitee
+# 或
 vpstools update gitee
 ```
 
-也可以选择首页第 6 项「安装 / 更新工具箱」，或重新执行快速安装命令。菜单更新成功后会自动重新打开已安装的新版本。旧版本菜单若在更新后仍显示旧版本号，请选择 `0` 退出，再运行 `vpstools --version` 检查版本并用 `vpstools` 重新打开。
+也可以在工具箱菜单中选择「安装 / 更新工具箱」，完成后用 `vpstools --version` 确认版本。各工具已有的配置备份和确认流程仍由各工具负责。
 
-远程安装时，安装器先查询所选渠道 `main` 分支的最新提交，再从同一个固定提交下载全部脚本。所有文件通过非空、对应 Bash / Python 脚本头及语法检查后，才开始部署；下载失败时尚未执行各工具安装步骤。安装锁用于防止两个工具箱安装同时运行。
+## Debian 13 兼容性
 
-部署阶段如某个工具安装失败，安装器会停止，已经完成的安装会保留。修复错误后重新运行即可。更新覆盖确认和配置备份规则沿用各独立工具。
+已在带 systemd 的 Debian 13.7 隔离环境中验证 GitHub 一键安装、菜单入口和主要功能，覆盖原生 `arm64` 和模拟 `amd64`。两种架构各通过 509 项 Python 回归测试；利群助手额外通过 12 项隔离集成测试。
 
-| 安装位置 | 用途 |
-| --- | --- |
-| `/usr/local/bin/vpstools` | 工具箱统一入口 |
-| `/usr/local/lib/vpstools/socks5.sh` | SOCKS5 管理入口；`vpstools list` 显示入口安装状态，代理服务状态用 `sudo vpstools run socks5 status` 查看 |
-| `/usr/local/lib/vpstools/install.sh` | 保存的工具箱安装器 |
-| `/usr/local/bin/`、`/usr/local/sbin/` | 各工具命令；可用 `vpstools list` 查看实际路径 |
+- BBR 的「清理调优」在多队列部分写入失败时，仍有一个恢复用例未通过；Debian 12 也能复现。实机内核切换、GRUB 重启和 Swap 启用未纳入本轮验收。
+- SOCKS5 安装会在临时目录执行 GOST 校验。若 `/tmp` 为 `noexec`，可指定允许执行的临时目录；例如 `/var/tmp` 允许执行时运行 `sudo env TMPDIR=/var/tmp vpstools run socks5`。
 
-## 使用前须知
+## 删除与卸载
 
-主要面向 Linux VPS；SSH 工具以使用 `ssh.service` 或 `sshd.service` 的 Debian/Ubuntu 为主要适用环境。其他发行版及特殊配置请先阅读对应工具文档。Agent 重启功能需要 systemd 和已配置的 `mmw-agent.service`。
+仓库目前**没有适用于整个 VPS Tools 的统一卸载脚本**。各工具可能安装 systemd 服务、系统配置、代理规则或备份数据，不能把删除 `/usr/local/bin/vpstools` 等入口文件当作完整卸载。卸载前请先阅读对应工具文档，按工具自己的卸载或恢复流程处理。
 
-- **SSH 与防火墙：** 修改端口前先放行云厂商安全组，保留当前 SSH 会话，完成后另开终端验证新端口。主机防火墙功能不代替云安全组；Docker 发布端口通常经过转发链，不在宿主机 `INPUT` 管理范围内。原生自定义 nftables、`ssh.socket` 和 SELinux 等特殊配置需按工具文档处理。
-- **SSH 密钥登录：** 默认只改变指定用户的认证策略，需要两次独立公钥连接确认。VPS 生成的私钥需在默认 5 分钟内下载并验证，超时会清理临时私钥并恢复本次操作前的配置。详见密钥登录指南。
-- **Fail2ban：** 第一版支持 Debian/Ubuntu + systemd + iptables/ip6tables，需要配套新版 SSH 工具。配置会保留已有白名单，并默认加入检测到的当前管理 IP；可设置仅封禁 SSH 或全部宿主机入站端口。
-- **DNS：** 首次安装保存的配置可用于恢复。切换成功表示配置写入成功，实际解析仍取决于 DNS 的网络可达性。可用 `getent hosts example.com` 验证，必要时运行 `sudo dnstool restore`。
-- **Swap：** 创建或调整需要足够磁盘空间。工具确认交换空间实际启用后才写入开机配置；现有 `/swapfile` 有使用量时会停止调整。特殊 Btrfs 存储布局仍可能不支持交换文件。
-- **TCP 参数导入：** 默认仅导入网络参数，预览后确认并备份；仅管理自己的 sysctl 配置文件。与 BBR 工具管理相同参数时应先处理配置冲突。网络调优分类会通过 sudo 打开 TCP 子菜单；命令模式的修改操作请显式使用 sudo。
-- **TCP / BBR：** 测速会消耗时间与流量，结果取决于线路和测试环境。调整后按提示验证、确认或回滚；第三方内核安装需单独评估启动与驱动兼容性。
-- **Agent：** 重启会短暂中断现有代理连接。工具验证 Agent 状态并展示变化，不重启 Guard 服务。
-- **网址检测：** 按需运行，无第三方 Python 依赖或常驻服务；默认最多并行检测 3 个 IP，网站检测使用 HEAD、不下载正文。结果反映当前 VPS 到目标的网络情况；Ping 不通不代表网站不可用。
-- **IPv6：** 修改前保存备份；当前 SSH 使用 IPv6 或无法确认连接协议时拒绝禁用。彻底关闭仅支持工具识别的 Debian/Ubuntu GRUB 配置，需手动重启；关闭 `::1` 可能影响服务。详见子工具文档。
-- **iperf3 测速：** 本地也需要 iperf3，逐轮执行 VPS 显示的命令。测试会消耗流量，运行期间需要放行测速 TCP 端口；退出只清理本次测速进程，已有防火墙规则自行撤销。
-
-在远程服务器修改网络或启动相关配置前，建议准备云控制台、VNC 或串口等救援入口。生产环境可使用固定提交的下载地址，并在测试环境验证后部署。
-
-## 仓库结构与验证
-
-```text
-vps_tools/
-├── vpstools.sh           # 统一菜单与命令分发
-├── install.sh            # 全量安装与更新
-├── safe-ssh-port/        # SSH 与防火墙
-├── ssh-key/              # SSH 密钥登录与定时回退
-├── ssh-password/         # SSH 密码登录，支持临时与永久模式
-├── Fail2ban/             # SSH 防暴力破解与 iptables 联动
-├── dns_tool/             # DNS 切换与恢复
-├── swap_tool/            # Swap 管理
-├── bbr-tune/             # TCP / BBR 调优
-├── socks5/               # SOCKS5 / TLS 代理部署与管理
-├── restart-mmw-agent/    # Agent 重启
-├── web_tool/             # SSH 终端网址与网络检测
-├── iperf3_tool/          # 本地与 VPS 的逐轮 iperf3 测速
-├── tcp-tool/             # TCP 参数导入与回滚
-├── system_tool/          # Ipv4/ipv6管理工具
-├── leikwan_tools/         # 利群助手：Realm IPv4 TCP 转发部署与管理
-└── tests/                # 工具箱测试
-```
-
-工具箱基础检查：
+仓库中现有的 `leikwan_tools/uninstall.sh` **只卸载利群助手**，不会卸载其他工具箱组件：
 
 ```bash
-bash -n install.sh
-bash -n vpstools.sh
-python3 -m unittest discover -s tests -p 'test_*.py'
-python3 -m unittest discover -s socks5/tests -p 'test_*.py'
-python3 -m unittest discover -s ssh-key/tests -p 'test_*.py'
-python3 -m unittest discover -s ssh-password/tests -p 'test_*.py'
-python3 -m unittest discover -s tcp-tool/tests -p 'test_*.py'
-python3 -m unittest discover -s system_tool/tests -p 'test_*.py'
-python3 -m unittest discover -s Fail2ban/tests -p 'test_*.py'
-python3 -m unittest discover -s web_tool/tests -p 'test_*.py'
-python3 -m unittest discover -s iperf3_tool/tests -p 'test_*.py'
+sudo bash leikwan_tools/uninstall.sh
 ```
 
-工具箱测试使用临时目录和模拟命令，覆盖参数转发、退出码、菜单返回、安装器调用及下载校验等行为。各子目录还包含对应工具的测试；这些检查不能替代真实 Linux VPS 上的系统兼容性验证。
+SOCKS5 代理可从其管理菜单选择卸载，或使用：
 
-遇到问题可在 [GitHub Issues](https://github.com/allen0039/vps_tools/issues) 反馈，并提供系统版本、工具版本、执行命令及脱敏后的错误日志。
+```bash
+sudo socks5 uninstall
+```
 
-## 许可证与致谢
+其他工具的卸载、配置恢复和数据清理方法见其专属文档。若只需移除工具箱菜单入口，请先确认其他独立工具和服务是否仍需保留。
 
-本仓库原创工具采用 [MIT License](LICENSE)。
+## 安装脚本与主要程序
 
-`bbr-tune` 基于 [dingding229/bbr-tune](https://github.com/dingding229/bbr-tune) 修改，上游目前未提供明确的开源许可证，该目录不适用根目录的 MIT 授权；再分发或公开发布修改版前需确认相应授权。具体来源与第三方组件说明见 [BBR 使用指南](bbr-tune/README.md)。
+| 路径 | 说明 |
+| --- | --- |
+| `install.sh` | 工具箱一键安装和更新入口；校验脚本后调用各工具安装器 |
+| `vpstools.sh` | 统一菜单、状态列表、更新命令和独立工具分发器 |
+| `Fail2ban/install.sh` | 单独安装并配置 Fail2ban 及配套防火墙工具 |
+| `bbr-tune/install.sh` | 单独安装或更新 TCP / BBR 调优工具 |
+| `leikwan_tools/install.sh` | 安装利群助手；支持配置目录和状态目录选项 |
+| `leikwan_tools/uninstall.sh` | 卸载利群助手并按其清单清理受管理的文件和服务 |
+| `socks5/socks5.sh` | SOCKS5 / TLS 代理部署和管理程序 |
+| `iperf3_tool/iperf3-tool.sh`、`iperf3_tool/iperf3_tool.py` | iperf3 外层启动器及测速、报告处理程序 |
+
+统一安装会部署各工具入口，但不会自动启用示例转发规则、创建 SOCKS5 代理服务、切换 SSH 认证、修改 DNS、创建 Swap 或应用网络调优参数。部分工具在首次使用时会按需安装系统依赖。具体行为见对应说明。
+
+## 工具文档
+
+| 工具 | 文档 |
+| --- | --- |
+| SSH 与防火墙 | [safe-ssh-port/README.md](safe-ssh-port/README.md) |
+| SSH 密钥登录 | [ssh-key/README.md](ssh-key/README.md) |
+| SSH 密码登录 | [ssh-password/README.md](ssh-password/README.md) |
+| Fail2ban | [Fail2ban/README.md](Fail2ban/README.md) |
+| DNS | [dns_tool/README.md](dns_tool/README.md) |
+| Swap | [swap_tool/README.md](swap_tool/README.md) |
+| TCP / BBR 调优 | [bbr-tune/README.md](bbr-tune/README.md) |
+| SOCKS5 / TLS | [socks5/README.md](socks5/README.md) |
+| 妙妙屋 Agent 重启 | [restart-mmw-agent/README.md](restart-mmw-agent/README.md) |
+| 网址与网络检测 | [web_tool/README.md](web_tool/README.md) |
+| iperf3 测速 | [iperf3_tool/README.md](iperf3_tool/README.md) |
+| TCP 参数导入 | [tcp-tool/README.md](tcp-tool/README.md) |
+| IPv4/IPv6 管理 | [system_tool/README.md](system_tool/README.md) |
+| 利群助手 | [leikwan_tools/README.md](leikwan_tools/README.md) |
+
+## 参考项目与脚本说明
+
+- [`bbr-tune`](bbr-tune/bbr-tune.sh) 由 [dingding229/bbr-tune](https://github.com/dingding229/bbr-tune) 修改而来。上游未提供明确的开源许可证；该目录不适用根目录的 MIT 许可。公开再分发前请先确认授权，详细说明见 [BBR 文档](bbr-tune/README.md)。
+- [`socks5/socks5.sh`](socks5/socks5.sh) 是本仓库的中文部署与管理脚本，使用 [GOST](https://github.com/go-gost/gost) 提供代理和 TLS 隧道能力；脚本会下载固定版本并校验其 SHA-256。
+- [`leikwan_tools`](leikwan_tools/) 使用 [Realm](https://github.com/zhboner/realm) 实现转发。安装器按架构下载对应程序，并在部署时校验摘要。
+- [`ssh-password/ssh_password_tool.py`](ssh-password/ssh_password_tool.py) 的部分功能行为参考了 kejilion 脚本中的 `add_sshpasswd()` 和 `sshkey_on()`；本仓库使用独立实现。说明和参考源码链接见 [SSH 密码登录文档](ssh-password/README.md)。
+
+第三方程序、依赖和各子目录许可说明以对应工具文档及其发布内容为准。本仓库其余原创工具采用 [MIT License](LICENSE)。
