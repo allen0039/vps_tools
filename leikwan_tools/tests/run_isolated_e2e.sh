@@ -680,6 +680,19 @@ docker exec "${C_VPS}" grep -Fx 'listen_interface = "eth0"' /var/lib/leikwan_too
 assert_contains "$(docker exec "${C_VPS}" ss -H -ltn4 'sport = :10003')" "${VPS_9929_IP}%eth0:10003" "T12 listener socket binding"
 assert_contains "$(client_probe "${PUB_10}" 54848 BOOTSTRAP)" "LANDING=rfc-hk-mock SRC=${VPS_CN2_IP}" "T12 CN2 landing"
 
+BOOTSTRAP_PID="$(docker exec "${C_VPS}" systemctl show -p MainPID --value leikwan_tools-realm@rfc-hk-bootstrap.service)"
+assert_contains "$(printf '2\n6\n1\n0\n0\n' | lq_vps menu)" "(TCP) ... 通" "T12 landing port probe"
+assert_contains "$(printf '2\n7\n1\n香港落地备注\ny\n1\n0\n0\n' | lq_vps menu)" \
+    "rfc-hk-bootstrap（香港落地备注）" "T12 display updated description"
+assert_contains "$(printf '2\n7\n1\n-\ny\n0\n0\n' | lq_vps menu)" "备注已保存" "T12 clear description"
+docker exec "${C_VPS}" grep -Fx 'description = ""' /etc/leikwan_tools/rules.d/rfc-hk-bootstrap.toml
+[[ "$(docker exec "${C_VPS}" systemctl show -p MainPID --value leikwan_tools-realm@rfc-hk-bootstrap.service)" == "${BOOTSTRAP_PID}" ]] ||
+    fail "T12: editing description restarted Realm"
+
+docker exec "${C_VPS}" ip -4 rule add pref 1 from "${VPS_CN2_IP}/32" prohibit
+assert_contains "$(printf '2\n6\n1\n0\n0\n' | lq_vps menu)" "(TCP) ... 不通" "T12 landing probe rejects blocked routing"
+docker exec "${C_VPS}" ip -4 rule del pref 1 from "${VPS_CN2_IP}/32" prohibit
+
 docker exec "${C_VPS}" ip -4 rule del from "${VPS_9929_IP}/32" table 101
 docker exec "${C_VPS}" ip -4 route get "${HK_IP}" from "${VPS_CN2_IP}" | grep -q 'dev eth1 table 102'
 for operation in plan _verify-startup; do

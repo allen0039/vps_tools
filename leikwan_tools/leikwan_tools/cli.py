@@ -68,9 +68,11 @@ from .manager import (
     disable_rule,
     list_managed_rules,
     plan_rule,
+    probe_rule_target,
     select_rule_ingress_ip,
     status_rules,
     unselect_rule_ingress_ip,
+    update_rule_description,
     verify_startup_rule,
 )
 from .network import DEFAULT_DNS, network_command
@@ -646,10 +648,25 @@ def _menu_rule(cfg: GlobalConfig, prompt: str = "选择转发规则") -> Optiona
         return None
     rules = {rule.name: rule for rule in managed}
     labels = [
-        f"{rule.name}  (出口: {_format_line_brief(cfg, rule.line)} | 入口: {format_endpoint(rule.dial_addr, rule.public_port)} -> 落地: {rule.remote_endpoint})"
+        f"{_forward_label(rule)}  (出口: {_format_line_brief(cfg, rule.line)} | "
+        f"入口: {format_endpoint(rule.dial_addr, rule.public_port)} -> 落地: {rule.remote_endpoint})"
         for rule in managed
     ]
     return rules.get(_menu_pick(list(rules), prompt, labels=labels))
+
+
+def _forward_label(rule: RuleConfig) -> str:
+    return f"{rule.name}（{rule.description}）" if rule.description else rule.name
+
+
+def _menu_edit_forward_description(cfg: GlobalConfig) -> None:
+    rule = _menu_rule(cfg, "选择要修改备注的转发")
+    if rule is None:
+        return
+    description = input("输入新备注（留空取消，输入 - 清空备注）：").strip()
+    if description and _confirm("保存备注"):
+        changed = update_rule_description(cfg, rule, "" if description == "-" else description)
+        print("备注已保存。" if changed else "备注未变化。")
 
 
 def _menu_field(label: str, default: Any = "") -> str:
@@ -944,7 +961,7 @@ def _menu_list_forwards(cfg: GlobalConfig) -> None:
             entry_note = "已固定公网 IP"
         else:
             entry_note = "域名自动解析"
-        print(f"  {idx}. {badge} {rule.name}")
+        print(f"  {idx}. {badge} {_forward_label(rule)}")
         print(f"     出口线路   : {line_desc}")
         print(f"     客户端入口 : {dial}（{entry_note}）")
         print(f"     本机监听   : {rule.listen_endpoint}")
@@ -1023,7 +1040,8 @@ def _menu_probe_forwards(cfg: GlobalConfig) -> None:
     if not rules:
         print("当前还没有已配置的转发规则。")
         return
-    choice = _menu_pick([*rules, "*"], "选择要探测的转发", labels=[*rules, "全部转发"])
+    labels = [_forward_label(rule) for rule in rules.values()]
+    choice = _menu_pick([*rules, "*"], "选择要探测的转发", labels=[*labels, "全部转发"])
     if not choice:
         return
     warn = _menu_field("延迟提示阈值（毫秒，回车仅显示实测值）")
@@ -1053,6 +1071,28 @@ def _menu_probe_forwards(cfg: GlobalConfig) -> None:
             options["send_payload"] = _menu_field(r"发送内容（支持 \n，留空只读回包）")
     selected = list(rules.values()) if choice == "*" else [rules[choice]]
     _print_forward_probes([_probe_managed_forward(cfg, rule, **options) for rule in selected])
+
+
+def _menu_probe_forward_targets(cfg: GlobalConfig) -> None:
+    rules = {rule.name: rule for rule in list_managed_rules(cfg)}
+    if not rules:
+        print("当前还没有已配置的转发规则。")
+        return
+    labels = [_forward_label(rule) for rule in rules.values()]
+    choice = _menu_pick([*rules, "*"], "选择要测试的转发", labels=[*labels, "全部转发"])
+    if not choice:
+        return
+    print("从本机按各规则的出口线路测试落地 TCP 端口。")
+    selected = rules.values() if choice == "*" else [rules[choice]]
+    for rule in selected:
+        print(f"  测试 {rule.remote_endpoint} (TCP) ... ", end="", flush=True)
+        try:
+            probe_rule_target(cfg, rule)
+        except _MENU_ERRORS + (TimeoutExpired, UnicodeError) as exc:
+            detail = str(exc).partition("\n")[0]
+            print(f"{_style('不通', 'red')}  [{_forward_label(rule)}]  {detail}".rstrip())
+        else:
+            print(f"{_style('通', 'green')}  [{_forward_label(rule)}]")
 
 
 def _cmd_probe_forward(args: argparse.Namespace) -> int:
@@ -1087,7 +1127,9 @@ def _menu_rules_group(config_path: str) -> None:
         "3": lambda cfg: _menu_forward(cfg, edit=True),
         "4": _menu_toggle_rule,
         "5": _menu_delete_rule,
-        "6": _menu_probe_forwards,
+        "6": _menu_probe_forward_targets,
+        "7": _menu_edit_forward_description,
+        "8": _menu_probe_forwards,
     }
     while True:
         _print_menu_header(f"利群转发助手 v{__version__}", "转发规则管理")
@@ -1096,7 +1138,9 @@ def _menu_rules_group(config_path: str) -> None:
         _print_menu_item("3", "修改转发")
         _print_menu_item("4", "暂停 / 恢复转发")
         _print_menu_item("5", "删除转发")
-        _print_menu_item("6", "连通性与延迟探测")
+        _print_menu_item("6", "测试落地 TCP 通断")
+        _print_menu_item("7", "修改转发备注")
+        _print_menu_item("8", "公网入口与延迟探测")
         _print_menu_item("0", "返回主菜单")
         selected = _menu_prompt()
         if selected == "0":

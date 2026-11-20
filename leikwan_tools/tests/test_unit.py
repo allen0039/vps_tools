@@ -129,7 +129,7 @@ class TestInteractiveShortcut(unittest.TestCase):
         running = {"LoadState": "loaded", "ActiveState": "active", "UnitFileState": "enabled"}
         stopped = {"LoadState": "loaded", "ActiveState": "inactive", "UnitFileState": "disabled"}
         with (
-            patch("builtins.input", side_effect=["2", "6", "*", "", "0", "0"]),
+            patch("builtins.input", side_effect=["2", "8", "*", "", "0", "0"]),
             patch("leikwan_tools.cli.load_global_config", return_value=cfg),
             patch("leikwan_tools.cli.list_managed_rules", return_value=[bound, paused]),
             patch("leikwan_tools.cli.systemd_show", side_effect=[running, stopped]),
@@ -140,6 +140,49 @@ class TestInteractiveShortcut(unittest.TestCase):
         probe.assert_called_once_with("ct.edge.example.com", 51012, family=socket.AF_INET6, warn_ms=None)
         self.assertIn("入口可达，落地未验证", out.getvalue())
         self.assertIn("已暂停", out.getvalue())
+
+    def test_quick_probe_menu_reports_landing_ports(self) -> None:
+        cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))
+        first = load_rule_config(str(REPO_ROOT / "examples" / "rule-rfc-hk.example.toml"))
+        second = replace(first, name="other", remote_port=443)
+        with (
+            patch("builtins.input", side_effect=["2", "6", "*", "0", "0"]),
+            patch("leikwan_tools.cli.load_global_config", return_value=cfg),
+            patch("leikwan_tools.cli.list_managed_rules", return_value=[first, second]),
+            patch("leikwan_tools.cli.probe_rule_target", side_effect=[None, TimeoutError("timed out")]) as probe,
+            redirect_stdout(io.StringIO()) as out,
+        ):
+            self.assertEqual(main(["menu"]), 0)
+        self.assertEqual(probe.call_count, 2)
+        self.assertIn(f"测试 {first.remote_endpoint} (TCP) ... 通", out.getvalue())
+        self.assertIn(f"测试 {second.remote_endpoint} (TCP) ... 不通", out.getvalue())
+
+    def test_description_menu_edits_only_rule_metadata(self) -> None:
+        cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))
+        original = load_rule_config(str(REPO_ROOT / "examples" / "rule-rfc-hk.example.toml"))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / f"{original.name}.toml"
+            path.write_text(render_rule_toml(original), encoding="utf-8")
+            path.chmod(0o600)
+            cfg = replace(cfg, tool=replace(cfg.tool, rules_dir=directory, state_dir=directory))
+            with (
+                patch("builtins.input", side_effect=[
+                    "2", "7", "1", "无效\x00备注", "y", "7", "1", "香港转发", "y", "0", "0",
+                ]),
+                patch("leikwan_tools.cli.load_global_config", return_value=cfg),
+                patch("leikwan_tools.manager.resolve_lock_file", return_value=str(Path(directory) / "lock")),
+                patch("leikwan_tools.manager._assert_live_install_intact"),
+                patch("leikwan_tools.manager.check_rule_ownership", return_value=("owned", "")),
+                patch("leikwan_tools.manager.systemd_restart") as restart,
+                redirect_stdout(io.StringIO()) as out,
+                patch("sys.stderr", new_callable=io.StringIO) as err,
+            ):
+                self.assertEqual(main(["menu"]), 0)
+            self.assertEqual(load_rule_config(str(path)), replace(original, description="香港转发"))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertIn("备注已保存", out.getvalue())
+        self.assertIn("备注不能包含控制字符", err.getvalue())
+        restart.assert_not_called()
 
     def test_menu_ipv6_entry_uses_ipv4_landing_and_exit(self) -> None:
         cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))

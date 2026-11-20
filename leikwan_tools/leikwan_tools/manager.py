@@ -7,6 +7,8 @@ from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import socket
+from stat import S_IMODE
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -1098,6 +1100,44 @@ def list_managed_rules(global_cfg: GlobalConfig) -> List[RuleConfig]:
         except (ConfigError, OwnershipError):
             continue
     return rules
+
+
+def update_rule_description(global_cfg: GlobalConfig, expected_rule: RuleConfig, description: str) -> bool:
+    """Save display metadata without changing the running service."""
+    name = expected_rule.name
+    with FileLock(resolve_lock_file(global_cfg=global_cfg)):
+        _assert_live_install_intact(global_cfg)
+        _assert_rule_owned_for_mutation(global_cfg, name)
+        path = _rule_paths(global_cfg, name)["stored_rule"]
+        current = load_rule_config(str(path), default_domain=global_cfg.ingress.default_domain)
+        if current != expected_rule:
+            raise ApplyError(f"规则 {name!r} 已变更，请重新选择")
+        description = description.strip()
+        if any(ord(character) < 32 or ord(character) == 127 for character in description):
+            raise ConfigError("备注不能包含控制字符")
+        if current.description == description:
+            return False
+        file_stat = path.stat()
+        atomic_write_text(
+            path, render_rule_toml(replace(current, description=description)),
+            mode=S_IMODE(file_stat.st_mode), owner=(file_stat.st_uid, file_stat.st_gid),
+        )
+        return True
+
+
+def probe_rule_target(global_cfg: GlobalConfig, rule: RuleConfig, timeout: float = 3.0) -> None:
+    """Test a landing port with the rule's applied source address and interface."""
+    state = _load_state_json(_rule_paths(global_cfg, rule.name)["state_json"])
+    line = _applied_line(global_cfg, rule, state)
+    if line is None:
+        raise ConfigError(f"未找到出口线路 {rule.line!r}")
+    verify_egress_route(line, rule.remote_ip)
+    family = socket.AF_INET6 if line.is_ipv6 else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as connection:
+        connection.settimeout(timeout)
+        connection.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, line.interface.encode() + b"\0")
+        connection.bind((line.source_ip, 0))
+        connection.connect((rule.remote_ip, rule.remote_port))
 
 
 def _inspect_single_rule_status(
