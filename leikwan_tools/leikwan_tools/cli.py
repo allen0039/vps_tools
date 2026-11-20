@@ -20,6 +20,7 @@ from . import (
     __version__,
 )
 from .config import (
+    DDNS_AUTO_INTERFACE,
     DDNS_PROFILE_NAME_RE,
     VALID_DDNS_PROVIDERS,
     ConfigError,
@@ -32,6 +33,7 @@ from .config import (
     normalize_ddns_fqdn,
     parse_rule_config_dict,
     validate_ipv4,
+    validate_ipv6,
 )
 from .ddns import (
     ISP_LABELS,
@@ -76,6 +78,7 @@ from .realm import RealmError, install_realm_binary
 from .routing import apply_routing, plan_routing
 from .system import (
     LockTimeoutError,
+    PUBLIC_ROUTE_PROBE_IPV6,
     PreflightError,
     SystemErrorBase,
     systemd_is_active,
@@ -138,16 +141,22 @@ def _print_plan(res: Dict[str, Any]) -> None:
         "NOOP": "无变更",
     }
     action_zh = action_labels.get(res["action"], res["action"])
+    line_info = res["line"]
+    line_family = res.get("line_family") or line_info.get("family") or ("ipv6" if ":" in str(res["through"]) else "ipv4")
+    gw_part = f", 网关={line_info['gateway']}" if line_info.get("gateway") else ""
+    tbl_part = f", 表={line_info['table']}" if line_info.get("table") is not None else ""
     print(f"=== 变更预览 [{res['action']}]（{action_zh}） 转发: {res['rule_name']} ===")
     print(
-        f"出口线路   : {res['line']['name']} (网卡={res['line']['interface']}, "
-        f"源IP={res['through']}, 网关={res['line']['gateway']}, 表={res['line']['table']})"
+        f"出口线路   : {line_info['name']} ({line_family.upper()}, 网卡={line_info['interface']}, "
+        f"源IP={res['through']}{gw_part}{tbl_part})"
     )
     dial = format_endpoint(res["dial_hint"], res["public_port"])
-    print(f"客户端入口 : {dial} -> 本机监听 {res['listen']} -> 落地 {res['remote']}")
+    bound_in_iface = res.get("bound_listen_interface", "")
+    listen_desc = f"{res['listen']} (入口网卡={bound_in_iface})" if bound_in_iface else res["listen"]
+    print(f"客户端入口 : {dial} -> 本机监听 {listen_desc} -> 落地 {res['remote']}")
     print(f"systemd单元: {res['unit_name']}")
     print(f"Realm 版本 : {res['realm']['version']} ({res['realm']['origin']}) @ {res['realm']['path']}")
-    print(f"路由校验   : {res['route_check']['command']}")
+    print(f"路由校验   : {res['route_check']['command']}（仅内核查路，不代表落地 TCP 可达）")
     print(f"             {res['route_check']['raw_output']}")
     if res.get("return_route"):
         print(f"入口回程   : {res['return_route']}")
@@ -170,14 +179,16 @@ def _print_apply(res: Dict[str, Any]) -> None:
         "noop": "幂等跳过（配置与运行状态一致）",
     }
     label = label_map.get(res["status"], res["status"])
+    bound_in_iface = res.get("bound_listen_interface", "")
+    listen_desc = f"{res['listen']}@{bound_in_iface}" if bound_in_iface else res["listen"]
     print(f"[{label}] 规则={res['rule_name']} 单元={res['unit_name']} PID={res['main_pid']}")
     print(
-        f"转发链路 : 客户端({format_endpoint(res['dial_addr'], res['public_port'])}) -> 本机({res['listen']}) "
+        f"转发链路 : 客户端({format_endpoint(res['dial_addr'], res['public_port'])}) -> 本机({listen_desc}) "
         f"-> 经({res['through']}@{res['egress_interface']}) -> 落地({res['remote']})"
     )
     print(f"出口线路 : {res['line']} | Realm {res['realm_version']} ({res['realm_bin']})")
     if res.get("route_output"):
-        print(f"路由实测 : {res['route_output']}")
+        print(f"路由实测 : {res['route_output']}（仅内核查路）")
     if res.get("forced_non_dns"):
         print("覆盖标记 : 已通过 --allow-non-dns 显式强制覆盖固定公网 IP")
     if res.get("stale_ip_warning"):
@@ -229,12 +240,15 @@ def _print_status_list(items: List[Dict[str, Any]]) -> None:
             item["egress_interface"],
             item["through"],
         )
+        bound_in_iface = item.get("listen_interface", "")
+        listen_desc = f"{item['listen']} (入口网卡={bound_in_iface})" if bound_in_iface else item["listen"]
         print(f"转发名称   : {item['rule_name']}  ({item['description'] or '无备注'})")
         print(f"当前状态   : {_format_rule_status_summary(item)} | 开机自启: {autostart}")
         print(f"出口线路   : {line_desc}")
         print(f"客户端连接 : {dial}")
+        print(f"本机监听   : {listen_desc}")
         print(
-            f"转发路径   : 入口 {dial} -> 本机监听 {item['listen']} "
+            f"转发路径   : 入口 {dial} -> 本机监听 {listen_desc} "
             f"-> 出口 {item['line']}({item['through']}@{item['egress_interface']}) -> 落地 {item['remote']}"
         )
         if item["ingress_domain"]:
@@ -242,7 +256,18 @@ def _print_status_list(items: List[Dict[str, Any]]) -> None:
                 f"固定公网IP : {item['ingress_fixed_ip'] or '(未固定，使用域名解析)'}  "
                 f"[域名: {item['ingress_domain']}]"
             )
-        print(f"出口路由   : {'正常' if item['route_ok'] else '异常'} | {item['route_detail']}")
+        print(f"出口路由   : {'正常' if item['route_ok'] else '异常'}（仅内核查路，不代表落地 TCP 可达） | {item['route_detail']}")
+        pending = item.get("pending_network", {})
+        if pending.get("line_removed"):
+            print(f"待应用     : 主配置已移除出口线路 {item['line']}")
+        if "line" in pending:
+            line = pending["line"]
+            print(
+                f"待应用出口 : {line['source_ip']}@{line['interface']} | "
+                f"网关={line['gateway'] or '未指定'} | 表={line['table'] or '未指定'}"
+            )
+        if "listen_interface" in pending:
+            print(f"待应用入口 : 监听网卡={pending['listen_interface'] or '未指定'}")
         print(f"运行服务   : Realm {item['realm_version']} @ {item['realm_bin']} | systemd={item['unit_name']}")
         if item.get("stale_ip_warning"):
             print(f"入口警告   : {item['stale_ip_warning']}")
@@ -531,7 +556,7 @@ def _menu_rule(cfg: GlobalConfig, prompt: str = "选择转发规则") -> Optiona
         return None
     rules = {rule.name: rule for rule in managed}
     labels = [
-        f"{rule.name}  (出口: {_format_line_brief(cfg, rule.line)} | 入口: {format_endpoint(rule.dial_addr, rule.public_port)} -> 落地: {rule.remote_ip}:{rule.remote_port})"
+        f"{rule.name}  (出口: {_format_line_brief(cfg, rule.line)} | 入口: {format_endpoint(rule.dial_addr, rule.public_port)} -> 落地: {rule.remote_endpoint})"
         for rule in managed
     ]
     return rules.get(_menu_pick(list(rules), prompt, labels=labels))
@@ -584,17 +609,32 @@ def _menu_forward(cfg: GlobalConfig, *, edit: bool) -> None:
         old_ipv4 = old if old and not old.direct_ipv6 else None
         listen_ip = _menu_field("本机监听的内网 IPv4（利群面板映射指向的 VPS 内网地址）", old_ipv4.listen_ip if old_ipv4 else "")
         listen_port = _menu_port("本机监听的内网端口（利群面板映射指向的 VPS 内部端口）", old_ipv4.listen_port if old_ipv4 else "")
-    remote_ip = _menu_field("落地服务器 IPv4（目标机地址）", old.remote_ip if old else "")
+    remote_raw = _menu_field("落地服务器 IP（IPv4 或 IPv6 字面量，目标机地址）", old.remote_ip if old else "")
+    remote_ip = (
+        validate_ipv6(remote_raw, "forward.remote_ip")
+        if ":" in remote_raw
+        else validate_ipv4(remote_raw, "forward.remote_ip")
+    )
+    remote_is_ipv6 = ":" in remote_ip
     remote_port = _menu_port("落地服务器端口（目标机端口）", old.remote_port if old else "")
-    line_names = list(cfg.lines)
+    matching_lines = {lname: lc for lname, lc in cfg.lines.items() if lc.is_ipv6 == remote_is_ipv6}
+    if not matching_lines:
+        fam_label = "IPv6" if remote_is_ipv6 else "IPv4"
+        raise ConfigError(
+            f"主配置中没有可用的 {fam_label} 出口线路（请在 config.toml 添加对应的 [lines.<名称>]）"
+        )
+    line_names = list(matching_lines)
     line_labels = [
-        f"{lname}（网卡 {lc.interface}，源IP {lc.source_ip}" + (f"，{lc.description}" if lc.description else "") + "）"
-        for lname, lc in cfg.lines.items()
+        f"{lname}（{lc.family.upper()}，网卡 {lc.interface}，源IP {lc.source_ip}"
+        + (f"，网关 {lc.gateway}" if lc.gateway else "")
+        + (f"，{lc.description}" if lc.description else "")
+        + "）"
+        for lname, lc in matching_lines.items()
     ]
     line = _menu_pick(
         line_names,
-        "选择出口线路",
-        old.line if old and old.line in cfg.lines else "",
+        f"选择出口线路（仅显示匹配 {'IPv6' if remote_is_ipv6 else 'IPv4'} 落地的线路）",
+        old.line if old and old.line in matching_lines else "",
         labels=line_labels,
     )
     if not line:
@@ -636,7 +676,7 @@ def _menu_toggle_rule(cfg: GlobalConfig) -> None:
         badge = "运行中" if state is True else ("已暂停" if state is False else "状态未知")
         dial = format_endpoint(rule.dial_addr, rule.public_port)
         labels.append(
-            f"[{badge}] {rule.name}  (出口: {_format_line_brief(cfg, rule.line)} | 入口: {dial} -> 落地: {rule.remote_ip}:{rule.remote_port})"
+            f"[{badge}] {rule.name}  (出口: {_format_line_brief(cfg, rule.line)} | 入口: {dial} -> 落地: {rule.remote_endpoint})"
         )
     selected = _menu_pick(list(rules), "选择要暂停或恢复的转发", labels=labels)
     if not selected:
@@ -669,7 +709,7 @@ def _menu_delete_rule(cfg: GlobalConfig) -> None:
     if rule is None:
         return
     dial = format_endpoint(rule.dial_addr, rule.public_port)
-    print(f"将删除转发：{rule.name}（入口 {dial} -> 本机监听 {rule.listen_endpoint} -> 落地 {rule.remote_ip}:{rule.remote_port}）")
+    print(f"将删除转发：{rule.name}（入口 {dial} -> 本机监听 {rule.listen_endpoint} -> 落地 {rule.remote_endpoint}）")
     if not _confirm(f"确认彻底删除转发 {rule.name}（将停止服务并移除所有配置文件）"):
         print("已取消。")
         return
@@ -783,7 +823,7 @@ def _menu_list_forwards(cfg: GlobalConfig) -> None:
         print(f"     出口线路   : {line_desc}")
         print(f"     客户端入口 : {dial}（{entry_note}）")
         print(f"     本机监听   : {rule.listen_endpoint}")
-        print(f"     落地目标   : {rule.remote_ip}:{rule.remote_port}")
+        print(f"     落地目标   : {rule.remote_endpoint}")
 
 
 def _menu_rules_group(config_path: str) -> None:
@@ -899,6 +939,12 @@ def _reexec_updated_menu(config_path: str) -> None:
     print("更新完成，请重新运行 lqtool 打开新版菜单。")
 
 
+def _format_ddns_interface(interface: str, selected: str = "") -> str:
+    if interface != DDNS_AUTO_INTERFACE:
+        return interface
+    return f"自动（{selected}）" if selected else "自动"
+
+
 def _print_ddns_inspect(items: List[ProfileInspectResult]) -> None:
     print("协议说明   : 当前仅支持 IPv6 AAAA 记录（配置模型已预留 A 记录扩展）")
     print("安全模式   : 只读候选过滤（不删除系统网卡上的 deprecated / preferred_lft 0 地址）")
@@ -909,7 +955,8 @@ def _print_ddns_inspect(items: List[ProfileInspectResult]) -> None:
         state_zh = "启用" if item.enabled else "已禁用"
         target_name = item.fqdn or "(Webhook 通知)"
         print(f"配置名     : {item.profile} ({isp_zh} | {state_zh} | {item.provider} {item.record_type} -> {target_name})")
-        print(f"网卡与探测 : dev={item.interface} | ping -6 -c 1 -w {item.probe_timeout_seconds} -I <候选IP> {item.probe_target}")
+        interface = _format_ddns_interface(item.interface, item.selected_interface)
+        print(f"网卡与探测 : dev={interface} | ping -6 -c 1 -w {item.probe_timeout_seconds} -I <候选IP> {item.probe_target}")
         if item.error:
             print(f"扫描错误   : {item.error}")
             continue
@@ -922,7 +969,7 @@ def _print_ddns_inspect(items: List[ProfileInspectResult]) -> None:
             print("探测候选   :")
             for cand in item.candidates:
                 mark = "可用" if cand.probe_ok else "不可达"
-                print(f"  - {cand.ip} [{mark}] {cand.detail}")
+                print(f"  - {cand.ip} @ {cand.interface} [{mark}] {cand.detail}")
         if item.filtered_out:
             print("已过滤地址 :")
             for skipped in item.filtered_out:
@@ -940,8 +987,9 @@ def _print_ddns_update(res: Dict[str, Any]) -> None:
     for item in res["results"]:
         isp_zh = ISP_LABELS.get(item["isp"], item["isp"])
         target_name = item["fqdn"] or "(Webhook)"
+        interface = _format_ddns_interface(item["interface"], item.get("selected_interface", ""))
         print(
-            f"[{item['action']}] 配置={item['profile']} ({isp_zh}@{item['interface']} | "
+            f"[{item['action']}] 配置={item['profile']} ({isp_zh}@{interface} | "
             f"{item['provider']} {item['record_type']} -> {target_name})"
         )
         if item.get("selected_ip"):
@@ -956,8 +1004,9 @@ def _print_ddns_test(res: Dict[str, Any]) -> None:
     print("协议说明   : 当前仅支持 IPv6 AAAA 记录（配置模型已预留 A 记录扩展）")
     insp = res["inspection"]
     isp_zh = ISP_LABELS.get(res["isp"], res["isp"])
+    interface = _format_ddns_interface(res["interface"], insp.get("selected_interface", ""))
     print(
-        f"DDNS 联调检查 [{res['profile']}]: {isp_zh}@{res['interface']} | "
+        f"DDNS 联调检查 [{res['profile']}]: {isp_zh}@{interface} | "
         f"{res['provider']} {res['record_type']} -> {res['fqdn'] or '(Webhook)'}"
     )
     print(f"凭据校验   : 通过 (0600 权限与字段校验合格)")
@@ -995,7 +1044,8 @@ def _print_ddns_status(res: Dict[str, Any]) -> None:
         isp_zh = ISP_LABELS.get(item["isp"], item["isp"])
         state_zh = "启用" if item["enabled"] else "禁用"
         print(f"配置名称   : {item['profile']} ({isp_zh} | {state_zh})")
-        print(f"接口/服务  : dev={item['interface']} | {item['provider']} {item['record_type']} -> {item['fqdn'] or '(Webhook)'}")
+        interface = _format_ddns_interface(item["interface"], item.get("selected_interface", ""))
+        print(f"接口/服务  : dev={interface} | {item['provider']} {item['record_type']} -> {item['fqdn'] or '(Webhook)'}")
         print(f"凭据文件   : {item['credential_file'] or '(未配置)'}")
         print(
             f"当前选择   : {item['selected_ip'] or '(无)'}"
@@ -1019,7 +1069,7 @@ def _menu_ddns_profile(cfg: GlobalConfig, *, allow_all: bool = False) -> str:
         print("请先新建 DDNS 配置。")
         return ""
     labels = [
-        f"{profile.name} | {ISP_LABELS[profile.isp]} @ {profile.interface} | "
+        f"{profile.name} | {ISP_LABELS[profile.isp]} @ {_format_ddns_interface(profile.interface)} | "
         f"{profile.fqdn or '(Webhook)'} | {'启用' if profile.enabled else '暂停'}"
         for profile in profiles.values()
     ]
@@ -1043,7 +1093,11 @@ def _menu_ddns_edit(cfg: GlobalConfig, profile: Optional[DdnsProfileConfig] = No
     isp = _menu_pick(list(ISP_LABELS), "选择运营商", profile.isp if profile else "", list(ISP_LABELS.values()))
     if not isp:
         return
-    interface = _menu_field("入口 IPv6 所在网卡", profile.interface if profile else "")
+    if profile is None:
+        interface = DDNS_AUTO_INTERFACE
+        print(f"网卡：自动识别{ISP_LABELS[isp]} IPv6，无需填写网卡名。")
+    else:
+        interface = _menu_field("入口 IPv6 所在网卡（auto 自动识别）", profile.interface)
     provider = _menu_pick(
         list(VALID_DDNS_PROVIDERS), "选择 DNS 服务商", profile.provider if profile else ""
     )
@@ -1078,7 +1132,7 @@ def _menu_ddns_edit(cfg: GlobalConfig, profile: Optional[DdnsProfileConfig] = No
             return
         changes["auth_mode"] = "" if auth_mode == "auto" else auth_mode
     target = normalize_ddns_fqdn(zone, host) if zone else "(Webhook)"
-    print(f"{name} | {ISP_LABELS[isp]} @ {interface} | {provider} | AAAA → {target}")
+    print(f"{name} | {ISP_LABELS[isp]} @ {_format_ddns_interface(interface)} | {provider} | AAAA → {target}")
     if _confirm("保存 DDNS 配置"):
         save_ddns_config(cfg, profile_name=name, changes=changes)
         print("DDNS 配置已保存。新建配置默认暂停，可测试后启用。" if profile is None else "DDNS 配置已保存。")
@@ -1195,7 +1249,7 @@ def build_parser() -> argparse.ArgumentParser:
     default_cfg = resolve_default_config_path()
     parser = argparse.ArgumentParser(
         prog="leikwan_tools",
-        description="独立「leikwan_tools」— 利群 VPS 多规则 Realm IPv4 TCP 转发与公网入口管理工具",
+        description="独立「leikwan_tools」— 利群 VPS 多规则 Realm TCP 转发（支持 IPv4/IPv6 入口与落地）与公网入口管理工具",
     )
     parser.add_argument(
         "--config",
@@ -1221,7 +1275,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("--allow-non-dns", action="store_true", help="显式允许 fixed_ip 不在当前 DNS A 记录中")
     p_plan.add_argument("--dns-server", default="", help="指定 DNS IPv4 用于校验 fixed_ip")
 
-    p_apply = sub.add_parser("apply", help="从规则文件应用/更新一条 IPv4 TCP 转发规则（幂等、带锁、失败回滚）")
+    p_apply = sub.add_parser("apply", help="从规则文件应用/更新一条 TCP 转发规则（支持 IPv4/IPv6 入口与落地，幂等、带锁、失败回滚）")
     p_apply.add_argument("rule_file", help="规则 TOML 文件路径")
     p_apply.add_argument("--lock-timeout", type=float, default=15.0, help="并发写锁等待秒数 (默认 15)")
     p_apply.add_argument("--allow-non-dns", action="store_true", help="显式允许新设/变更的 fixed_ip 不在当前 DNS 中")
@@ -1241,8 +1295,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_delete.add_argument("rule_name", help="规则名")
     p_delete.add_argument("--lock-timeout", type=float, default=15.0)
 
-    p_prereq = sub.add_parser("check-prereqs", help="只读检查 Realm 二进制、网卡、源 IP 与源策略路由前置条件")
-    p_prereq.add_argument("--probe-remote", default="192.0.2.10", help="用于 ip route get 自检的测试目标 IPv4")
+    p_prereq = sub.add_parser("check-prereqs", help="只读检查 Realm 二进制、网卡、源 IP 与出口内核路由前置条件")
+    p_prereq.add_argument("--probe-remote", default="192.0.2.10", help="用于 ip -4 route get 自检的测试目标 IPv4")
+    p_prereq.add_argument("--probe-remote-v6", default=PUBLIC_ROUTE_PROBE_IPV6, help="用于 ip -6 route get 自检的测试目标 IPv6")
 
     p_vs = sub.add_parser("_verify-startup", help="内部命令：systemd ExecStartPre 启动前路由等待与核验")
     p_vs.add_argument("rule_name", help="规则名")
@@ -1409,7 +1464,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     dial = format_endpoint(r.dial_addr, r.public_port)
                     print(
                         f"{r.name}: 出口线路={_format_line_brief(cfg, r.line)} | 拨号={dial} | "
-                        f"监听={r.listen_endpoint} -> 落地={r.remote_ip}:{r.remote_port}"
+                        f"监听={r.listen_endpoint} -> 落地={r.remote_endpoint}"
                     )
             return 0
 
@@ -1438,16 +1493,27 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         if args.command == "check-prereqs":
             cfg = load_global_config(args.config)
-            res = check_prereqs(cfg, probe_remote=args.probe_remote)
+            res = check_prereqs(
+                cfg,
+                probe_remote=args.probe_remote,
+                probe_remote_v6=args.probe_remote_v6,
+            )
             if args.json:
                 _print_json(res)
             else:
                 print(f"Realm 检查: {'通过' if res['realm_ok'] else '失败'} -> {res['realm']}")
+                print("说明      : 以下路由校验仅核对内核查路与本机接口/源地址，不代表远端落地 TCP 端口可达。")
                 for line in res["lines"]:
                     if line["ok"]:
+                        extras = []
+                        if line.get("gateway"):
+                            extras.append(f"gw {line['gateway']}")
+                        if line.get("table") is not None:
+                            extras.append(f"table {line['table']}")
+                        extra_str = f" -> {', '.join(extras)}" if extras else ""
                         print(
-                            f"线路 {line['line']} [通过]: {line['interface']} ({line['source_ip']} -> "
-                            f"gw {line['gateway']}, table {line['table']}) | {line['route_output']}"
+                            f"线路 {line['line']} [通过]: {line['interface']} ({line['source_ip']}{extra_str}) "
+                            f"| {line['route_output']}"
                         )
                     else:
                         print(f"线路 {line['line']} [失败]: {line['error']}")
@@ -1459,9 +1525,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.json:
                 _print_json(res)
             else:
+                extras = []
+                if res.get("gateway"):
+                    extras.append(f"gw {res['gateway']}")
+                if res.get("table") is not None:
+                    extras.append(f"table {res['table']}")
+                extra_str = f" -> {', '.join(extras)}" if extras else ""
                 print(
                     f"[启动前校验通过] 规则={res['rule_name']} 线路={res['line']} "
-                    f"({res['source_ip']}@{res['interface']} -> gw {res['gateway']}, table {res['table']})"
+                    f"({res['source_ip']}@{res['interface']}{extra_str})"
                 )
                 print(f"入口回程 {res['return_route']}")
             return 0

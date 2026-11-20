@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Mock TCP landing server reporting its own identity and observed peer source IPv4."""
+"""Mock TCP landing server reporting its own identity and observed peer source IP."""
 
 import argparse
+import socket
 import socketserver
 
 
@@ -30,6 +31,14 @@ class ReuseThreadingTCPServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
+class ReuseThreadingTCP6Server(ReuseThreadingTCPServer):
+    address_family = socket.AF_INET6
+
+    def server_bind(self) -> None:
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        super().server_bind()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--id", required=True)
@@ -37,7 +46,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, required=True)
     args = parser.parse_args()
 
-    srv = ReuseThreadingTCPServer((args.listen, args.port), make_handler(args.id))
+    server_cls = ReuseThreadingTCP6Server if ":" in args.listen else ReuseThreadingTCPServer
+    srv = server_cls((args.listen, args.port), make_handler(args.id))
     srv.serve_forever()
 
 

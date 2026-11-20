@@ -1,0 +1,25 @@
+# 示例规则 4：官方 IPv4 BGP 入口 -> 联通 IPv6 出口 -> IPv6 落地（仅作示例，安装时不启用）
+# 链路示例：官方公网 54204 -> 10.7.0.146:10014 (listen_interface=eth0) -> 联通 IPv6 (through=[2408:820c:1::10], interface=eth1) -> [2001:db8:99::10]:54141
+# 说明：需先在 config.toml 中启用 [lines.cu_v6]，并将 remote_ip 替换为实际落地 IPv6。
+
+[rule]
+name = "bgp-v4-to-v6-cu"
+description = "组合4示例：官方 IPv4 BGP 入口经联通 IPv6 出口连接 IPv6 落地"
+line = "cu_v6"
+
+[ingress]
+domain = "paid-v4.bgp1.leikwanhost.com"
+fixed_ip = ""
+public_port = 54204
+
+[forward]
+listen_ip = "10.7.0.146"
+listen_port = 10014
+remote_ip = "2001:db8:99::10"
+remote_port = 54141
+
+[realm]
+log_level = "warn"
+tcp_timeout = 5
+tcp_keepalive = 15
+tcp_keepalive_probe = 3

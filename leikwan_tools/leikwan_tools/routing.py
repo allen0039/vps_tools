@@ -133,11 +133,16 @@ def _ip_json(*args: str, empty_table: bool = False) -> list[dict]:
 
 
 def _profile(cfg: GlobalConfig) -> dict[str, SourceRoute]:
+    ipv4_lines = [line for line in cfg.lines.values() if not line.is_ipv6]
+    if not ipv4_lines:
+        raise PreflightError(
+            "主配置中没有 IPv4 出口线路需要初始化源策略路由（IPv6 出口使用系统已有路由与 Realm socket 绑定，不自动修改系统 IPv6 路由）"
+        )
     links, addresses = get_local_network_state()
     profile = {}
     sources = set()
-    for line in cfg.lines.values():
-        if 252 <= line.table <= 255:
+    for line in ipv4_lines:
+        if line.table is None or 252 <= line.table <= 255:
             raise PreflightError(f"线路 {line.name} 必须使用独立路由表，当前为 {line.table}")
         if line.table in {route.table for route in profile.values()} or line.source_ip in sources:
             raise PreflightError(f"线路 {line.name} 的路由表或源 IPv4 与其他线路重复")
@@ -367,7 +372,8 @@ def apply_routing(
                     raise
                 added.append(entry)
             for line in cfg.lines.values():
-                verify_egress_route(line, PUBLIC_ROUTE_PROBE_IP)
+                if not line.is_ipv6:
+                    verify_egress_route(line, PUBLIC_ROUTE_PROBE_IP)
             new_state = {
                 "schema_version": 1,
                 "profile": _profile_data(profile),

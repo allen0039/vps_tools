@@ -15,6 +15,7 @@ from .config import (
     LineConfig,
     RuleConfig,
     format_endpoint,
+    format_realm_through,
     load_rule_config,
     render_realm_toml,
     render_rule_toml,
@@ -45,6 +46,7 @@ from .ownership import (
 from .realm import RealmBinaryInfo, discover_realm_binary
 from .system import (
     FileLock,
+    LocalIpv6Addr,
     PUBLIC_ROUTE_PROBE_IP,
     PUBLIC_ROUTE_PROBE_IPV6,
     PreflightError,
@@ -53,6 +55,7 @@ from .system import (
     atomic_write_text,
     find_port_conflicts,
     format_port_conflict_error,
+    get_local_ipv6_addresses,
     get_local_network_state,
     list_tcp_listeners,
     parse_route_get_output,
@@ -112,9 +115,38 @@ def _load_state_json(path: Path) -> Dict[str, Any]:
     if not path.is_file() or path.is_symlink():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        state = json.loads(path.read_text(encoding="utf-8"))
+        return state if isinstance(state, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _applied_line(global_cfg: GlobalConfig, rule: RuleConfig, state: Dict[str, Any]) -> Optional[LineConfig]:
+    snapshot = state.get("applied_line")
+    if snapshot is not None:
+        try:
+            line = LineConfig(**snapshot)
+        except (TypeError, ConfigError) as exc:
+            raise ConfigError(f"规则 {rule.name!r} 的已应用线路记录无效，请重新应用") from exc
+        if line.name != rule.line or line.is_ipv6 != rule.remote_is_ipv6:
+            raise ConfigError(f"规则 {rule.name!r} 的已应用线路与规则不一致，请重新应用")
+        return line
+
+    line = global_cfg.lines.get(rule.line)
+    source, interface = state.get("through"), state.get("egress_interface")
+    if line and isinstance(source, str) and source and isinstance(interface, str) and interface:
+        return replace(line, source_ip=source, interface=interface, family="")
+    return line
+
+
+def _applied_listen_interface(global_cfg: GlobalConfig, rule: RuleConfig, state: Dict[str, Any]) -> str:
+    if rule.direct_ipv6:
+        return ""
+    return state.get("listen_interface", global_cfg.ingress.listen_interface)
+
+
+def _line_route_settings(line: LineConfig) -> Tuple[str, str, str, str, Optional[int]]:
+    return line.family, line.source_ip, line.interface, line.gateway, line.table
 
 
 def _is_rule_enabled_record(global_cfg: GlobalConfig, rule_name: str) -> bool:
@@ -177,6 +209,12 @@ def _verify_return_route(
     global_cfg: GlobalConfig, listen_ip: str, listen_iface: str, link_states, addr_map
 ) -> RouteGetResult:
     if ":" in listen_ip:
+        if listen_iface in link_states:
+            operstate, flags = link_states[listen_iface]
+            if "UP" not in flags or operstate == "DOWN":
+                raise PreflightError(
+                    f"公网 IPv6 {listen_ip} 所在网卡 {listen_iface} 状态异常: state={operstate}, flags={flags}"
+                )
         command = ["ip", "-6", "route", "get", PUBLIC_ROUTE_PROBE_IPV6, "from", listen_ip]
         result = run_cmd(command)
         route = parse_route_get_output(PUBLIC_ROUTE_PROBE_IPV6, listen_ip, result.stdout, command)
@@ -188,9 +226,15 @@ def _verify_return_route(
     try:
         if listen_iface != expected_iface:
             raise PreflightError(f"监听 IPv4 {listen_ip} 位于 {listen_iface}，入口要求 {expected_iface}")
-        line = next((item for item in global_cfg.lines.values() if item.source_ip == listen_ip), None)
+        line = next(
+            (item for item in global_cfg.lines.values() if not item.is_ipv6 and item.source_ip == listen_ip),
+            None,
+        )
         if line is None:
-            line = next((item for item in global_cfg.lines.values() if item.interface == listen_iface), None)
+            line = next(
+                (item for item in global_cfg.lines.values() if not item.is_ipv6 and item.interface == listen_iface),
+                None,
+            )
         if line is not None:
             if line.interface != listen_iface:
                 raise PreflightError(f"监听线配置为 {line.interface}，监听 IPv4 实际位于 {listen_iface}")
@@ -223,6 +267,15 @@ def preflight_rule(
             f"规则 {rule.name!r} 指定的出口线路 {rule.line!r} 不存在（已配置线路: {available}）"
         )
     line = global_cfg.lines[rule.line]
+    if rule.remote_is_ipv6 != line.is_ipv6:
+        matching = ", ".join(
+            sorted(name for name, lc in global_cfg.lines.items() if lc.is_ipv6 == rule.remote_is_ipv6)
+        ) or "(无)"
+        raise PreflightError(
+            f"规则 {rule.name!r} 落地地址族 ({rule.remote_family}: {rule.remote_endpoint}) "
+            f"与出口线路 {rule.line!r} ({line.family}: {line.source_ip}@{line.interface}) 不匹配；"
+            f"可用的 {rule.remote_family} 出口线路: {matching}"
+        )
 
     paths = _rule_paths(global_cfg, rule.name)
     unit_name = unit_name_for_rule(global_cfg.tool.systemd_unit_template, rule.name)
@@ -260,8 +313,9 @@ def preflight_rule(
     if not rule.direct_ipv6 and global_cfg.ingress.listen_interface and not realm_info.supports_listen_interface:
         raise PreflightError(f"Realm {realm_info.version_text} 不支持监听网卡绑定，请使用支持 --listen-interface 的版本")
     link_states, addr_map = get_local_network_state()
-    listen_iface = verify_local_listen_ip(rule.listen_ip, addr_map)
-    verify_line_interface_and_source(line, link_states, addr_map)
+    ipv6_addr_map = get_local_ipv6_addresses() if (rule.direct_ipv6 or line.is_ipv6) else None
+    listen_iface = verify_local_listen_ip(rule.listen_ip, addr_map, ipv6_addr_map=ipv6_addr_map)
+    verify_line_interface_and_source(line, link_states, addr_map, ipv6_addr_map=ipv6_addr_map)
     route_res = verify_egress_route(line, rule.remote_ip)
     return_route = _verify_return_route(global_cfg, rule.listen_ip, listen_iface, link_states, addr_map)
 
@@ -313,6 +367,8 @@ def _compute_plan_action(
         action = "CREATE"
     else:
         same_rule = paths["stored_rule"].read_text(encoding="utf-8") == desired_rule_toml
+        applied = _load_state_json(paths["state_json"]).get("applied_line")
+        same_line = applied == asdict(global_cfg.lines[rule.line])
         same_realm = (
             paths["realm_toml"].is_file()
             and paths["realm_toml"].read_text(encoding="utf-8") == desired_realm_toml
@@ -321,7 +377,7 @@ def _compute_plan_action(
         )
         unit = unit_name_for_rule(global_cfg.tool.systemd_unit_template, rule.name)
         is_up = systemd_is_enabled(unit) and systemd_is_active(unit)
-        if same_rule and same_realm and is_up:
+        if same_rule and same_line and same_realm and is_up:
             action = "NOOP"
         elif same_realm and is_up:
             action = "UPDATE_METADATA"
@@ -361,7 +417,9 @@ def plan_rule(
         "rule_name": rule.name,
         "unit_name": report.unit_name,
         "line": asdict(report.line),
+        "line_family": report.line.family,
         "listen_interface": report.listen_interface,
+        "bound_listen_interface": (global_cfg.ingress.listen_interface if not rule.direct_ipv6 else ""),
         "realm": {
             "path": report.realm_info.path,
             "version": report.realm_info.version_text,
@@ -369,6 +427,7 @@ def plan_rule(
             "sha256": report.realm_info.sha256,
         },
         "route_check": {
+            "kind": "kernel_route_lookup",
             "command": " ".join(report.route_result.command),
             "raw_output": report.route_result.raw_output,
             "dev": report.route_result.dev,
@@ -380,7 +439,8 @@ def plan_rule(
         "dial_hint": rule.dial_addr,
         "public_port": rule.public_port,
         "listen": rule.listen_endpoint,
-        "remote": f"{rule.remote_ip}:{rule.remote_port}",
+        "remote": rule.remote_endpoint,
+        "remote_family": rule.remote_family,
         "through": report.line.source_ip,
         "egress_interface": report.line.interface,
         "forced_non_dns": bool(report.fixed_ip_check and report.fixed_ip_check.forced_override),
@@ -681,6 +741,7 @@ def apply_rule(
         action, rendered = _compute_plan_action(global_cfg, rule, report.realm_info)
         unit_name = report.unit_name
 
+        bound_listen_iface = global_cfg.ingress.listen_interface if not rule.direct_ipv6 else ""
         if action == "NOOP":
             props = systemd_show(unit_name)
             main_pid = int(props.get("MainPID", "0") or "0")
@@ -700,8 +761,12 @@ def apply_rule(
                     "unit_name": unit_name,
                     "main_pid": main_pid,
                     "line": rule.line,
+                    "line_family": report.line.family,
                     "listen": rule.listen_endpoint,
-                    "remote": f"{rule.remote_ip}:{rule.remote_port}",
+                    "listen_interface": report.listen_interface,
+                    "bound_listen_interface": bound_listen_iface,
+                    "remote": rule.remote_endpoint,
+                    "remote_family": rule.remote_family,
                     "through": report.line.source_ip,
                     "egress_interface": report.line.interface,
                     "dial_addr": rule.dial_addr,
@@ -723,13 +788,17 @@ def apply_rule(
         state_payload = {
             "rule_name": rule.name,
             "line": rule.line,
+            "line_family": report.line.family,
+            "applied_line": asdict(report.line),
             "enabled": True,
             "unit_name": unit_name,
             "realm_bin": report.realm_info.path,
             "realm_version": report.realm_info.version_text,
             "realm_origin": report.realm_info.origin,
             "listen": rule.listen_endpoint,
-            "remote": f"{rule.remote_ip}:{rule.remote_port}",
+            "listen_interface": bound_listen_iface,
+            "remote": rule.remote_endpoint,
+            "remote_family": rule.remote_family,
             "through": report.line.source_ip,
             "egress_interface": report.line.interface,
             "public_port": rule.public_port,
@@ -778,11 +847,15 @@ def apply_rule(
                 "unit_name": unit_name,
                 "main_pid": main_pid,
                 "line": rule.line,
+                "line_family": report.line.family,
                 "interface": report.line.interface,
                 "gateway": report.line.gateway,
                 "table": report.line.table,
                 "listen": rule.listen_endpoint,
-                "remote": f"{rule.remote_ip}:{rule.remote_port}",
+                "listen_interface": report.listen_interface,
+                "bound_listen_interface": bound_listen_iface,
+                "remote": rule.remote_endpoint,
+                "remote_family": rule.remote_family,
                 "through": report.line.source_ip,
                 "egress_interface": report.line.interface,
                 "dial_addr": rule.dial_addr,
@@ -878,11 +951,15 @@ def apply_rule(
             "unit_name": unit_name,
             "main_pid": main_pid,
             "line": rule.line,
+            "line_family": report.line.family,
             "interface": report.line.interface,
             "gateway": report.line.gateway,
             "table": report.line.table,
             "listen": rule.listen_endpoint,
-            "remote": f"{rule.remote_ip}:{rule.remote_port}",
+            "listen_interface": report.listen_interface,
+            "bound_listen_interface": bound_listen_iface,
+            "remote": rule.remote_endpoint,
+            "remote_family": rule.remote_family,
             "through": report.line.source_ip,
             "egress_interface": report.line.interface,
             "dial_addr": rule.dial_addr,
@@ -900,32 +977,42 @@ def verify_startup_rule(
     rule_name: str,
     wait_timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Systemd ExecStartPre check: wait until line interface, source IP, policy route, and oif route are ready."""
+    """Systemd ExecStartPre check: wait until line interface, source IP, policy/egress route, and return route are ready."""
     validate_rule_name(rule_name)
     _assert_rule_owned_for_mutation(global_cfg, rule_name)
     paths = _rule_paths(global_cfg, rule_name)
     if not paths["stored_rule"].is_file():
         raise ConfigError(f"启动前检查失败，缺少规则文件: {paths['stored_rule']}")
     rule = load_rule_config(str(paths["stored_rule"]), default_domain=global_cfg.ingress.default_domain)
-    if rule.line not in global_cfg.lines:
+    state = _load_state_json(paths["state_json"])
+    line = _applied_line(global_cfg, rule, state)
+    if line is None:
         raise PreflightError(f"启动前检查失败，线路 {rule.line!r} 不在主配置中")
-    line = global_cfg.lines[rule.line]
+    if rule.remote_is_ipv6 != line.is_ipv6:
+        raise PreflightError(
+            f"启动前检查失败，规则 {rule.name!r} 落地地址族 ({rule.remote_family}) 与线路 {rule.line!r} ({line.family}) 不匹配"
+        )
 
     if not paths["realm_toml"].is_file():
         raise ConfigError(f"启动前检查失败，缺少 Realm 运行配置: {paths['realm_toml']}")
     realm_lines = paths["realm_toml"].read_text(encoding="utf-8", errors="replace").splitlines()
-    expected_through = f'through = "{line.source_ip}"'
+    expected_remote = f'remote = "{rule.remote_endpoint}"'
+    expected_through = f'through = "{format_realm_through(line.source_ip)}"'
     expected_iface = f'interface = "{line.interface}"'
-    if expected_through not in realm_lines or expected_iface not in realm_lines:
+    if expected_remote not in realm_lines or expected_through not in realm_lines or expected_iface not in realm_lines:
         raise PreflightError(
-            f"Realm 运行配置 ({paths['realm_toml']}) 未同时绑定 {expected_through} 与 {expected_iface}，拒绝启动"
+            f"Realm 运行配置 ({paths['realm_toml']}) 未同时绑定 {expected_remote}、{expected_through} 与 {expected_iface}，拒绝启动"
         )
-    ingress_iface = global_cfg.ingress.listen_interface
-    if rule.direct_ipv6 and f'listen = "{rule.listen_endpoint}"' not in realm_lines:
-        raise PreflightError(f"Realm 运行配置缺少公网监听 {rule.listen_endpoint}，请重新应用规则")
-    if not rule.direct_ipv6 and ingress_iface and f'listen_interface = "{ingress_iface}"' not in realm_lines:
+    ingress_iface = _applied_listen_interface(global_cfg, rule, state)
+    if rule.direct_ipv6:
+        if f'listen = "{rule.listen_endpoint}"' not in realm_lines:
+            raise PreflightError(f"Realm 运行配置缺少公网监听 {rule.listen_endpoint}，请重新应用规则")
+        if any(ln.startswith("listen_interface = ") for ln in realm_lines):
+            raise PreflightError("IPv6 直连规则的 Realm 运行配置不应绑定 listen_interface，请重新应用规则")
+    elif ingress_iface and f'listen_interface = "{ingress_iface}"' not in realm_lines:
         raise PreflightError(f"Realm 运行配置缺少入口网卡绑定 {ingress_iface}，请重新应用规则")
 
+    applied_cfg = replace(global_cfg, ingress=replace(global_cfg.ingress, listen_interface=ingress_iface))
     max_wait = float(
         global_cfg.tool.startup_route_wait_seconds if wait_timeout is None else max(0.0, wait_timeout)
     )
@@ -934,17 +1021,20 @@ def verify_startup_rule(
     while True:
         try:
             link_states, addr_map = get_local_network_state()
-            listen_iface = verify_local_listen_ip(rule.listen_ip, addr_map)
-            verify_line_interface_and_source(line, link_states, addr_map)
+            ipv6_addr_map = get_local_ipv6_addresses() if (rule.direct_ipv6 or line.is_ipv6) else None
+            listen_iface = verify_local_listen_ip(rule.listen_ip, addr_map, ipv6_addr_map=ipv6_addr_map)
+            verify_line_interface_and_source(line, link_states, addr_map, ipv6_addr_map=ipv6_addr_map)
             route_res = verify_egress_route(line, rule.remote_ip)
-            return_route = _verify_return_route(global_cfg, rule.listen_ip, listen_iface, link_states, addr_map)
+            return_route = _verify_return_route(applied_cfg, rule.listen_ip, listen_iface, link_states, addr_map)
             return {
                 "rule_name": rule.name,
                 "line": line.name,
+                "line_family": line.family,
                 "interface": line.interface,
                 "source_ip": line.source_ip,
                 "gateway": line.gateway,
                 "table": line.table,
+                "remote": rule.remote_endpoint,
                 "route_output": route_res.raw_output,
                 "return_route": return_route.raw_output,
             }
@@ -952,7 +1042,7 @@ def verify_startup_rule(
             last_err = str(exc)
             if time.monotonic() >= deadline:
                 raise PreflightError(
-                    f"等待线路 {line.name!r} 源策略路由就绪超时 ({max_wait:.1f}s): {last_err}"
+                    f"等待线路 {line.name!r} 出口路由就绪超时 ({max_wait:.1f}s): {last_err}"
                 ) from exc
             time.sleep(0.5)
 
@@ -983,6 +1073,10 @@ def _inspect_single_rule_status(
     rule: RuleConfig,
     listeners: List[Any],
     check_dns: bool = False,
+    link_states: Optional[Dict[str, Tuple[str, List[str]]]] = None,
+    addr_map: Optional[Dict[str, List[str]]] = None,
+    ipv6_addr_map: Optional[Dict[str, List[LocalIpv6Addr]]] = None,
+    net_error: str = "",
 ) -> Dict[str, Any]:
     unit_name = unit_name_for_rule(global_cfg.tool.systemd_unit_template, rule.name)
     props = systemd_show(unit_name)
@@ -1000,30 +1094,45 @@ def _inspect_single_rule_status(
         for s in listeners
     )
 
-    line_cfg = global_cfg.lines.get(rule.line)
+    state_data = _load_state_json(_rule_paths(global_cfg, rule.name)["state_json"])
+    desired_line = global_cfg.lines.get(rule.line)
+    bound_listen_iface = _applied_listen_interface(global_cfg, rule, state_data)
+    desired_listen_iface = "" if rule.direct_ipv6 else global_cfg.ingress.listen_interface
+    line_cfg = None
     route_ok = False
     route_detail = ""
-    if line_cfg is None:
-        route_detail = f"主配置缺少线路 {rule.line!r}"
-    else:
-        try:
-            rt = verify_egress_route(line_cfg, rule.remote_ip)
-            route_ok = True
-            route_detail = rt.raw_output
-        except PreflightError as exc:
-            route_detail = str(exc)
+    try:
+        line_cfg = _applied_line(global_cfg, rule, state_data)
+        if line_cfg is None:
+            raise PreflightError(f"缺少线路 {rule.line!r} 的已应用记录")
+        if net_error:
+            raise PreflightError(net_error)
+        if link_states is not None and addr_map is not None:
+            verify_line_interface_and_source(line_cfg, link_states, addr_map, ipv6_addr_map=ipv6_addr_map)
+        rt = verify_egress_route(line_cfg, rule.remote_ip)
+        route_ok = True
+        route_detail = rt.raw_output
+    except (ConfigError, PreflightError) as exc:
+        route_detail = str(exc)
+
+    pending_network = {}
+    if desired_line is None:
+        pending_network["line_removed"] = True
+    elif line_cfg and _line_route_settings(desired_line) != _line_route_settings(line_cfg):
+        pending_network["line"] = asdict(desired_line)
+    if desired_listen_iface != bound_listen_iface:
+        pending_network["listen_interface"] = desired_listen_iface
 
     stale_warning = None
     if check_dns and rule.ingress_fixed_ip:
         dns_res = query_dns_a(domain=rule.ingress_domain, dns_server=global_cfg.ingress.dns_server)
         stale_warning = check_fixed_ip_staleness(rule.ingress_fixed_ip, rule.ingress_domain, dns_res)
 
-    state_data = _load_state_json(_rule_paths(global_cfg, rule.name)["state_json"])
-
     return {
         "rule_name": rule.name,
         "description": rule.description,
         "line": rule.line,
+        "line_family": line_cfg.family if line_cfg else "",
         "line_description": line_cfg.description if line_cfg else "",
         "unit_name": unit_name,
         "enabled": enabled,
@@ -1033,11 +1142,17 @@ def _inspect_single_rule_status(
         "n_restarts": restarts,
         "listening_ok": listening_ok,
         "route_ok": route_ok,
+        "route_check_kind": "kernel_route_lookup",
         "route_detail": route_detail,
+        "pending_network": pending_network,
         "listen": rule.listen_endpoint,
-        "remote": f"{rule.remote_ip}:{rule.remote_port}",
+        "listen_interface": bound_listen_iface,
+        "remote": rule.remote_endpoint,
+        "remote_family": rule.remote_family,
         "through": line_cfg.source_ip if line_cfg else "",
         "egress_interface": line_cfg.interface if line_cfg else "",
+        "egress_gateway": line_cfg.gateway if line_cfg else "",
+        "egress_table": line_cfg.table if line_cfg else None,
         "public_port": rule.public_port,
         "ingress_domain": rule.ingress_domain,
         "ingress_fixed_ip": rule.ingress_fixed_ip,
@@ -1061,11 +1176,41 @@ def status_rules(
         rule_path = _rule_paths(global_cfg, rule_name)["stored_rule"]
         if not rule_path.is_file():
             raise ConfigError(f"未找到托管规则: {rule_name} ({rule_path})")
-        rule = load_rule_config(str(rule_path), default_domain=global_cfg.ingress.default_domain)
-        return [_inspect_single_rule_status(global_cfg, rule, listeners, check_dns=check_dns)]
+        rules = [load_rule_config(str(rule_path), default_domain=global_cfg.ingress.default_domain)]
+    else:
+        rules = list_managed_rules(global_cfg)
 
-    rules = list_managed_rules(global_cfg)
-    return [_inspect_single_rule_status(global_cfg, r, listeners, check_dns=check_dns) for r in rules]
+    link_states: Optional[Dict[str, Tuple[str, List[str]]]] = None
+    addr_map: Optional[Dict[str, List[str]]] = None
+    ipv6_addr_map: Optional[Dict[str, List[LocalIpv6Addr]]] = None
+    net_error = ""
+    if rules:
+        try:
+            link_states, addr_map = get_local_network_state()
+            needs_v6 = any(
+                r.direct_ipv6
+                or r.remote_is_ipv6
+                or (r.line in global_cfg.lines and global_cfg.lines[r.line].is_ipv6)
+                for r in rules
+            )
+            if needs_v6:
+                ipv6_addr_map = get_local_ipv6_addresses()
+        except PreflightError as exc:
+            net_error = str(exc)
+
+    return [
+        _inspect_single_rule_status(
+            global_cfg,
+            r,
+            listeners,
+            check_dns=check_dns,
+            link_states=link_states,
+            addr_map=addr_map,
+            ipv6_addr_map=ipv6_addr_map,
+            net_error=net_error,
+        )
+        for r in rules
+    ]
 
 
 def disable_rule(
@@ -1274,8 +1419,12 @@ def unselect_rule_ingress_ip(
         }
 
 
-def check_prereqs(global_cfg: GlobalConfig, probe_remote: str = "192.0.2.10") -> Dict[str, Any]:
-    """Read-only verification of Realm binary and every configured line's NIC, IP, and policy routing."""
+def check_prereqs(
+    global_cfg: GlobalConfig,
+    probe_remote: str = "192.0.2.10",
+    probe_remote_v6: str = PUBLIC_ROUTE_PROBE_IPV6,
+) -> Dict[str, Any]:
+    """Read-only verification of Realm binary and every configured line's NIC, IP, and egress routing."""
     realm_ok = True
     realm_detail: Any
     try:
@@ -1293,20 +1442,26 @@ def check_prereqs(global_cfg: GlobalConfig, probe_remote: str = "192.0.2.10") ->
         realm_detail = str(exc)
 
     link_states, addr_map = get_local_network_state()
+    has_ipv6_line = any(line.is_ipv6 for line in global_cfg.lines.values())
+    ipv6_addr_map = get_local_ipv6_addresses() if has_ipv6_line else None
     line_checks: List[Dict[str, Any]] = []
     all_lines_ok = True
     for name, line in global_cfg.lines.items():
+        target_probe = probe_remote_v6 if line.is_ipv6 else probe_remote
         try:
-            verify_line_interface_and_source(line, link_states, addr_map)
-            rt = verify_egress_route(line, probe_remote)
+            verify_line_interface_and_source(line, link_states, addr_map, ipv6_addr_map=ipv6_addr_map)
+            rt = verify_egress_route(line, target_probe)
             line_checks.append(
                 {
                     "line": name,
+                    "family": line.family,
                     "ok": True,
                     "interface": line.interface,
                     "source_ip": line.source_ip,
                     "gateway": line.gateway,
                     "table": line.table,
+                    "probe_target": target_probe,
+                    "route_check_kind": "kernel_route_lookup",
                     "route_output": rt.raw_output,
                 }
             )
@@ -1315,11 +1470,14 @@ def check_prereqs(global_cfg: GlobalConfig, probe_remote: str = "192.0.2.10") ->
             line_checks.append(
                 {
                     "line": name,
+                    "family": line.family,
                     "ok": False,
                     "interface": line.interface,
                     "source_ip": line.source_ip,
                     "gateway": line.gateway,
                     "table": line.table,
+                    "probe_target": target_probe,
+                    "route_check_kind": "kernel_route_lookup",
                     "error": str(exc),
                 }
             )
@@ -1329,5 +1487,6 @@ def check_prereqs(global_cfg: GlobalConfig, probe_remote: str = "192.0.2.10") ->
         "realm_ok": realm_ok,
         "realm": realm_detail,
         "probe_remote": probe_remote,
+        "probe_remote_v6": probe_remote_v6,
         "lines": line_checks,
     }

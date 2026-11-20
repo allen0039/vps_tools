@@ -21,7 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from leikwan_tools import MANAGED_MARKER, REALM_RELEASES  # noqa: E402
+from leikwan_tools import MANAGED_MARKER, REALM_RELEASES, __version__  # noqa: E402
 from leikwan_tools.cli import main  # noqa: E402
 from leikwan_tools.config import (  # noqa: E402
     ConfigError,
@@ -153,7 +153,7 @@ class TestInteractiveShortcut(unittest.TestCase):
                 env=env,
                 check=True,
             )
-            self.assertIn("leikwan_tools 利群转发助手 v0.1.4", menu.stdout)
+            self.assertIn(f"leikwan_tools 利群转发助手 v{__version__}", menu.stdout)
             self.assertIn("转发规则管理", menu.stdout)
             self.assertNotIn("预览规则部署", menu.stdout)
             self.assertNotIn("应用规则文件", menu.stdout)
@@ -165,7 +165,7 @@ class TestInteractiveShortcut(unittest.TestCase):
                 env=env,
                 check=True,
             )
-            self.assertEqual(version.stdout.strip(), "leikwan_tools 0.1.4")
+            self.assertEqual(version.stdout.strip(), f"leikwan_tools {__version__}")
 
     def test_menu_delete_lists_rules_requires_confirmation_and_returns_after_error(self) -> None:
         cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))
@@ -369,11 +369,27 @@ class TestConfigValidation(unittest.TestCase):
         with self.assertRaises(ConfigError):
             parse_rule_config_dict(bad)
 
-        # Reject IPv6
-        bad = loads_toml(self.example_rule)
-        bad["forward"]["remote_ip"] = "2001:db8::1"
-        with self.assertRaises(ConfigError):
-            parse_rule_config_dict(bad)
+        # Accept canonicalized IPv6 literal remote_ip; reject link-local, loopback, unspecified, multicast, v4-mapped, scope_id, domain
+        v6_ok = loads_toml(self.example_rule)
+        v6_ok["forward"]["remote_ip"] = "2001:0db8::1"
+        v6_rule = parse_rule_config_dict(v6_ok)
+        self.assertTrue(v6_rule.remote_is_ipv6)
+        self.assertEqual(v6_rule.remote_ip, "2001:db8::1")
+        self.assertEqual(v6_rule.remote_endpoint, "[2001:db8::1]:54141")
+
+        for bad_remote in (
+            "fe80::1",
+            "::1",
+            "::",
+            "ff02::1",
+            "::ffff:192.0.2.10",
+            "2001:db8::1%eth0",
+            "example.com",
+        ):
+            bad = loads_toml(self.example_rule)
+            bad["forward"]["remote_ip"] = bad_remote
+            with self.assertRaises(ConfigError, msg=bad_remote):
+                parse_rule_config_dict(bad)
 
         # Reject invalid port / bool port
         bad = loads_toml(self.example_rule)
@@ -1324,7 +1340,7 @@ class TestDdnsSubsystem(unittest.TestCase):
             original = self.base_cfg_toml.replace("/run/leikwan_tools.lock", str(base / "tool.lock"))
             config.write_text(original, encoding="utf-8")
             config.chmod(0o640)
-            create = ["2", "ct.edge", "1", "ens3", "1", "example.net", "edge", str(credentials), ""]
+            create = ["2", "ct.edge", "1", "1", "example.net", "edge", str(credentials), ""]
             edit = ["3", "ct.edge", "", "", "", "", "edge-new", "", ""]
             answers = [
                 "7", "1", *create, "n", *create, "y", "1", "7", "ct.edge", "y", "8", "y",
@@ -1343,11 +1359,12 @@ class TestDdnsSubsystem(unittest.TestCase):
             self.assertTrue(saved.ddns.enabled)
             profile = saved.ddns.profiles["ct.edge"]
             self.assertTrue(profile.enabled)
-            self.assertEqual(profile.interface, "ens3")
+            self.assertEqual(profile.interface, "auto")
             self.assertEqual(profile.fqdn, "edge-new.example.net")
             self.assertEqual(config.stat().st_mode & 0o777, 0o640)
             self.assertTrue(config.read_text(encoding="utf-8").startswith(original))
             self.assertIn("7. IPv6 DDNS 域名管理", output.getvalue())
+            self.assertIn("自动识别电信 IPv6，无需填写网卡名", output.getvalue())
             self.assertIn("新建配置默认暂停", output.getvalue())
             inspect.assert_called_once_with(saved, None)
             test.assert_called_once_with(saved, "ct.edge")
@@ -1385,6 +1402,7 @@ class TestDdnsSubsystem(unittest.TestCase):
             save_ddns_config(before, profile_name="ct.edge", changes={"zone": "other.net", "host": "new"})
             saved = load_global_config(str(config))
             self.assertEqual(saved.ddns.interval_seconds, 180)
+            self.assertEqual(saved.ddns.profiles["ct.edge"].interface, "ens3")
             self.assertEqual(saved.ddns.profiles["ct.edge"].verify_interval_seconds, 41)
             self.assertEqual(saved.ddns.profiles["ct.edge"].fqdn, "new.other.net")
             updated = config.read_text(encoding="utf-8")
@@ -1622,6 +1640,74 @@ credential_file = "/tmp/cu.env"
         # Failed probe for CU returns empty IP
         self.assertEqual(res_cu.selected_ip, "")
         self.assertFalse(res_cu.candidates[0].probe_ok)
+
+    def test_auto_ddns_discovers_both_isps_and_tracks_interface_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            config = base / "config.toml"
+            credentials = base / "cloudflare.env"
+            credentials.write_text("CF_API_TOKEN=offline-test-token\n", encoding="utf-8")
+            credentials.chmod(0o600)
+            config.write_text(
+                self.base_cfg_toml.replace("/run/leikwan_tools.lock", str(base / "tool.lock"))
+                .replace("/var/lib/leikwan_tools", str(base / "state"))
+                + '\n[ddns.ct]\nprovider = "cloudflare"\nzone = "example.net"\nhost = "ct"\n'
+                + f'credential_file = "{credentials}"\n'
+                + '[ddns.cu]\ninterface = "auto"\nprovider = "cloudflare"\nzone = "example.net"\nhost = "cu"\n'
+                + f'credential_file = "{credentials}"\n',
+                encoding="utf-8",
+            )
+            cfg = load_global_config(str(config))
+            self.assertEqual(cfg.ddns.profiles["ct"].interface, "auto")
+
+            ct_addr = "2: fiber0@if9 inet6 240e::1/64 scope global"
+            cu_addr = "3: fiber1 inet6 2408::1/64 scope global"
+            addr_output = "\n".join((
+                ct_addr,
+                cu_addr,
+                "4: backup inet6 240e::2/64 scope global",
+                "4: backup inet6 240e::3/64 scope global tentative",
+                "4: backup inet6 240e::4/64 scope global \\ valid_lft 99sec preferred_lft 0sec",
+                "4: backup inet6 2606:4700::1/64 scope global",
+            ))
+            expected_scan = ["ip", "-6", "-o", "addr", "show", "scope", "global"]
+            rtt_by_address = {"240e::1": 4.0, "240e::2": 9.0, "2408::1": 5.0}
+
+            def fake_run(cmd, **kwargs):
+                if cmd == expected_scan:
+                    return subprocess.CompletedProcess(cmd, 0, addr_output, "")
+                self.assertEqual(cmd[0], "ping")
+                rtt = rtt_by_address[cmd[cmd.index("-I") + 1]]
+                return subprocess.CompletedProcess(cmd, 0, f"time={rtt} ms", "")
+
+            with (
+                patch("leikwan_tools.ddns.run_cmd", side_effect=fake_run),
+                patch.object(CloudflareProvider, "sync_record", return_value=ProviderSyncResult(
+                    "updated", "", "", [], "test sync"
+                )) as sync,
+            ):
+                results = update_ddns(cfg)["results"]
+                self.assertEqual(
+                    [(item["interface"], item["selected_interface"], item["selected_ip"]) for item in results],
+                    [("auto", "fiber0", "240e::1"), ("auto", "fiber1", "2408::1")],
+                )
+                self.assertEqual([call.args[1] for call in sync.call_args_list], ["240e::1", "2408::1"])
+
+                addr_output = addr_output.replace("fiber0@if9", "wan-new")
+                cached = update_ddns(cfg, "ct")["results"][0]
+                self.assertEqual(cached["action"], "skipped_cached")
+                self.assertEqual(status_ddns(cfg, "ct")["profiles"][0]["selected_interface"], "wan-new")
+                with redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(main(["--config", str(config), "ddns", "status", "--profile", "ct"]), 0)
+                self.assertIn("自动（wan-new）", output.getvalue())
+
+                addr_output = cu_addr
+                missing = update_ddns(cfg, "ct")["results"][0]
+                self.assertEqual(missing["action"], "skipped_no_ip")
+                status = status_ddns(cfg, "ct")["profiles"][0]
+                self.assertEqual(status["selected_interface"], "")
+                self.assertEqual(status["last_success_ip"], "240e::1")
+                self.assertEqual(sync.call_count, 2)
 
     def test_credential_permissions_cf_modes_and_secret_redaction(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -2122,8 +2208,438 @@ credential_file = "/tmp/cu.env"
             self.assertNotIn("cli-secret-9876", out_st.getvalue())
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+class TestIpv6EgressAndLanding(unittest.TestCase):
+    BASE_CFG = """
+[tool]
+rules_dir = "{rules_dir}"
+state_dir = "{state_dir}"
+lock_file = "{lock_file}"
+
+[ingress]
+default_domain = "paid-v4.bgp1.leikwanhost.com"
+listen_interface = "eth0"
+
+[lines.9929]
+interface = "eth0"
+source_ip = "10.7.0.146"
+gateway = "10.7.0.1"
+table = 101
+description = "CUII 9929"
+
+[lines.cn2]
+interface = "eth1"
+source_ip = "10.8.0.146"
+gateway = "10.8.0.1"
+table = 102
+description = "CN2 GIA"
+
+[lines.ct_v6]
+family = "ipv6"
+interface = "eth0"
+source_ip = "240e:0100:1::146"
+gateway = "fe80::1"
+description = "电信 IPv6"
+
+[lines.cu_v6]
+interface = "eth1"
+source_ip = "2408:0200:1::146"
+gateway = "2408:0200:1::1"
+table = 202
+description = "联通 IPv6"
+"""
+
+    def test_ipv6_line_parsing_and_rejections(self) -> None:
+        raw = self.BASE_CFG.format(rules_dir="/tmp/r", state_dir="/tmp/s", lock_file="/tmp/l")
+        d1 = loads_toml(raw)
+        d2 = _fallback_loads(raw)
+        self.assertEqual(d1, d2)
+        gcfg = parse_global_config_dict(d2)
+
+        ct = gcfg.lines["ct_v6"]
+        self.assertTrue(ct.is_ipv6)
+        self.assertEqual(ct.family, "ipv6")
+        self.assertEqual(ct.source_ip, "240e:100:1::146")
+        self.assertEqual(ct.gateway, "fe80::1")
+        self.assertIsNone(ct.table)
+
+        cu = gcfg.lines["cu_v6"]
+        self.assertTrue(cu.is_ipv6)
+        self.assertEqual(cu.family, "ipv6")
+        self.assertEqual(cu.source_ip, "2408:200:1::146")
+        self.assertEqual(cu.gateway, "2408:200:1::1")
+        self.assertEqual(cu.table, 202)
+
+        # Reject family/source mismatches and invalid IPv6 fields
+        bad_fam = loads_toml(raw)
+        bad_fam["lines"]["ct_v6"]["family"] = "ipv4"
+        with self.assertRaises(ConfigError):
+            parse_global_config_dict(bad_fam)
+
+        bad_v4_gw = loads_toml(raw)
+        bad_v4_gw["lines"]["ct_v6"]["gateway"] = "10.7.0.1"
+        with self.assertRaises(ConfigError):
+            parse_global_config_dict(bad_v4_gw)
+
+        bad_scope_src = loads_toml(raw)
+        bad_scope_src["lines"]["ct_v6"]["source_ip"] = "240e:100:1::146%eth0"
+        with self.assertRaises(ConfigError):
+            parse_global_config_dict(bad_scope_src)
+
+        bad_scope_gw = loads_toml(raw)
+        bad_scope_gw["lines"]["ct_v6"]["gateway"] = "fe80::1%eth0"
+        with self.assertRaises(ConfigError):
+            parse_global_config_dict(bad_scope_gw)
+
+        bad_ll_src = loads_toml(raw)
+        bad_ll_src["lines"]["ct_v6"]["source_ip"] = "fe80::1"
+        with self.assertRaises(ConfigError):
+            parse_global_config_dict(bad_ll_src)
+
+        bad_tbl = loads_toml(raw)
+        bad_tbl["lines"]["cu_v6"]["table"] = 255
+        with self.assertRaises(ConfigError):
+            parse_global_config_dict(bad_tbl)
+
+    def test_render_realm_toml_all_four_combinations_and_family_guard(self) -> None:
+        raw = self.BASE_CFG.format(rules_dir="/tmp/r", state_dir="/tmp/s", lock_file="/tmp/l")
+        gcfg = parse_global_config_dict(loads_toml(raw))
+
+        # Combo 1: IPv6 direct -> IPv4 line -> IPv4 landing
+        r1 = parse_rule_config_dict(
+            {
+                "rule": {"name": "c1", "line": "cn2"},
+                "ingress": {"public_port": 54201},
+                "forward": {"listen_ip": "240e:100:1::146", "listen_port": 54201, "remote_ip": "192.0.2.10", "remote_port": 54141},
+            }
+        )
+        p1 = loads_toml(render_realm_toml(r1, gcfg.lines["cn2"], gcfg.ingress.listen_interface))
+        self.assertEqual(p1["dns"]["mode"], "ipv4_only")
+        self.assertEqual(p1["endpoints"][0]["listen"], "[240e:100:1::146]:54201")
+        self.assertEqual(p1["endpoints"][0]["remote"], "192.0.2.10:54141")
+        self.assertEqual(p1["endpoints"][0]["through"], "10.8.0.146")
+        self.assertEqual(p1["endpoints"][0]["interface"], "eth1")
+        self.assertNotIn("listen_interface", p1["endpoints"][0])
+
+        # Combo 2: IPv6 direct -> IPv6 line -> IPv6 landing
+        r2 = parse_rule_config_dict(
+            {
+                "rule": {"name": "c2", "line": "cu_v6"},
+                "ingress": {"public_port": 54202},
+                "forward": {"listen_ip": "240e:100:1::146", "listen_port": 54202, "remote_ip": "2001:0db8:99::10", "remote_port": 54141},
+            }
+        )
+        p2 = loads_toml(render_realm_toml(r2, gcfg.lines["cu_v6"], gcfg.ingress.listen_interface))
+        self.assertEqual(p2["dns"]["mode"], "ipv6_only")
+        self.assertEqual(p2["endpoints"][0]["listen"], "[240e:100:1::146]:54202")
+        self.assertEqual(p2["endpoints"][0]["remote"], "[2001:db8:99::10]:54141")
+        self.assertEqual(p2["endpoints"][0]["through"], "[2408:200:1::146]")
+        self.assertEqual(p2["endpoints"][0]["interface"], "eth1")
+        self.assertNotIn("listen_interface", p2["endpoints"][0])
+
+        # Combo 3: IPv4 BGP -> IPv4 line -> IPv4 landing
+        r3 = parse_rule_config_dict(
+            {
+                "rule": {"name": "c3", "line": "cn2"},
+                "ingress": {"public_port": 54203},
+                "forward": {"listen_ip": "10.7.0.146", "listen_port": 10003, "remote_ip": "192.0.2.10", "remote_port": 54141},
+            }
+        )
+        p3 = loads_toml(render_realm_toml(r3, gcfg.lines["cn2"], gcfg.ingress.listen_interface))
+        self.assertEqual(p3["dns"]["mode"], "ipv4_only")
+        self.assertEqual(p3["endpoints"][0]["listen"], "10.7.0.146:10003")
+        self.assertEqual(p3["endpoints"][0]["listen_interface"], "eth0")
+        self.assertEqual(p3["endpoints"][0]["through"], "10.8.0.146")
+        self.assertEqual(p3["endpoints"][0]["interface"], "eth1")
+
+        # Combo 4: IPv4 BGP -> IPv6 line -> IPv6 landing
+        r4 = parse_rule_config_dict(
+            {
+                "rule": {"name": "c4", "line": "cu_v6"},
+                "ingress": {"public_port": 54204},
+                "forward": {"listen_ip": "10.7.0.146", "listen_port": 10004, "remote_ip": "2001:db8:99::10", "remote_port": 54141},
+            }
+        )
+        p4 = loads_toml(render_realm_toml(r4, gcfg.lines["cu_v6"], gcfg.ingress.listen_interface))
+        self.assertEqual(p4["dns"]["mode"], "ipv6_only")
+        self.assertEqual(p4["endpoints"][0]["listen"], "10.7.0.146:10004")
+        self.assertEqual(p4["endpoints"][0]["listen_interface"], "eth0")
+        self.assertEqual(p4["endpoints"][0]["remote"], "[2001:db8:99::10]:54141")
+        self.assertEqual(p4["endpoints"][0]["through"], "[2408:200:1::146]")
+        self.assertEqual(p4["endpoints"][0]["interface"], "eth1")
+
+        # Mismatched remote/line family rejected
+        with self.assertRaises(ConfigError):
+            render_realm_toml(r4, gcfg.lines["cn2"], gcfg.ingress.listen_interface)
+        with self.assertRaises(ConfigError):
+            render_realm_toml(r3, gcfg.lines["cu_v6"], gcfg.ingress.listen_interface)
+
+    def test_ipv6_local_addr_parsing_and_interface_source_validation(self) -> None:
+        from leikwan_tools.system import parse_ip_addr_ipv6, verify_line_interface_and_source
+
+        ip_out = (
+            "2: eth0    inet6 240e:100:1::146/64 scope global nodad \\       valid_lft forever preferred_lft forever\n"
+            "2: eth0    inet6 240e:100:1::dead/64 scope global deprecated \\       valid_lft 100sec preferred_lft 0sec\n"
+            "2: eth0    inet6 fe80::1/64 scope link \\       valid_lft forever preferred_lft forever\n"
+            "3: eth1    inet6 2408:200:1::146/64 scope global dynamic \\       valid_lft 3600sec preferred_lft 1800sec\n"
+            "3: eth1    inet6 2408:200:1::bad1/64 scope global tentative \\       valid_lft 3600sec preferred_lft 3600sec\n"
+            "3: eth1    inet6 2408:200:1::dad/64 scope global dadfailed \\       valid_lft 3600sec preferred_lft 3600sec\n"
+            "3: eth1    inet6 2408:200:1::bad0/64 scope global dynamic \\       valid_lft 3600sec preferred_lft 0sec\n"
+        )
+        v6_map = parse_ip_addr_ipv6(ip_out)
+        links = {"eth0": ("UP", ["UP", "LOWER_UP"]), "eth1": ("UP", ["UP", "LOWER_UP"])}
+
+        verify_line_interface_and_source(
+            LineConfig("ct_v6", "eth0", "240e:100:1::146"), links, {}, ipv6_addr_map=v6_map
+        )
+        verify_line_interface_and_source(
+            LineConfig("cu_v6", "eth1", "2408:200:1::146"), links, {}, ipv6_addr_map=v6_map
+        )
+
+        # Source IPv6 on wrong interface identifies actual interface
+        with self.assertRaises(PreflightError) as ctx_wrong:
+            verify_line_interface_and_source(
+                LineConfig("cu_bad", "eth0", "2408:200:1::146"), links, {}, ipv6_addr_map=v6_map
+            )
+        self.assertIn("不在指定网卡 eth0 上", str(ctx_wrong.exception))
+        self.assertIn("eth1", str(ctx_wrong.exception))
+
+        # Missing IPv6 source
+        with self.assertRaises(PreflightError) as ctx_miss:
+            verify_line_interface_and_source(
+                LineConfig("cu_miss", "eth1", "2408:200:1::999"), links, {}, ipv6_addr_map=v6_map
+            )
+        self.assertIn("缺少源 IPv6", str(ctx_miss.exception))
+
+        # Deprecated / tentative / dadfailed / preferred_lft=0 / link-local
+        for bad_ip, reason_tok in (
+            ("240e:100:1::dead", "deprecated"),
+            ("2408:200:1::bad1", "tentative"),
+            ("2408:200:1::dad", "dadfailed"),
+            ("2408:200:1::bad0", "preferred_lft=0"),
+            ("fe80::1", "scope=link"),
+        ):
+            iface = "eth0" if bad_ip.startswith("240e:") or bad_ip == "fe80::1" else "eth1"
+            with self.assertRaises(PreflightError) as ctx_unusable:
+                verify_line_interface_and_source(
+                    LineConfig("bad", iface, bad_ip), links, {}, ipv6_addr_map=v6_map
+                )
+            self.assertIn(reason_tok, str(ctx_unusable.exception))
+
+    def test_ipv6_egress_route_verification_and_no_fallback(self) -> None:
+        rt_tables = {"main": "254", "202": "202"}
+
+        class Res:
+            def __init__(self, rc, out, err=""):
+                self.returncode = rc
+                self.stdout = out
+                self.stderr = err
+
+        # 1) Dual-default main table (eth0 metric 100, eth1 metric 200) -> fallback oif eth1 succeeds
+        line_cu_main = LineConfig("cu_v6", "eth1", "2408:200:1::146", "2408:200:1::1")
+
+        def fake_dual_main(cmd, timeout=15.0):
+            if cmd == ["ip", "-6", "route", "get", "2001:db8:99::10", "from", "2408:200:1::146", "oif", "eth1"]:
+                return Res(0, "2001:db8:99::10 via 240e:100:1::1 dev eth0 src 240e:100:1::146 metric 100\n")
+            if cmd == ["ip", "-6", "route", "get", "2001:db8:99::10", "oif", "eth1"]:
+                return Res(0, "2001:db8:99::10 via 2408:200:1::1 dev eth1 src 2408:200:1::146 metric 200\n")
+            raise AssertionError(cmd)
+
+        with patch("leikwan_tools.system.run_cmd", side_effect=fake_dual_main), patch(
+            "leikwan_tools.system._load_rt_tables", return_value=rt_tables
+        ):
+            rt = verify_egress_route(line_cu_main, "2001:db8:99::10")
+            self.assertEqual(rt.dev, "eth1")
+            self.assertEqual(rt.via, "2408:200:1::1")
+
+        # 2) Withdrawn eth1 default route -> oif eth1 returns unreachable -> must fail!
+        def fake_withdrawn(cmd, timeout=15.0):
+            if "from" in cmd:
+                return Res(0, "2001:db8:99::10 via 240e:100:1::1 dev eth0 src 240e:100:1::146 metric 100\n")
+            return Res(2, "", "RTNETLINK answers: Network is unreachable")
+
+        with patch("leikwan_tools.system.run_cmd", side_effect=fake_withdrawn), patch(
+            "leikwan_tools.system._load_rt_tables", return_value=rt_tables
+        ):
+            with self.assertRaises(PreflightError) as ctx_wd:
+                verify_egress_route(line_cu_main, "2001:db8:99::10")
+            self.assertIn("严禁静默切到其他线路", str(ctx_wd.exception))
+
+        # 3) Explicit policy table 202 + ip -6 rule check
+        line_cu_tbl = LineConfig("cu_v6", "eth1", "2408:200:1::146", "2408:200:1::1", table=202)
+        v6_rules_ok = (
+            "202:\tfrom 2408:200:1::146 lookup 202\n"
+            "203:\tfrom 2408:200:1::146 unreachable\n"
+            "32766:\tfrom all lookup main\n"
+        )
+
+        def fake_tbl_ok(cmd, timeout=15.0):
+            if cmd[:4] == ["ip", "-6", "rule", "show"]:
+                return Res(0, v6_rules_ok)
+            return Res(0, "2001:db8:99::10 via 2408:200:1::1 dev eth1 table 202 src 2408:200:1::146 metric 1024\n")
+
+        with patch("leikwan_tools.system.run_cmd", side_effect=fake_tbl_ok), patch(
+            "leikwan_tools.system._load_rt_tables", return_value=rt_tables
+        ):
+            rt2 = verify_egress_route(line_cu_tbl, "2001:db8:99::10")
+            self.assertEqual(rt2.table, "202")
+
+        for invalid_rules in (
+            v6_rules_ok.replace("203:\tfrom 2408:200:1::146 unreachable\n", ""),
+            v6_rules_ok.replace("203:\tfrom 2408:200:1::146 unreachable", "203:\tfrom 2408:200:1::147 unreachable"),
+            v6_rules_ok.replace("203:", "32767:"),
+            v6_rules_ok.replace("203:", "202:"),
+            v6_rules_ok.replace("203:", "203:\tfrom all lookup main\n204:"),
+        ):
+            def fake_invalid_policy(cmd, timeout=15.0):
+                if cmd[:4] == ["ip", "-6", "rule", "show"]:
+                    return Res(0, invalid_rules)
+                return fake_tbl_ok(cmd, timeout)
+
+            with self.subTest(rules=invalid_rules), patch(
+                "leikwan_tools.system.run_cmd", side_effect=fake_invalid_policy
+            ), self.assertRaisesRegex(PreflightError, "unreachable"):
+                verify_egress_route(line_cu_tbl, "2001:db8:99::10")
+
+        # Missing rule 202 falling back to main table must fail!
+        def fake_tbl_missing(cmd, timeout=15.0):
+            if cmd[:4] == ["ip", "-6", "rule", "show"]:
+                return Res(0, "32766:\tfrom all lookup main\n")
+            return Res(0, "2001:db8:99::10 via 240e:100:1::1 dev eth0 src 240e:100:1::146 metric 100\n")
+
+        with patch("leikwan_tools.system.run_cmd", side_effect=fake_tbl_missing), patch(
+            "leikwan_tools.system._load_rt_tables", return_value=rt_tables
+        ):
+            with self.assertRaises(PreflightError) as ctx_tbl:
+                verify_egress_route(line_cu_tbl, "2001:db8:99::10")
+            self.assertIn("禁止退回主路由表", str(ctx_tbl.exception))
+
+        # Gateway mismatch fails
+        with patch("leikwan_tools.system.run_cmd", side_effect=fake_tbl_ok), patch(
+            "leikwan_tools.system._load_rt_tables", return_value=rt_tables
+        ):
+            with self.assertRaises(PreflightError) as ctx_gw:
+                verify_egress_route(LineConfig("cu_v6", "eth1", "2408:200:1::146", "2408:200:1::fe", table=202), "2001:db8:99::10")
+            self.assertIn("实际下一跳网关", str(ctx_gw.exception))
+
+        # Family mismatch fails
+        with self.assertRaises(PreflightError):
+            verify_egress_route(line_cu_main, "192.0.2.10")
+
+    def test_routing_plan_skips_ipv6_lines_and_verify_startup_checks_ipv6(self) -> None:
+        from leikwan_tools import routing
+        from leikwan_tools.manager import verify_startup_rule
+        from leikwan_tools.system import LocalIpv6Addr
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            rules_dir = base / "rules.d"
+            state_dir = base / "state"
+            rules_dir.mkdir()
+            (state_dir / "realm").mkdir(parents=True)
+            (state_dir / "state").mkdir(parents=True)
+            cfg_path = base / "config.toml"
+            cfg_path.write_text(
+                self.BASE_CFG.format(rules_dir=rules_dir, state_dir=state_dir, lock_file=base / "lock"),
+                encoding="utf-8",
+            )
+            gcfg = load_global_config(str(cfg_path))
+
+            # routing._profile must skip IPv6 lines and only inspect IPv4 lines
+            def fake_ip_json(*args, **kwargs):
+                if "eth0" in args:
+                    return [{"addr_info": [{"local": "10.7.0.146", "prefixlen": 24}]}]
+                if "eth1" in args:
+                    return [{"addr_info": [{"local": "10.8.0.146", "prefixlen": 24}]}]
+                raise AssertionError(args)
+
+            with patch("leikwan_tools.routing.get_local_network_state", return_value=({}, {})), patch(
+                "leikwan_tools.routing.verify_line_interface_and_source"
+            ) as m_v4_verify, patch("leikwan_tools.routing._ip_json", side_effect=fake_ip_json):
+                prof = routing._profile(gcfg)
+            self.assertEqual(list(prof), ["9929", "cn2"])
+            self.assertEqual([call.args[0].name for call in m_v4_verify.call_args_list], ["9929", "cn2"])
+
+            # Pure IPv6-only config fails routing._profile cleanly without touching routes
+            v6_only = parse_global_config_dict(
+                {"lines": {"ct_v6": {"interface": "eth0", "source_ip": "240e:100:1::146"}}}
+            )
+            with self.assertRaises(PreflightError) as ctx_v6only:
+                routing._profile(v6_only)
+            self.assertIn("没有 IPv4 出口线路", str(ctx_v6only.exception))
+
+            # verify_startup_rule validates IPv6 rendered Realm config and waits/passes
+            rule = parse_rule_config_dict(
+                {
+                    "rule": {"name": "v6r", "line": "cu_v6"},
+                    "ingress": {"public_port": 54204},
+                    "forward": {"listen_ip": "10.7.0.146", "listen_port": 10014, "remote_ip": "2001:db8:99::10", "remote_port": 54141},
+                }
+            )
+            (rules_dir / "v6r.toml").write_text(render_rule_toml(rule), encoding="utf-8")
+            (state_dir / "realm" / "v6r.toml").write_text(
+                render_realm_toml(rule, gcfg.lines["cu_v6"], gcfg.ingress.listen_interface),
+                encoding="utf-8",
+            )
+            (state_dir / "state" / "v6r.json").write_text(
+                json.dumps({"rule_name": "v6r", "unit_name": "leikwan_tools-realm@v6r.service"}),
+                encoding="utf-8",
+            )
+            links = {"eth0": ("UP", ["UP", "LOWER_UP"]), "eth1": ("UP", ["UP", "LOWER_UP"])}
+            addrs = {"eth0": ["10.7.0.146"], "eth1": ["10.8.0.146"]}
+            v6_addrs = {
+                "eth1": [LocalIpv6Addr("eth1", "2408:200:1::146", "global", ("nodad",), 1, "line")]
+            }
+            fake_rt = RouteGetResult("2001:db8:99::10", "2408:200:1::146", "eth1", "2408:200:1::1", "202", "2408:200:1::146", "ok-v6", ["ip"])
+            fake_ret = RouteGetResult("203.0.113.254", "10.7.0.146", "eth0", "10.7.0.1", "101", "10.7.0.146", "ok-ret", ["ip"])
+
+            with (
+                patch("leikwan_tools.manager.check_rule_ownership", return_value=("manifest", "registered")),
+                patch("leikwan_tools.manager.get_local_network_state", return_value=(links, addrs)),
+                patch("leikwan_tools.manager.get_local_ipv6_addresses", return_value=v6_addrs),
+                patch("leikwan_tools.manager.verify_egress_route", side_effect=[fake_rt, fake_ret]),
+            ):
+                res = verify_startup_rule(gcfg, "v6r", wait_timeout=0)
+            self.assertEqual(res["line_family"], "ipv6")
+            self.assertEqual(res["remote"], "[2001:db8:99::10]:54141")
+            self.assertEqual(res["route_output"], "ok-v6")
+
+    def test_menu_forward_filters_lines_by_remote_family(self) -> None:
+        raw = self.BASE_CFG.format(rules_dir="/tmp/r", state_dir="/tmp/s", lock_file="/tmp/l")
+        gcfg = parse_global_config_dict(loads_toml(raw))
+        # Create rule via menu: Combo 4 (official IPv4 BGP -> IPv6 landing -> cu_v6)
+        answers = ["2", "2", "bgp-v6", "", "54204", "10.7.0.146", "10014", "2001:0db8:99::10", "54141", "cu_v6", "y", "0", "0"]
+        with (
+            patch("builtins.input", side_effect=answers) as m_input,
+            patch("leikwan_tools.cli.load_global_config", return_value=gcfg),
+            patch("leikwan_tools.cli.plan_rule") as m_plan,
+            patch("leikwan_tools.cli.apply_rule") as m_apply,
+            patch("leikwan_tools.cli._print_plan"),
+            patch("leikwan_tools.cli._print_apply"),
+            redirect_stdout(io.StringIO()) as out,
+        ):
+            self.assertEqual(main(["menu"]), 0)
+        stdout_text = out.getvalue()
+        prompts = " ".join(str(c.args[0]) for c in m_input.call_args_list if c.args)
+        self.assertIn("仅显示匹配 IPv6 落地的线路", prompts)
+        self.assertIn("cu_v6（IPV6", stdout_text)
+        self.assertIn("ct_v6（IPV6", stdout_text)
+        self.assertNotIn("9929（IPV4", stdout_text)
+        self.assertNotIn("cn2（IPV4", stdout_text)
+        created_rule = m_plan.call_args.args[1]
+        self.assertEqual(created_rule.remote_ip, "2001:db8:99::10")
+        self.assertEqual(created_rule.line, "cu_v6")
+        m_apply.assert_called_once()
+
+        # Selecting an IPv4 line name when remote is IPv6 must fail invalid option
+        bad_answers = ["2", "2", "bgp-v6-bad", "", "54204", "10.7.0.146", "10014", "2001:db8:99::10", "54141", "cn2", "0", "0"]
+        with (
+            patch("builtins.input", side_effect=bad_answers),
+            patch("leikwan_tools.cli.load_global_config", return_value=gcfg),
+            redirect_stdout(io.StringIO()),
+            patch("sys.stderr", new_callable=io.StringIO) as err,
+        ):
+            self.assertEqual(main(["menu"]), 0)
+        self.assertIn("无效选项: cn2", err.getvalue())
 
 
 if __name__ == "__main__":

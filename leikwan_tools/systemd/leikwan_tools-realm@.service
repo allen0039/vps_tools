@@ -1,6 +1,6 @@
 # Managed-By: leikwan_tools
 [Unit]
-Description=leikwan_tools Realm IPv4 TCP Relay (%i)
+Description=leikwan_tools Realm TCP Relay (%i)
 After=network-online.target networking.service leikwan_tools-routing.service
 Wants=network-online.target
 StartLimitIntervalSec=300

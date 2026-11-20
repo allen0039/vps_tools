@@ -38,7 +38,7 @@ class SystemdError(SystemErrorBase):
 
 @dataclass(frozen=True)
 class RouteGetResult:
-    """Parsed output of `ip -4 route get <remote> from <src>`."""
+    """Parsed output of `ip -4/-6 route get <remote> from <src>`."""
 
     remote_ip: str
     source_ip: str
@@ -48,6 +48,45 @@ class RouteGetResult:
     src: str
     raw_output: str
     command: List[str]
+
+
+@dataclass(frozen=True)
+class LocalIpv6Addr:
+    """Parsed local IPv6 address entry with interface, scope, flags, and preferred lifetime."""
+
+    interface: str
+    ip: str
+    scope: str
+    flags: Tuple[str, ...]
+    preferred_lft: Optional[int]
+    raw_line: str = ""
+
+    @property
+    def unusable_reason(self) -> str:
+        if self.scope != "global":
+            return f"scope={self.scope or '未知'}（非 global）"
+        bad_flags = [flag for flag in ("tentative", "dadfailed", "deprecated") if flag in self.flags]
+        if bad_flags:
+            return f"状态标记为 {','.join(bad_flags)}"
+        if self.preferred_lft is not None and self.preferred_lft <= 0:
+            return "preferred_lft=0"
+        try:
+            addr = ipaddress.IPv6Address(self.ip)
+        except ipaddress.AddressValueError:
+            return f"非法 IPv6 地址 ({self.ip})"
+        if (
+            addr.is_link_local
+            or addr.is_loopback
+            or addr.is_unspecified
+            or addr.is_multicast
+            or addr.ipv4_mapped is not None
+        ):
+            return "非可用公网单播 IPv6 地址"
+        return ""
+
+    @property
+    def is_usable(self) -> bool:
+        return not self.unusable_reason
 
 
 @dataclass(frozen=True)
@@ -205,6 +244,118 @@ def parse_ip_addr_ipv4(output: str) -> Dict[str, List[str]]:
     return addrs
 
 
+def _parse_ipv6_preferred_lft(line: str) -> Optional[int]:
+    match = re.search(r"\bpreferred_lft\s+(\S+)", line)
+    if not match:
+        return None
+    raw = match.group(1).strip().lower()
+    if raw == "forever":
+        return 1
+    if raw.endswith("sec"):
+        raw = raw[:-3]
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def parse_ip_addr_ipv6(output: str) -> Dict[str, List[LocalIpv6Addr]]:
+    """Parse `ip -6 -o addr show` or `ip -6 addr show` into {iface: [LocalIpv6Addr, ...]}."""
+    addrs: Dict[str, List[LocalIpv6Addr]] = {}
+    current_iface: Optional[str] = None
+    pending: Optional[Tuple[str, str, str, Tuple[str, ...], str]] = None
+
+    def flush_pending(pref_lft: Optional[int]) -> None:
+        nonlocal pending
+        if pending is None:
+            return
+        iface, ip_str, scope, flags, raw_line = pending
+        pending = None
+        addrs.setdefault(iface, []).append(
+            LocalIpv6Addr(
+                interface=iface,
+                ip=ip_str,
+                scope=scope,
+                flags=flags,
+                preferred_lft=pref_lft,
+                raw_line=raw_line,
+            )
+        )
+
+    def handle_inet6(iface: str, rest_after_inet6: str, raw_line: str) -> None:
+        nonlocal pending
+        cleaned = rest_after_inet6.replace("\\", " ")
+        tokens = cleaned.split()
+        if not tokens:
+            return
+        cidr = tokens[0]
+        if "%" in cidr.split("/", 1)[0]:
+            return
+        try:
+            ip_str = str(ipaddress.IPv6Interface(cidr).ip)
+        except ValueError:
+            return
+        scope = ""
+        flags: List[str] = []
+        idx = 1
+        while idx < len(tokens):
+            tok = tokens[idx]
+            if tok == "scope" and idx + 1 < len(tokens):
+                scope = tokens[idx + 1]
+                idx += 2
+                continue
+            if tok in ("valid_lft", "preferred_lft"):
+                break
+            flags.append(tok)
+            idx += 1
+        if "preferred_lft" in cleaned:
+            addrs.setdefault(iface, []).append(
+                LocalIpv6Addr(
+                    interface=iface,
+                    ip=ip_str,
+                    scope=scope,
+                    flags=tuple(flags),
+                    preferred_lft=_parse_ipv6_preferred_lft(cleaned),
+                    raw_line=raw_line,
+                )
+            )
+        else:
+            pending = (iface, ip_str, scope, tuple(flags), raw_line)
+
+    for raw_line in output.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        one_line = re.match(r"^\d+:\s+(\S+)\s+inet6\s+(.*)$", stripped)
+        if one_line:
+            flush_pending(None)
+            current_iface = one_line.group(1).split("@", 1)[0]
+            handle_inet6(current_iface, one_line.group(2), stripped)
+            continue
+        hdr = re.match(r"^\d+:\s+([^:@]+)(?:@[^:\s]+)?:\s+", stripped)
+        if hdr:
+            flush_pending(None)
+            current_iface = hdr.group(1)
+            continue
+        if current_iface and stripped.startswith("inet6 "):
+            flush_pending(None)
+            handle_inet6(current_iface, stripped[len("inet6 ") :], stripped)
+            continue
+        if pending is not None and ("valid_lft" in stripped or "preferred_lft" in stripped):
+            flush_pending(_parse_ipv6_preferred_lft(stripped))
+
+    flush_pending(None)
+    return addrs
+
+
+def get_local_ipv6_addresses() -> Dict[str, List[LocalIpv6Addr]]:
+    """Query local IPv6 addresses across all interfaces via iproute2."""
+    res = run_cmd(["ip", "-6", "-o", "addr", "show"])
+    if res.returncode != 0:
+        raise PreflightError(f"查询本机 IPv6 地址失败: {res.stderr.strip() or res.stdout.strip()}")
+    return parse_ip_addr_ipv6(res.stdout)
+
+
 def get_local_network_state() -> Tuple[Dict[str, Tuple[str, List[str]]], Dict[str, List[str]]]:
     """Query local link states and IPv4 addresses via iproute2."""
     link_res = run_cmd(["ip", "-o", "link", "show"])
@@ -216,18 +367,26 @@ def get_local_network_state() -> Tuple[Dict[str, Tuple[str, List[str]]], Dict[st
     return parse_ip_link_states(link_res.stdout), parse_ip_addr_ipv4(addr_res.stdout)
 
 
-def verify_local_listen_ip(listen_ip: str, addr_map: Dict[str, List[str]]) -> str:
+def verify_local_listen_ip(
+    listen_ip: str,
+    addr_map: Dict[str, List[str]],
+    ipv6_addr_map: Optional[Dict[str, List[LocalIpv6Addr]]] = None,
+) -> str:
     """Verify listen_ip is assigned on a local interface; returns owning interface name."""
     if ":" in listen_ip:
-        result = run_cmd(["ip", "-6", "-o", "addr", "show", "scope", "global"])
-        if result.returncode:
-            raise PreflightError(f"查询本机 IPv6 地址失败: {result.stderr.strip()}")
-        for line in result.stdout.splitlines():
-            fields = line.split()
-            if len(fields) < 4 or fields[2] != "inet6" or {"tentative", "dadfailed"}.intersection(fields[4:]):
-                continue
-            if str(ipaddress.IPv6Interface(fields[3]).ip) == listen_ip:
-                return fields[1].split("@", 1)[0]
+        v6_map = ipv6_addr_map if ipv6_addr_map is not None else get_local_ipv6_addresses()
+        unusable_match: Optional[Tuple[str, str]] = None
+        for iface, entries in v6_map.items():
+            for entry in entries:
+                if entry.ip == listen_ip:
+                    if entry.is_usable:
+                        return iface
+                    if unusable_match is None:
+                        unusable_match = (iface, entry.unusable_reason)
+        if unusable_match is not None:
+            raise PreflightError(
+                f"本机网卡 {unusable_match[0]} 上的公网 IPv6 地址 {listen_ip} 当前不可用（{unusable_match[1]}）"
+            )
         raise PreflightError(f"本机没有可用的公网 IPv6 地址 {listen_ip}")
     for iface, ips in addr_map.items():
         if listen_ip in ips:
@@ -242,8 +401,9 @@ def verify_line_interface_and_source(
     line: LineConfig,
     link_states: Dict[str, Tuple[str, List[str]]],
     addr_map: Dict[str, List[str]],
+    ipv6_addr_map: Optional[Dict[str, List[LocalIpv6Addr]]] = None,
 ) -> None:
-    """Verify line interface exists, is UP, and carries expected source_ip."""
+    """Verify line interface exists, is UP, and carries expected usable source IP."""
     if line.interface not in link_states:
         raise PreflightError(
             f"出口线路 {line.name!r} 配置的网卡 {line.interface!r} 不存在（现有网卡: {sorted(link_states)}）"
@@ -252,6 +412,30 @@ def verify_line_interface_and_source(
     if "UP" not in flags or operstate == "DOWN":
         raise PreflightError(
             f"出口线路 {line.name!r} 的网卡 {line.interface} 状态异常: state={operstate}, flags={flags}"
+        )
+    if line.is_ipv6:
+        v6_map = ipv6_addr_map if ipv6_addr_map is not None else get_local_ipv6_addresses()
+        iface_entries = v6_map.get(line.interface, [])
+        matching_on_iface = [e for e in iface_entries if e.ip == line.source_ip]
+        if any(e.is_usable for e in matching_on_iface):
+            return
+        if matching_on_iface:
+            reasons = "；".join(e.unusable_reason for e in matching_on_iface if e.unusable_reason)
+            raise PreflightError(
+                f"出口线路 {line.name!r} 网卡 {line.interface} 上的源 IPv6 {line.source_ip} 当前不可用（{reasons}）"
+            )
+        other_iface = next(
+            (iface for iface, entries in v6_map.items() if iface != line.interface and any(e.ip == line.source_ip for e in entries)),
+            "",
+        )
+        if other_iface:
+            raise PreflightError(
+                f"出口线路 {line.name!r} 的源 IPv6 {line.source_ip} 不在指定网卡 {line.interface} 上"
+                f"（实际位于网卡 {other_iface}；网卡 {line.interface} 当前 IPv6: {[e.ip for e in iface_entries]}）"
+            )
+        raise PreflightError(
+            f"出口线路 {line.name!r} 的网卡 {line.interface} 缺少源 IPv6 {line.source_ip} "
+            f"(当前该网卡 IPv6: {[e.ip for e in iface_entries]})"
         )
     iface_ips = addr_map.get(line.interface, [])
     if line.source_ip not in iface_ips:
@@ -308,7 +492,7 @@ def parse_route_get_output(
     command: Optional[List[str]] = None,
     rt_tables: Optional[Dict[str, str]] = None,
 ) -> RouteGetResult:
-    """Parse `ip -4 route get <remote> from <src>` first line."""
+    """Parse `ip -4/-6 route get <remote> from <src>` first line."""
     lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
     first = lines[0] if lines else ""
     tokens = first.split()
@@ -321,7 +505,17 @@ def parse_route_get_output(
 
     dev = _find_after("dev")
     via = _find_after("via")
+    if ":" in via:
+        try:
+            via = str(ipaddress.IPv6Address(via))
+        except ValueError:
+            pass
     src = _find_after("src")
+    if ":" in src:
+        try:
+            src = str(ipaddress.IPv6Address(src))
+        except ValueError:
+            pass
     raw_table = _find_after("table")
     table = _normalize_table_name(raw_table, rt_tables=rt_tables) if raw_table else ""
 
@@ -333,12 +527,12 @@ def parse_route_get_output(
         table=table,
         src=src,
         raw_output=first,
-        command=command or ["ip", "-4", "route", "get", remote_ip, "from", source_ip],
+        command=command or ["ip", "-6" if ":" in remote_ip else "-4", "route", "get", remote_ip, "from", source_ip],
     )
 
 
 def parse_ip_rules(output: str, rt_tables: Optional[Dict[str, str]] = None) -> List[PolicyRuleEntry]:
-    """Parse `ip -4 rule show` output."""
+    """Parse `ip -4/-6 rule show` output."""
     entries: List[PolicyRuleEntry] = []
     for line in output.splitlines():
         stripped = line.strip()
@@ -368,7 +562,7 @@ def check_policy_rule_matches(
     source_ip: str, expected_table: int, rules: List[PolicyRuleEntry]
 ) -> Optional[PolicyRuleEntry]:
     """Return matching ip rule if source_ip selects expected_table."""
-    src_addr = ipaddress.IPv4Address(source_ip)
+    src_addr = ipaddress.ip_address(source_ip)
     expected_str = str(expected_table)
     for entry in rules:
         if entry.lookup_table != expected_str:
@@ -376,16 +570,131 @@ def check_policy_rule_matches(
         if entry.from_spec == "all":
             continue
         try:
-            net = ipaddress.IPv4Network(entry.from_spec, strict=False)
+            net = ipaddress.ip_network(entry.from_spec, strict=False)
         except ValueError:
             continue
-        if src_addr in net:
+        if net.version == src_addr.version and src_addr in net:
             return entry
     return None
 
 
+def _has_ipv6_policy_guard(line: LineConfig, remote_ip: str, output: str, rt_tables: Dict[str, str]) -> bool:
+    rows = sorted(
+        (int(match[1]), match[2])
+        for text in output.splitlines()
+        if (match := re.fullmatch(r"\s*(\d+):\s+(.+?)\s*", text))
+    )
+    for (priority, lookup), (next_priority, guard) in zip(rows, rows[1:]):
+        entry = re.fullmatch(r"from (\S+)(?: to (\S+))? (?:lookup|table) (\S+)", lookup)
+        if not entry or _normalize_table_name(entry[3], rt_tables=rt_tables) != str(line.table):
+            continue
+        if priority >= next_priority or next_priority >= 32766:
+            continue
+        if sum(pref in (priority, next_priority) for pref, _ in rows) != 2:
+            continue
+        try:
+            if ipaddress.IPv6Network(entry[1]) != ipaddress.IPv6Network(line.source_ip):
+                continue
+            if entry[2] and ipaddress.IPv6Network(entry[2]) != ipaddress.IPv6Network(remote_ip):
+                continue
+        except ValueError:
+            continue
+        if guard.split() == lookup.split()[:-2] + ["unreachable"]:
+            return True
+    return False
+
+
+def _verify_ipv6_egress_route(line: LineConfig, remote_ip: str) -> RouteGetResult:
+    """Verify kernel IPv6 route matching Realm `through` + `SO_BINDTODEVICE` (`interface`)."""
+    cmd = ["ip", "-6", "route", "get", remote_ip, "from", line.source_ip, "oif", line.interface]
+    res = run_cmd(cmd)
+    if res.returncode != 0:
+        err = res.stderr.strip() or res.stdout.strip()
+        raise PreflightError(
+            f"IPv6 路由探测失败 ({' '.join(cmd)}): exit={res.returncode}, {err}"
+        )
+
+    rt_tables = _load_rt_tables()
+    parsed = parse_route_get_output(
+        remote_ip=remote_ip,
+        source_ip=line.source_ip,
+        output=res.stdout,
+        command=cmd,
+        rt_tables=rt_tables,
+    )
+    effective = parsed
+    extra_mismatch = ""
+
+    # Under Linux `ip6_route_output_flags_noref` (net/ipv6/route.c), netlink `RTM_GETROUTE`
+    # with both `RTA_SRC` and `RTA_OIF` ignores `oif` when matching main-table routes unless
+    # `any_src` or a socket `sk_bound_dev_if` is set. When `main` has dual defaults with
+    # different metrics, verify `ip -6 route get <dst> oif <iface>` (`RT6_LOOKUP_F_IFACE`).
+    if parsed.dev != line.interface and parsed.table in ("", "254") and line.table is None:
+        oif_cmd = ["ip", "-6", "route", "get", remote_ip, "oif", line.interface]
+        oif_res = run_cmd(oif_cmd)
+        if oif_res.returncode != 0:
+            err = oif_res.stderr.strip() or oif_res.stdout.strip()
+            extra_mismatch = f"指定出口网卡路由探测失败 ({' '.join(oif_cmd)}): {err}"
+        else:
+            oif_parsed = parse_route_get_output(
+                remote_ip=remote_ip,
+                source_ip=line.source_ip,
+                output=oif_res.stdout,
+                command=oif_cmd,
+                rt_tables=rt_tables,
+            )
+            if oif_parsed.dev == line.interface and oif_parsed.table in ("", "254"):
+                effective = oif_parsed
+            else:
+                extra_mismatch = (
+                    f"指定网卡 oif={line.interface} 路由结果不符: "
+                    f"dev={oif_parsed.dev or '(无)'}, via={oif_parsed.via or '(无)'}, table={oif_parsed.table or 'main'}"
+                )
+
+    mismatches: List[str] = []
+    if effective.dev != line.interface:
+        mismatches.append(f"实际出口网卡 dev={effective.dev or '(无)'}，预期={line.interface}")
+    if extra_mismatch:
+        mismatches.append(extra_mismatch)
+    if line.gateway and effective.via != line.gateway:
+        mismatches.append(f"实际下一跳网关 via={effective.via or '(直连/无)'}，预期={line.gateway}")
+
+    if line.table is not None:
+        expected_table_str = str(line.table)
+        if effective.table != expected_table_str:
+            actual_table_desc = effective.table if effective.table else "main(默认主表)"
+            mismatches.append(
+                f"实际命中路由表 table={actual_table_desc}，预期={expected_table_str}（禁止退回主路由表或静默切线）"
+            )
+        rule_res = run_cmd(["ip", "-6", "rule", "show"])
+        if rule_res.returncode != 0:
+            raise PreflightError(f"查询 IPv6 源策略路由规则失败: {rule_res.stderr.strip()}")
+        if not _has_ipv6_policy_guard(line, remote_ip, rule_res.stdout, rt_tables):
+            mismatches.append(
+                f"独立 IPv6 表 {line.table} 需要一条匹配源地址 {line.source_ip}/128 的查询规则，"
+                "并紧跟同选择器的 unreachable 规则以阻止回落"
+            )
+
+    if mismatches:
+        raise PreflightError(
+            f"出口线路 {line.name!r} IPv6 路由核对失败（严禁静默切到其他线路）:\n"
+            f"  命令: {' '.join(effective.command)}\n"
+            f"  输出: {effective.raw_output}\n"
+            f"  差异: {'；'.join(mismatches)}"
+        )
+    return effective
+
+
 def verify_egress_route(line: LineConfig, remote_ip: str) -> RouteGetResult:
-    """Verify `ip -4 route get <remote_ip> from <source_ip>` (and oif <interface>) plus ip rule strictly match line."""
+    """Verify kernel egress route (IPv4 policy route or IPv6 source/oif route) strictly matches line."""
+    remote_is_v6 = ":" in remote_ip
+    if line.is_ipv6 != remote_is_v6:
+        raise PreflightError(
+            f"出口线路 {line.name!r} ({line.family}) 与目标地址 {remote_ip} 地址族不匹配"
+        )
+    if line.is_ipv6:
+        return _verify_ipv6_egress_route(line, remote_ip)
+
     cmd = ["ip", "-4", "route", "get", remote_ip, "from", line.source_ip]
     res = run_cmd(cmd)
     if res.returncode != 0:

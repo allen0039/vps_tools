@@ -21,6 +21,7 @@ import urllib.parse
 import urllib.request
 
 from .config import (
+    DDNS_AUTO_INTERFACE,
     ConfigError,
     DdnsProfileConfig,
     GlobalConfig,
@@ -28,7 +29,7 @@ from .config import (
     parse_global_config_dict,
 )
 from .ownership import ensure_safe_subpath, resolve_lock_file
-from .system import FileLock, SystemErrorBase, atomic_write_text, run_cmd
+from .system import FileLock, SystemErrorBase, atomic_write_text, parse_ip_addr_ipv6, run_cmd
 from .toml_compat import TomlParseError, dump_toml_string, loads_toml, without_toml_table
 
 CT_IPV6_NETWORK = ipaddress.IPv6Network("240e::/16")
@@ -119,6 +120,7 @@ class ProfileInspectResult:
     candidates: List[ProbedCandidate]
     filtered_out: List[FilteredAddress]
     error: str = ""
+    selected_interface: str = ""
 
 
 @dataclass(frozen=True)
@@ -444,73 +446,50 @@ def inspect_ddns_profile(global_cfg: GlobalConfig, profile: DdnsProfileConfig) -
     """Non-destructively scan interface IPv6 candidates, probe them, and select lowest RTT."""
     target = profile.probe_target or global_cfg.ddns.probe_target
     timeout_s = profile.probe_timeout_seconds or global_cfg.ddns.probe_timeout_seconds
+    auto = profile.interface == DDNS_AUTO_INTERFACE
+    scan_scope = "本机所有网卡" if auto else f"网卡 {profile.interface}"
+    cmd = ["ip", "-6", "-o", "addr", "show"] if auto else ["ip", "-6", "addr", "show", "dev", profile.interface]
+    eligible: List[Tuple[str, str]] = []
+    filtered: List[FilteredAddress] = []
+    error = ""
 
     try:
-        res = run_cmd(["ip", "-6", "addr", "show", "dev", profile.interface, "scope", "global"])
+        res = run_cmd([*cmd, "scope", "global"])
+        if res.returncode != 0:
+            detail = res.stderr.strip() or res.stdout.strip() or f"exit {res.returncode}"
+            error = f"查询{scan_scope} IPv6 失败: {detail}"
+        elif auto:
+            for iface, entries in parse_ip_addr_ipv6(res.stdout).items():
+                for entry in entries:
+                    reason = entry.unusable_reason
+                    if not reason and classify_ipv6_isp(entry.ip) != profile.isp:
+                        reason = f"不属于{ISP_LABELS[profile.isp]} IPv6 前缀"
+                    if reason:
+                        filtered.append(FilteredAddress(f"{iface}: {entry.ip}", reason))
+                    else:
+                        eligible.append((iface, entry.ip))
+        else:
+            addresses, filtered = parse_ip6_addr_candidates(res.stdout, profile.isp)
+            eligible = [(profile.interface, address) for address in addresses]
     except SystemErrorBase as exc:
-        return ProfileInspectResult(
-            profile=profile.name,
-            enabled=profile.enabled,
-            isp=profile.isp,
-            interface=profile.interface,
-            provider=profile.provider,
-            record_type=profile.record_type,
-            zone=profile.zone,
-            host=profile.host,
-            fqdn=profile.fqdn,
-            probe_target=target,
-            probe_timeout_seconds=timeout_s,
-            selected_ip="",
-            selected_rtt_ms=None,
-            candidates=[],
-            filtered_out=[],
-            error=str(exc),
-        )
+        error = str(exc)
 
-    if res.returncode != 0:
-        err = res.stderr.strip() or res.stdout.strip() or f"exit {res.returncode}"
-        return ProfileInspectResult(
-            profile=profile.name,
-            enabled=profile.enabled,
-            isp=profile.isp,
-            interface=profile.interface,
-            provider=profile.provider,
-            record_type=profile.record_type,
-            zone=profile.zone,
-            host=profile.host,
-            fqdn=profile.fqdn,
-            probe_target=target,
-            probe_timeout_seconds=timeout_s,
-            selected_ip="",
-            selected_rtt_ms=None,
-            candidates=[],
-            filtered_out=[],
-            error=f"查询网卡 {profile.interface} IPv6 失败: {err}",
-        )
-
-    eligible_ips, filtered = parse_ip6_addr_candidates(res.stdout, profile.isp)
     probed: List[ProbedCandidate] = []
-    for ip_str in eligible_ips:
+    for iface, ip_str in dict.fromkeys(eligible):
         ok, rtt, detail = probe_ipv6_candidate(ip_str, target, timeout_s)
         probed.append(
             ProbedCandidate(
                 ip=ip_str,
                 isp=profile.isp,
-                interface=profile.interface,
+                interface=iface,
                 probe_ok=ok,
                 rtt_ms=rtt,
                 detail=detail,
             )
         )
 
-    reachable = [c for c in probed if c.probe_ok and c.rtt_ms is not None]
-    if reachable:
-        best = min(reachable, key=lambda c: c.rtt_ms if c.rtt_ms is not None else float("inf"))
-        selected_ip = best.ip
-        selected_rtt = best.rtt_ms
-    else:
-        selected_ip = ""
-        selected_rtt = None
+    reachable = (cand for cand in probed if cand.probe_ok and cand.rtt_ms is not None)
+    best = min(reachable, key=lambda cand: (cand.rtt_ms, cand.interface, cand.ip), default=None)
 
     return ProfileInspectResult(
         profile=profile.name,
@@ -524,11 +503,12 @@ def inspect_ddns_profile(global_cfg: GlobalConfig, profile: DdnsProfileConfig) -
         fqdn=profile.fqdn,
         probe_target=target,
         probe_timeout_seconds=timeout_s,
-        selected_ip=selected_ip,
-        selected_rtt_ms=selected_rtt,
+        selected_ip=best.ip if best else "",
+        selected_rtt_ms=best.rtt_ms if best else None,
         candidates=probed,
         filtered_out=filtered,
-        error="",
+        error=error,
+        selected_interface=best.interface if best else "",
     )
 
 
@@ -1394,6 +1374,7 @@ def update_ddns(
                     "provider": prof.provider,
                     "record_type": prof.record_type,
                     "fqdn": prof.fqdn,
+                    "selected_interface": "",
                     "selected_ip": "",
                     "selected_rtt_ms": None,
                     "action": "skipped_disabled",
@@ -1461,6 +1442,7 @@ def update_ddns(
                         "provider": prof.provider,
                         "record_type": prof.record_type,
                         "fqdn": prof.fqdn,
+                        "selected_interface": "",
                         "selected_ip": "",
                         "selected_rtt_ms": None,
                         "action": "skipped_disabled",
@@ -1471,11 +1453,16 @@ def update_ddns(
                 continue
 
             insp = inspections[prof.name]
-            base_state["selected_ip"] = insp.selected_ip
-            base_state["selected_rtt_ms"] = insp.selected_rtt_ms
+            selection = {
+                "selected_interface": insp.selected_interface,
+                "selected_ip": insp.selected_ip,
+                "selected_rtt_ms": insp.selected_rtt_ms,
+            }
+            base_state.update(selection)
 
             if insp.error or not insp.selected_ip:
-                err_msg = insp.error or f"网卡 {prof.interface} 未探测到可用的 {ISP_LABELS.get(prof.isp, prof.isp)} 公网 IPv6"
+                scope = "本机所有网卡" if prof.interface == DDNS_AUTO_INTERFACE else f"网卡 {prof.interface}"
+                err_msg = insp.error or f"扫描{scope}，未探测到可用的{ISP_LABELS[prof.isp]}公网 IPv6"
                 base_state["last_action"] = "skipped_no_ip" if not insp.error else "error"
                 base_state["last_error"] = err_msg if insp.error else ""
                 _write_ddns_state(state_path, base_state)
@@ -1489,8 +1476,7 @@ def update_ddns(
                         "provider": prof.provider,
                         "record_type": prof.record_type,
                         "fqdn": prof.fqdn,
-                        "selected_ip": "",
-                        "selected_rtt_ms": None,
+                        **selection,
                         "action": base_state["last_action"],
                         "detail": err_msg,
                         "error": insp.error,
@@ -1525,8 +1511,7 @@ def update_ddns(
                         "provider": prof.provider,
                         "record_type": prof.record_type,
                         "fqdn": prof.fqdn,
-                        "selected_ip": insp.selected_ip,
-                        "selected_rtt_ms": insp.selected_rtt_ms,
+                        **selection,
                         "action": "skipped_cached",
                         "detail": f"IPv6 未变化 ({insp.selected_ip})，命中本地缓存跳过 API 调用",
                         "error": "",
@@ -1561,8 +1546,7 @@ def update_ddns(
                         "provider": prof.provider,
                         "record_type": prof.record_type,
                         "fqdn": prof.fqdn,
-                        "selected_ip": insp.selected_ip,
-                        "selected_rtt_ms": insp.selected_rtt_ms,
+                        **selection,
                         "action": base_state["last_action"],
                         "record_id": base_state["record_id"],
                         "deleted_duplicates": sync_res.deleted_duplicates,
@@ -1584,8 +1568,7 @@ def update_ddns(
                         "provider": prof.provider,
                         "record_type": prof.record_type,
                         "fqdn": prof.fqdn,
-                        "selected_ip": insp.selected_ip,
-                        "selected_rtt_ms": insp.selected_rtt_ms,
+                        **selection,
                         "action": "error",
                         "detail": f"更新失败: {safe_err}",
                         "error": safe_err,
@@ -1656,6 +1639,7 @@ def status_ddns(global_cfg: GlobalConfig, profile_name: Optional[str] = None) ->
                 "record_type": prof.record_type,
                 "fqdn": prof.fqdn,
                 "credential_file": prof.credential_file,
+                "selected_interface": str(state.get("selected_interface", "")),
                 "selected_ip": str(state.get("selected_ip", "")),
                 "selected_rtt_ms": state.get("selected_rtt_ms"),
                 "last_success_ip": str(state.get("last_success_ip", "")),

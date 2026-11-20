@@ -28,6 +28,7 @@ DEFAULT_DDNS_VERIFY_INTERVAL_SECONDS = 600
 DEFAULT_DDNS_PROBE_TARGET = "2400:3200::1"
 DEFAULT_DDNS_PROBE_TIMEOUT_SECONDS = 1
 DEFAULT_DDNS_TTL = 600
+DDNS_AUTO_INTERFACE = "auto"
 DEFAULT_DNSPOD_RECORD_LINE = "默认"
 VALID_DDNS_PROVIDERS = ("cloudflare", "dnspod", "alidns", "webhook")
 VALID_DDNS_ISPS = ("ct", "cu")
@@ -90,6 +91,11 @@ def format_endpoint(address: str, port: int) -> str:
     return f"[{address}]:{port}" if ":" in address else f"{address}:{port}"
 
 
+def format_realm_through(source_ip: str) -> str:
+    """Format Realm endpoint.through literal; bracket IPv6 so ToSocketAddrs skips DNS stall."""
+    return f"[{source_ip}]" if ":" in source_ip else source_ip
+
+
 def validate_non_negative_int(value: Any, field_name: str) -> int:
     """Validate non-negative integer (rejecting bool)."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -129,6 +135,34 @@ def validate_ipv6(value: Any, field_name: str) -> str:
         or addr.ipv4_mapped is not None
     ):
         raise ConfigError(f"{field_name} 必须是有效的公网 IPv6 地址: {raw!r}")
+    return str(addr)
+
+
+def validate_ipv6_gateway(value: Any, field_name: str, allow_empty: bool = True) -> str:
+    """Validate an optional IPv6 gateway (allowing link-local fe80:: and global/doc IPv6, rejecting scope ID)."""
+    if value is None:
+        if allow_empty:
+            return ""
+        raise ConfigError(f"{field_name} 不能为空")
+    if not isinstance(value, str):
+        raise ConfigError(f"{field_name} 必须是字符串，当前为 {type(value).__name__}")
+    raw = value.strip()
+    if not raw:
+        if allow_empty:
+            return ""
+        raise ConfigError(f"{field_name} 不能为空")
+    try:
+        addr = ipaddress.IPv6Address(raw)
+    except ipaddress.AddressValueError as exc:
+        raise ConfigError(f"{field_name} 不是合法的 IPv6 网关地址: {raw!r}") from exc
+    if (
+        addr.is_unspecified
+        or addr.is_multicast
+        or addr.is_loopback
+        or addr.scope_id
+        or addr.ipv4_mapped is not None
+    ):
+        raise ConfigError(f"{field_name} 不是有效的 IPv6 网关地址: {raw!r}")
     return str(addr)
 
 
@@ -190,19 +224,38 @@ class IngressSettings:
 
 @dataclass(frozen=True)
 class LineConfig:
-    """Configured outbound line with source policy routing expectations."""
+    """Configured outbound line (IPv4 source policy routing or IPv6 explicit NIC + source IPv6)."""
 
     name: str
     interface: str
     source_ip: str
-    gateway: str
-    table: int
+    gateway: str = ""
+    table: Optional[int] = None
     description: str = ""
+    family: str = ""
+
+    def __post_init__(self) -> None:
+        inferred = "ipv6" if ":" in self.source_ip else "ipv4"
+        if not self.family:
+            object.__setattr__(self, "family", inferred)
+        else:
+            norm = self.family.strip().lower()
+            if norm not in ("ipv4", "ipv6"):
+                raise ConfigError(f"lines.{self.name}.family 无效: {self.family!r}（仅支持 ipv4 或 ipv6）")
+            if norm != inferred:
+                raise ConfigError(
+                    f"lines.{self.name}.family ({norm}) 与 source_ip ({self.source_ip}) 地址族不匹配"
+                )
+            object.__setattr__(self, "family", norm)
+
+    @property
+    def is_ipv6(self) -> bool:
+        return self.family == "ipv6"
 
 
 @dataclass(frozen=True)
 class DdnsProfileConfig:
-    """Single independent ISP IPv6 DDNS profile bound to a specific network interface."""
+    """Single ISP IPv6 DDNS profile with automatic or fixed interface selection."""
 
     name: str
     enabled: bool
@@ -255,7 +308,7 @@ class GlobalConfig:
 
 @dataclass(frozen=True)
 class RuleConfig:
-    """Single TCP forwarding rule with an IPv4 destination."""
+    """Single TCP forwarding rule supporting IPv4/IPv6 ingress and IPv4/IPv6 destination."""
 
     name: str
     line: str
@@ -276,6 +329,18 @@ class RuleConfig:
     @property
     def direct_ipv6(self) -> bool:
         return ":" in self.listen_ip
+
+    @property
+    def remote_is_ipv6(self) -> bool:
+        return ":" in self.remote_ip
+
+    @property
+    def remote_family(self) -> str:
+        return "ipv6" if self.remote_is_ipv6 else "ipv4"
+
+    @property
+    def remote_endpoint(self) -> str:
+        return format_endpoint(self.remote_ip, self.remote_port)
 
     @property
     def listen_endpoint(self) -> str:
@@ -386,7 +451,7 @@ def _parse_ddns_settings(raw: Any) -> DdnsSettings:
         if isp not in VALID_DDNS_ISPS:
             raise ConfigError(f"{ctx}.isp 无效: {isp!r}（仅支持: {', '.join(VALID_DDNS_ISPS)}）")
 
-        iface = _require_str(prof_raw, "interface", ctx)
+        iface = _require_str(prof_raw, "interface", ctx) if "interface" in prof_raw else DDNS_AUTO_INTERFACE
         if not IFACE_NAME_RE.match(iface):
             raise ConfigError(f"{ctx}.interface 网卡名非法: {iface!r}")
 
@@ -556,9 +621,30 @@ def parse_global_config_dict(data: Dict[str, Any], config_path: str = "") -> Glo
         iface = _require_str(line_data, "interface", ctx)
         if not IFACE_NAME_RE.match(iface):
             raise ConfigError(f"{ctx}.interface 网卡名非法: {iface!r}")
-        source_ip = validate_ipv4(line_data.get("source_ip"), f"{ctx}.source_ip")
-        gateway = validate_ipv4(line_data.get("gateway"), f"{ctx}.gateway")
-        table = validate_table_id(line_data.get("table"), f"{ctx}.table")
+        family_raw = _require_str(line_data, "family", ctx, allow_empty=True).lower()
+        if family_raw and family_raw not in ("ipv4", "ipv6"):
+            raise ConfigError(f"{ctx}.family 无效: {family_raw!r}（仅支持 ipv4 或 ipv6）")
+        raw_source = _require_str(line_data, "source_ip", ctx)
+        is_v6 = ":" in raw_source
+        inferred_family = "ipv6" if is_v6 else "ipv4"
+        if family_raw and family_raw != inferred_family:
+            raise ConfigError(
+                f"{ctx}.family ({family_raw}) 与 {ctx}.source_ip ({raw_source}) 地址族不匹配"
+            )
+        if is_v6:
+            source_ip = validate_ipv6(raw_source, f"{ctx}.source_ip")
+            gateway = validate_ipv6_gateway(line_data.get("gateway", ""), f"{ctx}.gateway", allow_empty=True)
+            raw_table = line_data.get("table", None)
+            if raw_table is None or (isinstance(raw_table, str) and not raw_table.strip()):
+                table: Optional[int] = None
+            else:
+                table = validate_table_id(raw_table, f"{ctx}.table")
+                if 252 <= table <= 255:
+                    raise ConfigError(f"{ctx}.table 必须使用独立 IPv6 路由表，当前为 {table}")
+        else:
+            source_ip = validate_ipv4(raw_source, f"{ctx}.source_ip")
+            gateway = validate_ipv4(line_data.get("gateway"), f"{ctx}.gateway")
+            table = validate_table_id(line_data.get("table"), f"{ctx}.table")
         desc = _require_str(line_data, "description", ctx, allow_empty=True)
         lines[line_name] = LineConfig(
             name=line_name,
@@ -567,6 +653,7 @@ def parse_global_config_dict(data: Dict[str, Any], config_path: str = "") -> Glo
             gateway=gateway,
             table=table,
             description=desc,
+            family=inferred_family,
         )
 
     ddns = _parse_ddns_settings(data.get("ddns"))
@@ -635,7 +722,11 @@ def parse_rule_config_dict(
     listen_port = validate_port(forward_sec.get("listen_port"), "forward.listen_port")
     if ":" in listen_ip and listen_port != public_port:
         raise ConfigError("IPv6 直连的公网端口须与本机监听端口相同")
-    remote_ip = validate_ipv4(forward_sec.get("remote_ip"), "forward.remote_ip")
+    raw_remote = _require_str(forward_sec, "remote_ip", "forward")
+    if ":" in raw_remote:
+        remote_ip = validate_ipv6(raw_remote, "forward.remote_ip")
+    else:
+        remote_ip = validate_ipv4(raw_remote, "forward.remote_ip")
     remote_port = validate_port(forward_sec.get("remote_port"), "forward.remote_port")
 
     realm_sec = data.get("realm") or {}
@@ -716,6 +807,11 @@ def render_rule_toml(rule: RuleConfig) -> str:
 
 def render_realm_toml(rule: RuleConfig, line: LineConfig, listen_interface: str = "") -> str:
     """Render per-rule Realm TOML binding listen, remote, outbound through IP, and outbound interface."""
+    if rule.remote_is_ipv6 != line.is_ipv6:
+        raise ConfigError(
+            f"规则 {rule.name!r} 落地地址族 ({rule.remote_family}) 与出口线路 {line.name!r} ({line.family}) 不匹配"
+        )
+    dns_mode = "ipv6_only" if rule.remote_is_ipv6 else "ipv4_only"
     lines = [
         f"# Generated by leikwan_tools for rule: {rule.name}",
         "# Managed file - do not edit manually",
@@ -725,7 +821,7 @@ def render_realm_toml(rule: RuleConfig, line: LineConfig, listen_interface: str 
         'output = "stdout"',
         "",
         "[dns]",
-        'mode = "ipv4_only"',
+        f'mode = "{dns_mode}"',
         "",
         "[network]",
         "no_tcp = false",
@@ -736,8 +832,8 @@ def render_realm_toml(rule: RuleConfig, line: LineConfig, listen_interface: str 
         "",
         "[[endpoints]]",
         f'listen = "{rule.listen_endpoint}"',
-        f'remote = "{rule.remote_ip}:{rule.remote_port}"',
-        f'through = "{line.source_ip}"',
+        f'remote = "{rule.remote_endpoint}"',
+        f'through = "{format_realm_through(line.source_ip)}"',
         f'interface = "{line.interface}"',
     ]
     if listen_interface and not rule.direct_ipv6:

@@ -67,3 +67,22 @@ while ip -4 rule del from "${VPS_CN2_IP}" >/dev/null 2>&1; do :; done
 ip -4 rule add from "${VPS_9929_IP}" lookup 101 pref 101
 ip -4 rule add from "${VPS_CN2_IP}" lookup 102 pref 102
 ip -4 route flush cache
+
+# Optional dual-ISP IPv6 setup for isolated IPv6 egress E2E (no-op unless VPS_CT_V6 & VPS_CU_V6 are set).
+if [[ -n "${VPS_CT_V6:-}" && -n "${VPS_CU_V6:-}" ]]; then
+    if [[ -f /etc/liqun-lab-delay-v6 ]]; then
+        DELAY_V6="$(cat /etc/liqun-lab-delay-v6 | tr -d '[:space:]')"
+        if [[ -n "${DELAY_V6}" && "${DELAY_V6}" -gt 0 ]]; then
+            while ip -6 route del default >/dev/null 2>&1; do :; done
+            ip -6 addr del "${VPS_CT_V6}/64" dev eth0 >/dev/null 2>&1 || true
+            ip -6 addr del "${VPS_CU_V6}/64" dev eth1 >/dev/null 2>&1 || true
+            sleep "${DELAY_V6}"
+        fi
+    fi
+    ip -6 addr replace "${VPS_CT_V6}/64" dev eth0 nodad
+    ip -6 addr replace "${VPS_CU_V6}/64" dev eth1 nodad
+    while ip -6 route del default >/dev/null 2>&1; do :; done
+    ip -6 route replace default via "${GW_CT_V6}" dev eth0 metric 100
+    ip -6 route replace default via "${GW_CU_V6}" dev eth1 metric 200
+    ip -6 route flush cache
+fi
