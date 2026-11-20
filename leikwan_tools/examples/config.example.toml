@@ -34,29 +34,6 @@ table = 102
 description = "CN2 GIA 出口线路"
 
 # ----------------------------------------------------------------------
-# IPv6 出口线路（按需取消注释并替换为本机 `ip -6 addr` / `ip -6 route` 参数）
-# 说明：
-#   - family 可省略（将根据 source_ip 自动识别为 ipv6），也可显式写 family = "ipv6"
-#   - gateway 可填下一跳 IPv6（含 fe80:: 链路本地网关）或留空（仅校对 dev）
-#   - table 可选；填写时系统需配置独立表，查询规则后紧跟同选择器的 unreachable 规则
-# ----------------------------------------------------------------------
-# [lines.ct_v6]
-# family = "ipv6"
-# interface = "eth0"
-# source_ip = "240e:3b4:1::10"
-# gateway = ""
-# # table = 201
-# description = "电信 IPv6 出口线路"
-#
-# [lines.cu_v6]
-# family = "ipv6"
-# interface = "eth1"
-# source_ip = "2408:820c:1::10"
-# gateway = ""
-# # table = 202
-# description = "联通 IPv6 出口线路"
-
-# ----------------------------------------------------------------------
 # 独立双线路 IPv6 DDNS（可选；默认未启用，与 [ingress] 和转发规则完全解耦）
 # 说明：第一版仅支持 IPv6 AAAA 记录（配置模型已预留 A 记录扩展）；
 #       明文 Token/Secret 请存放在 chmod 600 的独立凭据文件中，切勿写入主配置。

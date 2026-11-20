@@ -609,19 +609,13 @@ def _menu_forward(cfg: GlobalConfig, *, edit: bool) -> None:
         old_ipv4 = old if old and not old.direct_ipv6 else None
         listen_ip = _menu_field("本机监听的内网 IPv4（利群面板映射指向的 VPS 内网地址）", old_ipv4.listen_ip if old_ipv4 else "")
         listen_port = _menu_port("本机监听的内网端口（利群面板映射指向的 VPS 内部端口）", old_ipv4.listen_port if old_ipv4 else "")
-    remote_raw = _menu_field("落地服务器 IP（IPv4 或 IPv6 字面量，目标机地址）", old.remote_ip if old else "")
-    remote_ip = (
-        validate_ipv6(remote_raw, "forward.remote_ip")
-        if ":" in remote_raw
-        else validate_ipv4(remote_raw, "forward.remote_ip")
-    )
-    remote_is_ipv6 = ":" in remote_ip
+    remote_raw = _menu_field("落地服务器 IPv4（目标机地址）", old.remote_ip if old else "")
+    remote_ip = validate_ipv4(remote_raw, "forward.remote_ip")
     remote_port = _menu_port("落地服务器端口（目标机端口）", old.remote_port if old else "")
-    matching_lines = {lname: lc for lname, lc in cfg.lines.items() if lc.is_ipv6 == remote_is_ipv6}
+    matching_lines = {lname: lc for lname, lc in cfg.lines.items() if not lc.is_ipv6}
     if not matching_lines:
-        fam_label = "IPv6" if remote_is_ipv6 else "IPv4"
         raise ConfigError(
-            f"主配置中没有可用的 {fam_label} 出口线路（请在 config.toml 添加对应的 [lines.<名称>]）"
+            "主配置中没有可用的 IPv4 出口线路（请在 config.toml 添加对应的 [lines.<名称>]）"
         )
     line_names = list(matching_lines)
     line_labels = [
@@ -633,7 +627,7 @@ def _menu_forward(cfg: GlobalConfig, *, edit: bool) -> None:
     ]
     line = _menu_pick(
         line_names,
-        f"选择出口线路（仅显示匹配 {'IPv6' if remote_is_ipv6 else 'IPv4'} 落地的线路）",
+        "选择出口线路（仅显示匹配 IPv4 落地的线路）",
         old.line if old and old.line in matching_lines else "",
         labels=line_labels,
     )
@@ -1249,7 +1243,7 @@ def build_parser() -> argparse.ArgumentParser:
     default_cfg = resolve_default_config_path()
     parser = argparse.ArgumentParser(
         prog="leikwan_tools",
-        description="独立「leikwan_tools」— 利群 VPS 多规则 Realm TCP 转发（支持 IPv4/IPv6 入口与落地）与公网入口管理工具",
+        description="独立「leikwan_tools」— 利群 VPS 多规则 Realm TCP 转发（支持 IPv4/IPv6 入口和 IPv4 落地）与公网入口管理工具",
     )
     parser.add_argument(
         "--config",
@@ -1275,7 +1269,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("--allow-non-dns", action="store_true", help="显式允许 fixed_ip 不在当前 DNS A 记录中")
     p_plan.add_argument("--dns-server", default="", help="指定 DNS IPv4 用于校验 fixed_ip")
 
-    p_apply = sub.add_parser("apply", help="从规则文件应用/更新一条 TCP 转发规则（支持 IPv4/IPv6 入口与落地，幂等、带锁、失败回滚）")
+    p_apply = sub.add_parser("apply", help="从规则文件应用/更新一条 TCP 转发规则（支持 IPv4/IPv6 入口和 IPv4 落地，幂等、带锁、失败回滚）")
     p_apply.add_argument("rule_file", help="规则 TOML 文件路径")
     p_apply.add_argument("--lock-timeout", type=float, default=15.0, help="并发写锁等待秒数 (默认 15)")
     p_apply.add_argument("--allow-non-dns", action="store_true", help="显式允许新设/变更的 fixed_ip 不在当前 DNS 中")

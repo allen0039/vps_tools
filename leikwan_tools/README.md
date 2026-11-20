@@ -1,25 +1,25 @@
 # leikwan_tools
 
-在 Debian 12 + `systemd` 环境下运行的 TCP 转发部署与管理工具，基于 Realm v2.x。每条规则可独立选择入口（官方 IPv4 BGP 入口或本机公网 IPv6 直连）、落地（IPv4 或 IPv6 字面量）及匹配的出口线路（如 `9929`、`cn2`、`ct_v6`、`cu_v6`）。工具支持官方入口域名 A 记录查询、固定公网 IPv4，以及客户端分层（TCP / TLS / 证书 / 应用）连通性验证。
+在 Debian 12 + `systemd` 环境下运行的 TCP 转发部署与管理工具，基于 Realm v2.x。每条规则可选择官方 IPv4 BGP 入口或本机公网 IPv6 直连，并通过 IPv4 出口连接 IPv4 落地。工具支持官方入口域名 A 记录查询、固定公网 IPv4，以及客户端分层（TCP / TLS / 证书 / 应用）连通性验证。
+
+不再支持新建或修改 IPv6 落地规则；旧规则仍可读取、查看状态、暂停、删除和开机恢复。暂停后不能通过菜单重新启用 IPv6 落地规则；可通过修改规则将落地改为 IPv4。如需继续运行旧规则，请保留对应 IPv6 线路配置。
 
 原版 `Toolkit`、`LeiKwanManager`、`v6-mng.sh` 和外部 Realm 实例由各自原有工具管理。本工具只管理自己的 Realm 实例。经显式确认的路由初始化仅向主配置指定的独立 IPv4 表添加所需条目，保留主路由、全局防火墙、SSH 配置和第三方路由；IPv6 出站优先使用每条 Realm 规则的 socket 绑定和系统已有 IPv6 路由，不自动修改系统 IPv6 路由。
 
 ---
 
-## 一、转发链路与四种组合模型
+## 一、转发链路
 
 ```text
-四种入口 / 出口 / 落地组合（每条规则独立选择）：
+入口 / 出口 / 落地组合：
   1) 利群本机公网 IPv6 直连  ──▶ 指定 IPv4 出口 (9929/cn2)       ──▶ IPv4 落地
-  2) 利群本机公网 IPv6 直连  ──▶ 指定电信/联通 IPv6 出口 (ct_v6/cu_v6) ──▶ IPv6 落地
   3) 利群官方 IPv4 BGP 入口  ──▶ 指定 IPv4 出口 (9929/cn2)       ──▶ IPv4 落地
-  4) 利群官方 IPv4 BGP 入口  ──▶ 指定电信/联通 IPv6 出口 (ct_v6/cu_v6) ──▶ IPv6 落地
 
 官方 IPv4 BGP 入口语义：
 客户端 ──▶ paid-v4.bgp1.leikwanhost.com:<公网端口> ──▶ 官方映射 ──▶ VPS 内网 IPv4:监听端口 (listen_interface=eth0)
                                                                        │
                                                                        ▼ Realm 出站绑定 (through + interface)
-                                                              落地 IPv4:落地端口  或  [落地IPv6]:落地端口
+                                                              落地 IPv4:落地端口
 ```
 
 关键原则：
@@ -27,13 +27,9 @@
 2. **入口与出站解耦**：
    - 入口地址族由现有入口模式决定（公网 IPv6 直连 vs 官方 IPv4 BGP 内网映射）；
    - 官方 IPv4 BGP 入口保留 `[ingress].listen_interface`（如 `eth0`）监听网卡绑定，仅作用于入站监听 socket（`bind`），与出站 `interface`（`connect` 上的 `SO_BINDTODEVICE`）互不混淆；
-   - 出站地址族由落地地址 `forward.remote_ip` 决定，交互菜单按落地地址族自动筛选匹配的出口线路，两条规则连接同一 `[落地IPv6]:端口` 时可分别指定电信与联通出口。
-3. **Realm v2.9.6 IPv6 绑定与防 DNS 阻塞**：
-   - IPv6 落地时，`[dns].mode` 设为 `"ipv6_only"`，`remote` 渲染为 `"[IPv6]:端口"`；
-   - IPv6 出口 `through` 渲染为带方括号的源 IPv6 字面量 `"[源IPv6]"`（如 `"[2408:820c:1::10]"`）。按 Realm v2.9.6 `src/conf/endpoint.rs` 源码逻辑，`build_send_through()` 会先调用 `through.to_socket_addrs()` 再回退到剥离 `[]` 后按 `IpAddr` 解析；若对末段为纯十进制数字的裸 IPv6（如 `2408:200:1::146`）省略方括号，`to_socket_addrs()` 会误将其拆成主机 `2408:200:1:` 与端口 `146` 并触发阻塞式 `getaddrinfo`（离线环境下超时约 5 秒），加方括号可直接按 IPv6 字面量零耗时解析；
-   - `interface` 在出站 TCP socket 上设置 `SO_BINDTODEVICE`。
-4. **入口 IP 与 Realm 解耦**：固定公网 IP 仅用于客户端拨号参数和诊断目标；仅变更 `ingress.fixed_ip` 等客户端元数据时，不改动 Realm 监听、不重启进程、不中断已有 TCP 长连接。
-5. **严禁静默切线**：启动前及运行期均严格约束出口源 IP 与网卡，路由缺失时阻断错误网卡出包，绝不静默切线。
+   - 落地地址 `forward.remote_ip` 使用 IPv4，交互菜单仅列出 IPv4 出口线路。
+3. **入口 IP 与 Realm 解耦**：固定公网 IP 仅用于客户端拨号参数和诊断目标；仅变更 `ingress.fixed_ip` 等客户端元数据时，不改动 Realm 监听、不重启进程、不中断已有 TCP 长连接。
+4. **严禁静默切线**：启动前及运行期均严格约束出口源 IP 与网卡，路由缺失时阻断错误网卡出包，绝不静默切线。
 
 ---
 
@@ -69,17 +65,15 @@
 
 ## 三、部署前置条件确认方法
 
-先在利群侧完成官方端口映射，并核对主配置中的本机地址、网卡、下一跳和表号。`[lines.<名称>]` 支持 IPv4 与 IPv6 出口线路：
+使用官方 IPv4 BGP 入口时，先在利群侧完成端口映射。核对主配置中的本机地址、网卡、下一跳和表号。新转发使用 IPv4 出口线路：
 
 - **IPv4 线路**：`interface`、`source_ip`（IPv4）、`gateway`（IPv4）、`table`（策略路由表号，如 `101`/`102`）均必填，`family` 可省略或写 `"ipv4"`。
-- **IPv6 线路**需要 `interface` 与 `source_ip`（本机 IPv6）。`family` 可省略或写 `"ipv6"`，`gateway` 可填下一跳 IPv6 或 `fe80::` 网关。只有系统已配置独立表和配套的 `unreachable` 规则时才填写 `table`。
+- **已有 IPv6 落地规则**仍需要保留原有 IPv6 线路配置，以便启动检查和状态查询；不能重新应用该规则。
 
 | 线路 | 地址族 | 源 IP | 网卡 | 下一跳 | 表 |
 | --- | --- | --- | --- | --- | --- |
 | 9929 与入口回程 | `ipv4` | `10.7.0.146` | `eth0` | `10.7.0.1` | `101` |
 | CN2 | `ipv4` | `10.8.0.146` | `eth1` | `10.8.0.1` | `102` |
-| 电信 IPv6 (`ct_v6` 示例) | `ipv6` | `240e:3b4:1::10` | `eth0` | 可选 | 可选 |
-| 联通 IPv6 (`cu_v6` 示例) | `ipv6` | `2408:820c:1::10` | `eth1` | 可选 | 可选 |
 
 > [!NOTE]
 > `lqtool routing init` 管理主配置中 **IPv4 线路**的源策略路由。IPv6 出口使用系统已有路由和 Realm 的源地址、网卡绑定。设置 IPv6 `table` 时，由管理员在系统里安排一条从源 IPv6 `/128` 查询专用表的规则，下一条必须是匹配相同条件、优先级号更大的 `unreachable` 规则，两条都应排在可回落到主表的规则前面。两条可以同时限定同一个落地 IPv6 `/128`，以免影响其他流量。使用按目标限定的规则时，`check-prereqs` 需通过 `--probe-remote-v6` 指定该落地地址。
@@ -150,7 +144,7 @@ ip -4 route get 192.0.2.10 from 10.8.0.146 oif eth1
 
 安装后以 `sudo lqtool` 打开菜单（主菜单包含 **1** 查看转发状态、**2** 转发规则管理、**3** 查询官方公网入口 IP、**4** 查询并设置转发的客户端入口 IP、**5** 初始化与环境排查、**6** 从仓库检查并更新工具）。先进入 **5 -> 1** 预览并确认初始化双线出口路由，再进入 **2** 转发规则管理（**1** 查看已有转发、**2** 新建转发、**3** 修改转发、**4** 暂停 / 恢复转发、**5** 删除转发）。菜单 **4** 查询规则域名的 A 记录，可用配置中的 DNS 服务器或临时指定解析器。菜单显示其他公网候选作为客户端备用，固定或恢复域名只更新客户端入口元数据。需要验证某个候选实际通往落地时，用 `lqtool ingress verify`。菜单 **6** 支持从 GitHub 或 Gitee 仓库检查更新并原地升级，原有主配置、规则和运行中连接均保留不变。
 
-使用公网 IPv6 直连时，在 **2 -> 2**（新建转发）或 **2 -> 3**（修改转发）的入口处填本机公网 IPv6 地址，端口同时用作客户端入口和本机监听端口。用 TOML 配置时，`forward.listen_ip` 填 IPv6 地址，`forward.listen_port` 与 `ingress.public_port` 一致，`ingress.domain` 和 `ingress.fixed_ip` 留空。Realm 绑定该 IPv6 地址，入口回程沿用系统 IPv6 路由；落地可填 IPv4 或 IPv6 字面量，菜单按落地地址族自动列出对应的 IPv4（如 `9929`/`cn2`）或 IPv6（如 `ct_v6`/`cu_v6`）出口线路（详见 `examples/rule-v6-direct-to-v6-ct.example.toml` 与 `examples/rule-bgp-v4-to-v6-cu.example.toml`）。
+使用公网 IPv6 直连时，在 **2 -> 2**（新建转发）或 **2 -> 3**（修改转发）的入口处填本机公网 IPv6 地址，端口同时用作客户端入口和本机监听端口。用 TOML 配置时，`forward.listen_ip` 填 IPv6 地址，`forward.listen_port` 与 `ingress.public_port` 一致，`ingress.domain` 和 `ingress.fixed_ip` 留空。Realm 绑定该 IPv6 地址，入口回程沿用系统 IPv6 路由；落地填写 IPv4，菜单列出 IPv4 出口线路（如 `9929`/`cn2`）。
 
 RFC 香港验收可在 **2 -> 2**（新建转发）使用规则名 `rfc-hk`，接受默认入口域名 `paid-v4.bgp1.leikwanhost.com`，依次填外部端口 `54848`、本机 `10.7.0.146` 与 `10003`、落地 `172.81.104.22` 与 `54848`，选 `cn2` 后查看预览并输入 `y`。其他规则可按实际映射填写。
 
@@ -240,7 +234,7 @@ sudo bash uninstall.sh --purge
 > **本机公网 IPv6 地址变化后如何重新应用受影响规则**：
 > 本轮转发规则采用显式 IPv6 监听地址与出站源地址，DDNS 自动任务仅更新域名 `AAAA` 记录。当运营商重新下发新的公网 IPv6 前缀/地址时：
 > 1. 先按新地址更新 `/etc/leikwan_tools/config.toml` 中对应 IPv6 线路的 `[lines.<名称>].source_ip`（以及必要时的 `gateway`）；
-> 2. 对于**使用该 IPv6 出口或使用公网 IPv6 直连入口**的规则，进入 `sudo lqtool` 菜单「**2. 转发规则管理 -> 3. 修改转发**」更新 `listen_ip`（直连规则）或确认对应线路后预览并输入 `y` 重新应用，或修改规则 TOML 后执行 `sudo leikwan_tools apply <规则文件>`（若仅 `config.toml` 中出口 `source_ip` 变更，也可对托管规则重新执行 `sudo leikwan_tools apply /etc/leikwan_tools/rules.d/<规则名>.toml`）；
+> 2. 对于**使用公网 IPv6 直连入口**的规则，进入 `sudo lqtool` 菜单「**2. 转发规则管理 -> 3. 修改转发**」更新 `listen_ip`，预览并输入 `y` 重新应用；也可修改规则 TOML 后执行 `sudo leikwan_tools apply <规则文件>`；
 > 3. 工具会继续执行规则归属校验、共享写锁及应用失败自动回滚。
 
 ### 1. 地址筛选与主动探测原则
@@ -281,7 +275,7 @@ leikwan_tools ddns status                    # 查看当前选路与持久化状
 
 ## 九、测试复跑命令与验收边界
 
-首轮原始输出保留在 `test-results/`，第二轮原始输出保留在 `test-results-r2/`；本轮 IPv6 落地与指定出口验收输出默认写入 `test-results-ipv6/`（可通过 `LIQUN_TEST_OUT_DIR` 指定目录）：
+首轮原始输出保留在 `test-results/`，第二轮原始输出保留在 `test-results-r2/`。可通过 `LIQUN_TEST_OUT_DIR` 指定测试输出目录：
 
 ```bash
 cd "/Users/allen/Downloads/Agent_Worker/vpstools/vps_tools/leikwan_tools"
@@ -289,14 +283,11 @@ cd "/Users/allen/Downloads/Agent_Worker/vpstools/vps_tools/leikwan_tools"
 # 1. 单元测试
 LIQUN_TEST_OUT_DIR="$PWD/test-results-ipv6" ./tests/run_unit_tests.sh
 
-# 2. 隔离 Debian 12 + systemd IPv6 落地与四组合 / 双线隔离 E2E 测试
-./tests/run_ipv6_egress_e2e.sh
-
-# 3. 原有隔离 Debian 12 + systemd 全链路回归（T1–T12，动态独立 Docker 资源）
+# 2. 原有隔离 Debian 12 + systemd 全链路回归（T1–T12，动态独立 Docker 资源）
 LIQUN_TEST_OUT_DIR="$PWD/test-results-ipv6" ./tests/run_isolated_e2e.sh
 
-# 4. 第二轮 7 项独立审计回归专项测试（R1–R7）
+# 3. 第二轮 7 项独立审计回归专项测试（R1–R7）
 LIQUN_TEST_OUT_DIR="$PWD/test-results-ipv6" ./tests/run_r2_regressions.sh
 ```
 
-T12 在隔离 VPS 中测试空策略表初始化、第二次运行、兼容人工规则、冲突与故障回滚。随后用菜单新建 HK 回显规则，检查 CN2 正常而 eth0 回程缺失的拒绝路径、入口固定前后的 PID，以及容器重启后的恢复。`run_ipv6_egress_e2e.sh` 验证四种入口与出口组合、双网卡断路零串线、同网卡独立表断路零回落、IPv6 源地址变更失败后恢复旧转发，以及负向校验、菜单选线和开机恢复。隔离实验使用容器路由器 DNAT 模拟官方 IPv4 BGP 端口映射并核对 TCP 握手与双向数据。真实官方公网端口映射、运营商线路及生产业务仍需实机验证。
+T12 在隔离 VPS 中测试空策略表初始化、第二次运行、兼容人工规则、冲突与故障回滚。随后用菜单新建 HK 回显规则，检查 CN2 正常而 eth0 回程缺失的拒绝路径、入口固定前后的 PID，以及容器重启后的恢复。隔离实验使用容器路由器 DNAT 模拟官方 IPv4 BGP 端口映射并核对 TCP 握手与双向数据。真实官方公网端口映射、运营商线路及生产业务仍需实机验证。

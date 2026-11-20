@@ -71,7 +71,7 @@ from leikwan_tools.ingress import (  # noqa: E402
     probe_candidate,
     query_dns_a_via_server,
 )
-from leikwan_tools.manager import ApplyError, PreflightReport, apply_rule  # noqa: E402
+from leikwan_tools.manager import ApplyError, PreflightReport, apply_rule, plan_rule  # noqa: E402
 from leikwan_tools.ownership import (  # noqa: E402
     OwnershipError,
     check_conservative_legacy_rule,
@@ -116,6 +116,25 @@ from leikwan_tools.updater import (  # noqa: E402
 
 
 class TestInteractiveShortcut(unittest.TestCase):
+    def test_menu_ipv6_entry_uses_ipv4_landing_and_exit(self) -> None:
+        cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))
+        answers = ["2", "2", "direct-v6", "2408:820c:1::10", "51011", "192.0.2.22", "51011", "9929", "y", "0", "0"]
+        with (
+            patch("builtins.input", side_effect=answers),
+            patch("leikwan_tools.cli.load_global_config", return_value=cfg),
+            patch("leikwan_tools.cli.plan_rule") as plan,
+            patch("leikwan_tools.cli.apply_rule") as apply,
+            patch("leikwan_tools.cli._print_plan"),
+            patch("leikwan_tools.cli._print_apply"),
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(main(["menu"]), 0)
+        rule = plan.call_args.args[1]
+        self.assertTrue(rule.direct_ipv6)
+        self.assertEqual(rule.remote_ip, "192.0.2.22")
+        self.assertEqual(rule.line, "9929")
+        apply.assert_called_once()
+
     def test_menu_edit_preserves_rule_settings_and_uses_confirmed_snapshot(self) -> None:
         cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))
         old = replace(
@@ -2603,43 +2622,30 @@ description = "联通 IPv6"
             self.assertEqual(res["remote"], "[2001:db8:99::10]:54141")
             self.assertEqual(res["route_output"], "ok-v6")
 
-    def test_menu_forward_filters_lines_by_remote_family(self) -> None:
+    def test_ipv6_landing_is_rejected_for_new_or_updated_rules(self) -> None:
         raw = self.BASE_CFG.format(rules_dir="/tmp/r", state_dir="/tmp/s", lock_file="/tmp/l")
         gcfg = parse_global_config_dict(loads_toml(raw))
-        # Create rule via menu: Combo 4 (official IPv4 BGP -> IPv6 landing -> cu_v6)
-        answers = ["2", "2", "bgp-v6", "", "54204", "10.7.0.146", "10014", "2001:0db8:99::10", "54141", "cu_v6", "y", "0", "0"]
+        old = load_rule_config(str(REPO_ROOT / "examples" / "rule-rfc-hk.example.toml"))
+        rule = replace(old, remote_ip="2001:db8:99::10", line="cu_v6")
+        with self.assertRaisesRegex(ConfigError, "已停止创建或修改 IPv6 落地"):
+            plan_rule(gcfg, rule)
         with (
-            patch("builtins.input", side_effect=answers) as m_input,
+            patch("leikwan_tools.manager.FileLock"),
+            patch("leikwan_tools.manager._assert_live_install_intact"),
+            self.assertRaisesRegex(ConfigError, "已停止创建或修改 IPv6 落地"),
+        ):
+            apply_rule(gcfg, rule)
+        answers = ["2", "2", "bgp-v6", "", "54204", "10.7.0.146", "10014", "2001:db8:99::10", "0", "0"]
+        with (
+            patch("builtins.input", side_effect=answers),
             patch("leikwan_tools.cli.load_global_config", return_value=gcfg),
             patch("leikwan_tools.cli.plan_rule") as m_plan,
-            patch("leikwan_tools.cli.apply_rule") as m_apply,
-            patch("leikwan_tools.cli._print_plan"),
-            patch("leikwan_tools.cli._print_apply"),
-            redirect_stdout(io.StringIO()) as out,
-        ):
-            self.assertEqual(main(["menu"]), 0)
-        stdout_text = out.getvalue()
-        prompts = " ".join(str(c.args[0]) for c in m_input.call_args_list if c.args)
-        self.assertIn("仅显示匹配 IPv6 落地的线路", prompts)
-        self.assertIn("cu_v6（IPV6", stdout_text)
-        self.assertIn("ct_v6（IPV6", stdout_text)
-        self.assertNotIn("9929（IPV4", stdout_text)
-        self.assertNotIn("cn2（IPV4", stdout_text)
-        created_rule = m_plan.call_args.args[1]
-        self.assertEqual(created_rule.remote_ip, "2001:db8:99::10")
-        self.assertEqual(created_rule.line, "cu_v6")
-        m_apply.assert_called_once()
-
-        # Selecting an IPv4 line name when remote is IPv6 must fail invalid option
-        bad_answers = ["2", "2", "bgp-v6-bad", "", "54204", "10.7.0.146", "10014", "2001:db8:99::10", "54141", "cn2", "0", "0"]
-        with (
-            patch("builtins.input", side_effect=bad_answers),
-            patch("leikwan_tools.cli.load_global_config", return_value=gcfg),
             redirect_stdout(io.StringIO()),
             patch("sys.stderr", new_callable=io.StringIO) as err,
         ):
             self.assertEqual(main(["menu"]), 0)
-        self.assertIn("无效选项: cn2", err.getvalue())
+        self.assertIn("不是合法的 IPv4 地址", err.getvalue())
+        m_plan.assert_not_called()
 
 
 if __name__ == "__main__":

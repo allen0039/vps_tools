@@ -402,6 +402,8 @@ def plan_rule(
     rule = rule_file if isinstance(rule_file, RuleConfig) else load_rule_config(
         rule_file, default_domain=global_cfg.ingress.default_domain
     )
+    if rule.remote_is_ipv6:
+        raise ConfigError("已停止创建或修改 IPv6 落地转发，请使用 IPv4 落地地址")
     report = preflight_rule(
         global_cfg,
         rule,
@@ -722,6 +724,8 @@ def apply_rule(
         rule = rule_file if isinstance(rule_file, RuleConfig) else load_rule_config(
             rule_file, default_domain=global_cfg.ingress.default_domain
         )
+        if rule.remote_is_ipv6:
+            raise ConfigError("已停止创建或修改 IPv6 落地转发，请使用 IPv4 落地地址")
         paths = _rule_paths(global_cfg, rule.name)
         stored = paths["stored_rule"]
         if create_only and stored.exists():
