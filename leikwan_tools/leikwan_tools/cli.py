@@ -1130,15 +1130,25 @@ def _menu_ddns_edit(cfg: GlobalConfig, profile: Optional[DdnsProfileConfig] = No
         "host": host,
         "credential_file": profile.credential_file if keep_existing else "",
     }
-    if profile is None:
-        changes["enabled"] = False
+    changes["enabled"] = True
     if credentials is not None:
         changes["auth_mode"] = "token" if provider == "cloudflare" else ""
     target = normalize_ddns_fqdn(zone, host) if zone else "(Webhook)"
     print(f"{name} | {ISP_LABELS[isp]} @ {_format_ddns_interface(interface)} | {provider} | AAAA → {target}")
-    if _confirm("保存 DDNS 配置"):
-        save_ddns_config(cfg, profile_name=name, changes=changes, new_credentials=credentials)
-        print("DDNS 配置已保存。新建配置默认暂停，可测试后启用。" if profile is None else "DDNS 配置已保存。")
+    if not cfg.ddns.enabled:
+        other_enabled = [item.name for item in cfg.ddns.profiles.values() if item.enabled and item.name != name]
+        if other_enabled:
+            print(f"开启全局 DDNS 后，以下已启用配置也会参与定时同步：{', '.join(other_enabled)}")
+    if _confirm("保存并启用 DDNS，立即同步该记录"):
+        save_ddns_config(
+            cfg, profile_name=name, changes=changes, enabled=True, new_credentials=credentials
+        )
+        print("DDNS 配置已保存并启用，正在进行首次同步；后续由定时任务自动检测。")
+        try:
+            result = update_ddns(load_global_config(cfg.config_path), name, force=True)
+            _print_ddns_update(result)
+        except _MENU_ERRORS + (UnicodeError,) as exc:
+            print(f"首次同步未完成：{exc}。配置已保存，定时器运行时将自动重试。", file=sys.stderr)
 
 
 def _menu_ddns_group(config_path: str) -> None:
@@ -1173,6 +1183,9 @@ def _menu_ddns_group(config_path: str) -> None:
                 if _confirm(f"{action}全局 DDNS"):
                     save_ddns_config(cfg, enabled=not cfg.ddns.enabled)
                     print(f"全局 DDNS 已{action}。")
+                    if not cfg.ddns.enabled and any(item.enabled for item in cfg.ddns.profiles.values()):
+                        print("正在立即同步已启用的 DDNS 配置。")
+                        _print_ddns_update(update_ddns(load_global_config(config_path), force=True))
                 continue
             name = _menu_ddns_profile(cfg, allow_all=selected in ("4", "6"))
             if not name:

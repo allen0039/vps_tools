@@ -1389,10 +1389,92 @@ class TestDdnsSubsystem(unittest.TestCase):
                     encoding="utf-8",
                 )
                 answers = ["7", "2", "ct", "1", provider, "example.net", "edge", *values, "y", "0", "0"]
-                with patch("builtins.input", side_effect=answers), redirect_stdout(io.StringIO()):
+                with (
+                    patch("builtins.input", side_effect=answers),
+                    patch("leikwan_tools.cli.update_ddns", return_value={"results": []}) as sync,
+                    redirect_stdout(io.StringIO()),
+                ):
                     self.assertEqual(main(["--config", str(config), "menu"]), 0)
-                profile = load_global_config(str(config)).ddns.profiles["ct"]
+                saved = load_global_config(str(config))
+                profile = saved.ddns.profiles["ct"]
+                self.assertTrue(saved.ddns.enabled)
+                self.assertTrue(profile.enabled)
+                sync.assert_called_once_with(saved, "ct", force=True)
                 self.assertEqual(load_credential_file(profile.credential_file)[0], expected)
+
+    def test_first_sync_failure_preserves_enabled_config(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            config = base / "config.toml"
+            config.write_text(
+                self.base_cfg_toml.replace("/run/leikwan_tools.lock", str(base / "tool.lock")),
+                encoding="utf-8",
+            )
+            answers = ["7", "2", "ct", "1", "1", "example.net", "edge", "test-cf-token", "y", "0", "0"]
+            with (
+                patch("builtins.input", side_effect=answers),
+                patch("leikwan_tools.cli.update_ddns", side_effect=DdnsError("同步失败")),
+                patch("sys.stderr", new_callable=io.StringIO) as error,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(main(["--config", str(config), "menu"]), 0)
+            saved = load_global_config(str(config))
+            self.assertTrue(saved.ddns.enabled)
+            self.assertTrue(saved.ddns.profiles["ct"].enabled)
+            self.assertIn("配置已保存", error.getvalue())
+            self.assertIn("定时器运行时将自动重试", error.getvalue())
+
+    def test_enabling_existing_global_ddns_syncs_enabled_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            config = base / "config.toml"
+            cred = base / "token.env"
+            cred.write_text("CF_API_TOKEN=test-cf-token\n", encoding="utf-8")
+            cred.chmod(0o600)
+            text = self.base_cfg_toml.replace("/run/leikwan_tools.lock", str(base / "tool.lock"))
+            text += (
+                '\n[ddns]\nenabled = false\n[ddns.ct]\n'
+                'enabled = true\nisp = "ct"\nprovider = "cloudflare"\n'
+                f'zone = "example.net"\nhost = "edge"\ncredential_file = "{cred}"\n'
+            )
+            config.write_text(text, encoding="utf-8")
+            with (
+                patch("builtins.input", side_effect=["7", "8", "y", "0", "0"]),
+                patch("leikwan_tools.cli.update_ddns", return_value={"results": []}) as sync,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(main(["--config", str(config), "menu"]), 0)
+            saved = load_global_config(str(config))
+            self.assertTrue(saved.ddns.enabled)
+            sync.assert_called_once_with(saved, force=True)
+
+    def test_menu_save_syncs_record_and_persists_result(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            config = base / "config.toml"
+            text = self.base_cfg_toml.replace("/run/leikwan_tools.lock", str(base / "tool.lock"))
+            text = text.replace("/var/lib/leikwan_tools", str(base / "state"))
+            config.write_text(text, encoding="utf-8")
+            inspection = ProfileInspectResult(
+                "ct", True, "ct", "auto", "cloudflare", "AAAA", "example.net", "edge",
+                "edge.example.net", "2400:3200::1", 1, "240e::5", 5.0, [], [],
+            )
+            answers = ["7", "2", "ct", "1", "1", "example.net", "edge", "test-cf-token", "y", "0", "0"]
+            with (
+                patch("builtins.input", side_effect=answers),
+                patch("leikwan_tools.ddns.inspect_ddns_profile", return_value=inspection),
+                patch.object(CloudflareProvider, "sync_record", return_value=ProviderSyncResult(
+                    "created", "record-id", "240e::5", [], "同步成功"
+                )) as sync,
+                redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(main(["--config", str(config), "menu"]), 0)
+            sync.assert_called_once()
+            self.assertEqual(sync.call_args.args[0].fqdn, "edge.example.net")
+            self.assertEqual(sync.call_args.args[1], "240e::5")
+            self.assertEqual(sync.call_args.args[2]["CF_API_TOKEN"], "test-cf-token")
+            self.assertEqual(status_ddns(load_global_config(str(config)))["profiles"][0]["last_success_ip"], "240e::5")
+            self.assertIn("同步成功", output.getvalue())
 
     def test_ddns_menu_configures_and_manages_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1404,7 +1486,7 @@ class TestDdnsSubsystem(unittest.TestCase):
             create = ["2", "ct.edge", "1", "1", "example.net", "edge", "example-test-token"]
             edit = ["3", "ct.edge", "", "", "", "", "edge-new", ""]
             answers = [
-                "7", "1", *create, "n", *create, "y", "1", "7", "ct.edge", "y", "8", "y",
+                "7", "1", *create, "n", *create, "y", "1",
                 *edit, "y", "4", "1", "5", "ct.edge", "6", "1", "n", "6", "1", "y", "0", "0",
             ]
             with (
@@ -1431,10 +1513,14 @@ class TestDdnsSubsystem(unittest.TestCase):
             self.assertTrue(config.read_text(encoding="utf-8").startswith(original))
             self.assertIn("7. IPv6 DDNS 域名管理", output.getvalue())
             self.assertIn("自动识别电信 IPv6，无需填写网卡名", output.getvalue())
-            self.assertIn("新建配置默认暂停", output.getvalue())
+            self.assertIn("配置已保存并启用", output.getvalue())
             inspect.assert_called_once_with(saved, None)
             test.assert_called_once_with(saved, "ct.edge")
-            sync.assert_called_once_with(saved, None, force=True)
+            self.assertEqual(sync.call_count, 3)
+            self.assertEqual(sync.call_args_list[0].args[1], "ct.edge")
+            self.assertEqual(sync.call_args_list[1].args[1], "ct.edge")
+            self.assertEqual(sync.call_args_list[2].args[1], None)
+            self.assertTrue(all(call.kwargs["force"] for call in sync.call_args_list))
 
             with patch("builtins.input", side_effect=["7", "9", "ct.edge", "y", "0", "0"]), redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["--config", str(config), "menu"]), 0)
