@@ -68,6 +68,7 @@ from .manager import (
     unselect_rule_ingress_ip,
     verify_startup_rule,
 )
+from .network import DEFAULT_DNS, network_command
 from .ownership import (
     BIN_LAUNCHER_PATH,
     SHORTCUT_PATH,
@@ -882,11 +883,81 @@ def _menu_rules_group(config_path: str) -> None:
             print(f"错误: {exc}", file=sys.stderr)
 
 
+_NETWORK_ACTIONS = {
+    "ipv4-prefer": {"enable": "开启 IPv4 优先", "disable": "恢复原有地址优先级"},
+    "dns": {"set": "设置系统 DNS", "restore": "恢复系统 DNS"},
+    "ipv6": {"disable": "禁用 IPv6", "restore": "恢复 IPv6"},
+    "bbr": {"enable": "开启 BBR / fq", "restore": "恢复拥塞控制和 qdisc"},
+    "ipv6-lockdown": {"enable": "启用 / 更新 IPv6 入站收口", "restore": "撤销 IPv6 入站收口"},
+}
+
+_NETWORK_WARNINGS = {
+    "dns": "系统 DNS 影响整机解析，不是 DDNS 配置。",
+    "ipv6": "禁用 IPv6 会中断 IPv6 SSH 和直连转发，并使 IPv6 DDNS 无法继续探测。请通过 IPv4 SSH 或控制台操作。",
+    "ipv6-lockdown": "请确认放行列表包含 IPv6 SSH 和直连 Realm 的 TCP 端口；建议保留控制台。",
+}
+
+
+def _print_system_network(result: dict) -> None:
+    for label, value in result.items():
+        if isinstance(value, dict):
+            value = ", ".join(f"{key}={item if item is not None else '未知'}" for key, item in value.items())
+        elif isinstance(value, list):
+            value = ", ".join(map(str, value)) or "无"
+        elif label == "IPv6 入站收口" and value == "":
+            value = "未加载"
+        if isinstance(value, str) and "\n" in value:
+            print(f"{label}:\n{value}")
+        else:
+            print(f"{label}: {value or '未知或不可用'}")
+
+
+def _menu_system_network(config_path: str) -> None:
+    features = ["status", *_NETWORK_ACTIONS]
+    labels = [
+        "查看系统网络优化状态",
+        "IPv4 优先：开启 / 关闭",
+        "DNS 服务器：设置 / 恢复",
+        "IPv6：禁用 / 恢复",
+        "BBR / fq：开启 / 恢复",
+        "IPv6 入站收口 nftables：启用 / 撤销",
+    ]
+    while True:
+        print("\n系统网络优化")
+        try:
+            feature = _menu_pick(features, "请选择", labels=labels)
+            if not feature:
+                return
+            command = ["--config", config_path, "system"]
+            if feature == "status":
+                main([*command, "network", "status"])
+                continue
+            actions = _NETWORK_ACTIONS[feature]
+            action = _menu_pick(list(actions), "请选择操作", labels=list(actions.values()))
+            if not action:
+                continue
+            if feature in _NETWORK_WARNINGS and action != "restore":
+                print(_NETWORK_WARNINGS[feature])
+            options = ["--yes"]
+            if (feature, action) == ("dns", "set"):
+                options.extend(["--", _menu_field("DNS IP（逗号分隔）", DEFAULT_DNS)])
+            elif (feature, action) == ("ipv6-lockdown", "enable"):
+                ports = input("允许的 TCP 端口（逗号分隔，如 22,8443；回车取消）：").strip()
+                if not ports:
+                    continue
+                options.append(f"--tcp-ports={ports}")
+            if _confirm(f"确认{actions[action]}"):
+                main([*command, feature, action, *options])
+        except _MENU_ERRORS as exc:
+            print(f"错误: {exc}", file=sys.stderr)
+
+
 def _menu_system_group(config_path: str) -> None:
     while True:
         print(f"\nleikwan_tools v{__version__} > 初始化与环境排查")
         print("  1. 初始化双线出口路由（首次装机时执行）")
         print("  2. 检查运行环境与线路状态")
+        print("  3. 系统网络优化")
         print("  0. 返回主菜单")
         selected = input("请选择：").strip()
         if selected == "0":
@@ -898,6 +969,8 @@ def _menu_system_group(config_path: str) -> None:
                 print(f"错误: {exc}", file=sys.stderr)
         elif selected == "2":
             main(["--config", config_path, "check-prereqs"])
+        elif selected == "3":
+            _menu_system_network(config_path)
         else:
             print("无效选项，请重新输入。")
 
@@ -1280,7 +1353,7 @@ def _run_menu(config_path: str) -> int:
             print("  2. 转发规则管理（查看 / 新建 / 修改 / 暂停恢复 / 删除）")
             print("  3. 查询官方公网入口 IP")
             print("  4. 查询并设置转发的客户端入口 IP")
-            print("  5. 初始化与环境排查（双线路由 / 环境检查）")
+            print("  5. 初始化与环境排查（双线路由 / 环境检查 / 系统网络优化）")
             print("  6. 从仓库检查并更新工具")
             print("  7. IPv6 DDNS 域名管理")
             print("  0. 退出")
@@ -1333,6 +1406,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("menu", help="打开交互管理菜单")
+
+    system = sub.add_parser("system", help="查看或手动调整系统网络设置")
+    features = system.add_subparsers(dest="system_feature", required=True)
+    network = features.add_parser("network", help="查看系统网络优化状态")
+    network.add_subparsers(dest="system_action", required=True).add_parser("status", help="只读查看当前状态")
+    for feature, actions in _NETWORK_ACTIONS.items():
+        setting = features.add_parser(feature, help=" / ".join(actions.values()), epilog=_NETWORK_WARNINGS.get(feature))
+        choices = setting.add_subparsers(dest="system_action", required=True)
+        for action, label in actions.items():
+            choice = choices.add_parser(action, help=label, epilog=_NETWORK_WARNINGS.get(feature))
+            choice.add_argument("--yes", action="store_true", required=True, help="确认修改系统网络配置")
+            if (feature, action) == ("dns", "set"):
+                choice.add_argument("value", nargs="?", default=DEFAULT_DNS, help=f"逗号分隔的 DNS IP（默认 {DEFAULT_DNS}）")
+            if (feature, action) == ("ipv6-lockdown", "enable"):
+                choice.add_argument("--tcp-ports", dest="value", required=True, help="放行 TCP 端口（逗号分隔，包含 SSH 和业务端口）")
 
     p_routing = sub.add_parser("routing", help="预览或初始化 IPv4 源策略路由")
     routing_sub = p_routing.add_subparsers(dest="routing_cmd", required=True)
@@ -1472,6 +1560,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         if args.command == "menu":
             return _run_menu(args.config)
+
+        if args.command == "system":
+            feature = "status" if args.system_feature == "network" else args.system_feature
+            result = network_command(feature, args.system_action, getattr(args, "value", ""))
+            if args.json:
+                _print_json(result)
+            else:
+                _print_system_network(result)
+            return 0
 
         if args.command in ("routing", "_restore-routing"):
             cfg = load_global_config(args.config)

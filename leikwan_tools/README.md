@@ -4,7 +4,7 @@
 
 不再支持新建或修改 IPv6 落地规则；旧规则仍可读取、查看状态、暂停、删除和开机恢复。暂停后不能通过菜单重新启用 IPv6 落地规则；可通过修改规则将落地改为 IPv4。如需继续运行旧规则，请保留对应 IPv6 线路配置。
 
-原版 `Toolkit`、`LeiKwanManager`、`v6-mng.sh` 和外部 Realm 实例由各自原有工具管理。本工具只管理自己的 Realm 实例。经显式确认的路由初始化仅向主配置指定的独立 IPv4 表添加所需条目，保留主路由、全局防火墙、SSH 配置和第三方路由；IPv6 出站优先使用每条 Realm 规则的 socket 绑定和系统已有 IPv6 路由，不自动修改系统 IPv6 路由。
+原版 `Toolkit`、`LeiKwanManager`、`v6-mng.sh` 和外部 Realm 实例由各自原有工具管理。本工具只管理自己的 Realm 实例。经显式确认的路由初始化仅向主配置指定的独立 IPv4 表添加所需条目，保留主路由、全局防火墙、SSH 配置和第三方路由；IPv6 出站优先使用每条 Realm 规则的 socket 绑定和系统已有 IPv6 路由，不自动修改系统 IPv6 路由。整机网络优化是独立的手动功能，见[系统网络优化](#十系统网络优化)。
 
 ---
 
@@ -287,3 +287,24 @@ LIQUN_TEST_OUT_DIR="$PWD/test-results-ipv6" ./tests/run_r2_regressions.sh
 ```
 
 T12 在隔离 VPS 中测试空策略表初始化、第二次运行、兼容人工规则、冲突与故障回滚。随后用菜单新建 HK 回显规则，检查 CN2 正常而 eth0 回程缺失的拒绝路径、入口固定前后的 PID，以及容器重启后的恢复。隔离实验使用容器路由器 DNAT 模拟官方 IPv4 BGP 端口映射并核对 TCP 握手与双向数据。真实官方公网端口映射、运营商线路及生产业务仍需实机验证。
+
+---
+
+## 十、系统网络优化
+
+运行 `sudo lqtool`，进入 **5. 初始化与环境排查 → 3. 系统网络优化**。参考 [Leikwan Toolkit](https://github.com/ike-sh/leikwan-toolkit) 的六项功能；本工具**不会**在安装、更新、路由初始化或环境检查时自动应用设置。状态查询不修改系统，所有写操作都需要 root 和显式确认。
+
+| 功能 | 命令 | 恢复命令 |
+| --- | --- | --- |
+| 查看状态 | `lqtool system network status`（完整 nftables 状态需要 root） | — |
+| IPv4 优先（glibc 地址排序，不关闭 IPv6） | `sudo lqtool system ipv4-prefer enable --yes` | `sudo lqtool system ipv4-prefer disable --yes` |
+| 系统 DNS（可换成自己的服务器） | `sudo lqtool system dns set 8.8.8.8,1.1.1.1 --yes` | `sudo lqtool system dns restore --yes` |
+| 禁用 IPv6 | `sudo lqtool system ipv6 disable --yes` | `sudo lqtool system ipv6 restore --yes` |
+| BBR / fq（要求内核支持） | `sudo lqtool system bbr enable --yes` | `sudo lqtool system bbr restore --yes` |
+| IPv6 入站收口（端口仅为示例） | `sudo lqtool system ipv6-lockdown enable --tcp-ports 22,8443 --yes` | `sudo lqtool system ipv6-lockdown restore --yes` |
+
+- **IPv6 禁用**会中断 IPv6 SSH、直连转发和 DDNS 探测。请从 IPv4 SSH 或控制台执行；恢复内核开关后，静态 IPv6 地址和路由可能需要由原网络管理器重新配置。
+- **IPv6 入站收口不禁用 IPv6**。先安装 `nftables`，并显式列出 SSH 和所有 IPv6 业务 TCP 端口。规则保留回环、已建立/相关连接、ICMPv6 和 DHCPv6 客户端流量；其余进入本机的新 IPv6 入站流量按规则丢弃。不改 IPv4 或其他防火墙表，也不会绕过其他表已有的拦截规则。若其他服务清空整个 nftables 规则集，请检查状态并重新应用。
+- **系统 DNS**独立于 DDNS。活动的 `systemd-resolved` 使用独立的全局配置文件，不覆盖每条链路的 DNS；普通 `resolv.conf` 只替换 `nameserver` 行，保留其他设置。不会替换第三方管理的符号链接；DHCP 或网络管理器仍可能覆盖普通文件。
+- **BBR / fq** 修改内核默认值，不主动替换各网卡已有的 qdisc。内核不支持或拒绝参数时，操作报错而不是提示已启用。
+- 首次修改前保存原始配置到 `/var/lib/leikwan_tools/system-network/`；重复操作不覆盖原始备份。检测到配置被外部改写时停止并保留备份，避免覆盖其他工具的变更。卸载前须恢复本工具已管理的系统网络设置。

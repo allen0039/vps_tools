@@ -90,6 +90,10 @@ if [[ "${_LEIKWAN_TOOLS_INSTALL_LOCKED:-0}" != "1" ]]; then
 fi
 
 export PYTHONPATH="${SCRIPT_DIR}"
+if ! python3 "${SCRIPT_DIR}/bin/leikwan_tools" --version >/dev/null; then
+    echo "错误: 利群助手安装包不完整或入口无法加载；请重新下载统一安装器或使用利群助手的更新命令。" >&2
+    exit 1
+fi
 python3 -m leikwan_tools.ownership check-install-targets \
     --config-dir "${CONFIG_DIR}" --state-dir "${STATE_DIR}" --lock-file "${LOCK_FILE}"
 

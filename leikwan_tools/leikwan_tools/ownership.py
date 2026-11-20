@@ -577,6 +577,7 @@ def uninstall_tool(
     lock_timeout: float = 15.0,
 ) -> Dict[str, Any]:
     """Coordinated, ownership-verified uninstall touching ONLY leikwan_tools owned resources."""
+    from .network import pending_network_settings
     from .routing import uninstall_routing
 
     manifest = load_install_manifest(manifest_path)
@@ -612,6 +613,11 @@ def uninstall_tool(
     skipped_items: List[str] = []
 
     with FileLock(lock_file, timeout=lock_timeout):
+        pending_network = pending_network_settings()
+        if pending_network:
+            raise OwnershipError(
+                "卸载前请先在「初始化与环境排查 > 系统网络优化」恢复系统设置: " + ", ".join(pending_network)
+            )
         owned_units = set()
         rules_to_remove: Dict[str, Dict[str, Path]] = {}
 
