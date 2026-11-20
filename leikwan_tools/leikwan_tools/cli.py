@@ -121,13 +121,11 @@ _MENU_WIDTH = 64
 _STATUS_LABEL_WIDTH = 10
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 _ANSI = {
-    "cyan": "1;36",
-    "title": "1;36",
-    "green": "92",
-    "yellow": "93",
-    "red": "91",
-    "dim": "2",
-    "bold": "1",
+    "cyan": "36",
+    "title": "36",
+    "green": "32",
+    "yellow": "33",
+    "red": "31",
 }
 
 
@@ -182,18 +180,13 @@ def _print_status_kv(label: str, value: str, *, width: int = _STATUS_LABEL_WIDTH
     print(f"{_pad_label(label, width)}: {value}")
 
 
-def _print_menu_item(key: str, title: str, hint: str = "", *, dim: bool = False) -> None:
-    if dim:
-        print(f"  {_style(f'{key}. {title}', 'dim')}")
-        return
-    num = _style(f"{key}.", "cyan")
-    suffix = f"  {_style(f'({hint})', 'dim')}" if hint else ""
-    print(f"  {num} {title}{suffix}")
+def _print_menu_item(key: str, title: str, hint: str = "") -> None:
+    suffix = f" ({hint})" if hint else ""
+    print(f"  {key}. {title}{suffix}")
 
 
 def _menu_prompt(label: str = "请选择") -> str:
-    _print_menu_divider()
-    return input(_style(f"{label}: ", "bold")).strip()
+    return input(f"{label}: ").strip()
 
 
 def _print_error(message: str) -> None:
@@ -327,7 +320,7 @@ def _print_status_list(items: List[Dict[str, Any]]) -> None:
         return
     for idx, item in enumerate(items):
         if idx > 0:
-            print(_style("-" * _MENU_WIDTH, "dim"))
+            print(_style("-" * _MENU_WIDTH, "cyan"))
         dial = format_endpoint(item["dial_addr"], item["public_port"])
         autostart = "已开启" if item["enabled"] else "未开启"
         line_desc = _format_line_display(
@@ -338,7 +331,7 @@ def _print_status_list(items: List[Dict[str, Any]]) -> None:
         )
         bound_in_iface = item.get("listen_interface", "")
         listen_desc = f"{item['listen']} (入口网卡={bound_in_iface})" if bound_in_iface else item["listen"]
-        print(f"转发名称   : {_style(item['rule_name'], 'bold')}  ({item['description'] or '无备注'})")
+        print(f"转发名称   : {item['rule_name']}  ({item['description'] or '无备注'})")
         print(f"当前状态   : {_format_rule_status_summary(item)} | 开机自启: {autostart}")
         print(f"出口线路   : {line_desc}")
         print(f"客户端连接 : {dial}")
@@ -615,7 +608,7 @@ def _menu_pick(
 ) -> str:
     display_items = labels if labels is not None else items
     for number, label in enumerate(display_items, 1):
-        print(f"  {_style(f'{number}.', 'cyan')} {label}")
+        print(f"  {number}. {label}")
     hint = f"，回车保留 {default}" if default else "，回车取消"
     value = input(f"{prompt}（输入编号，0 返回{hint}）：").strip()
     if not value:
@@ -951,7 +944,7 @@ def _menu_list_forwards(cfg: GlobalConfig) -> None:
             entry_note = "已固定公网 IP"
         else:
             entry_note = "域名自动解析"
-        print(f"  {_style(f'{idx}.', 'cyan')} {badge} {_style(rule.name, 'bold')}")
+        print(f"  {idx}. {badge} {rule.name}")
         print(f"     出口线路   : {line_desc}")
         print(f"     客户端入口 : {dial}（{entry_note}）")
         print(f"     本机监听   : {rule.listen_endpoint}")
@@ -1104,7 +1097,7 @@ def _menu_rules_group(config_path: str) -> None:
         _print_menu_item("4", "暂停 / 恢复转发")
         _print_menu_item("5", "删除转发")
         _print_menu_item("6", "连通性与延迟探测")
-        _print_menu_item("0", "返回主菜单", dim=True)
+        _print_menu_item("0", "返回主菜单")
         selected = _menu_prompt()
         if selected == "0":
             return
@@ -1193,7 +1186,7 @@ def _menu_system_group(config_path: str) -> None:
         _print_menu_item("1", "初始化双线出口路由", "首次装机时执行")
         _print_menu_item("2", "检查运行环境与线路状态")
         _print_menu_item("3", "系统网络优化")
-        _print_menu_item("0", "返回主菜单", dim=True)
+        _print_menu_item("0", "返回主菜单")
         selected = _menu_prompt()
         if selected == "0":
             return
@@ -1239,7 +1232,7 @@ def _print_update_result(res: UpdateResult) -> None:
 def _menu_update(config_path: str) -> bool:
     _print_menu_header(f"利群转发助手 v{__version__}", "检查并更新工具")
     print(f"当前版本：{_style(f'v{__version__}', 'cyan')}")
-    print(_style("说明：将从仓库拉取最新程序文件并原地升级，现有转发配置与运行中的连接不受影响。", "dim"))
+    print("说明：将从仓库拉取最新程序文件并原地升级，现有转发配置与运行中的连接不受影响。")
     channel = _menu_pick(
         ["github", "gitee"],
         "选择更新渠道",
@@ -1303,7 +1296,7 @@ def _print_ddns_bar(
         if cfg is None:
             cfg = _maybe_load_global(config_path)
             if cfg is None:
-                _print_status_kv("IPv6 DDNS", _badge("未配置", "dim"))
+                _print_status_kv("IPv6 DDNS", _badge("未配置", "red"))
                 return
         state = status_ddns(cfg)
     except _MENU_ERRORS + (UnicodeError,):
@@ -1327,7 +1320,7 @@ def _print_ddns_bar(
         profiles = [item for item in state["profiles"] if item["isp"] == isp]
         count = sum(item["enabled"] for item in profiles)
         if not profiles:
-            badge = _badge("未配置", "dim")
+            badge = _badge("未配置", "red")
         elif not enabled:
             badge = _badge("全局暂停", "yellow")
         elif not count:
@@ -1358,15 +1351,15 @@ def _print_ddns_bar(
             "red" if action == "error"
             else "yellow" if action == "skipped_no_ip"
             else "green" if action in ("created", "updated", "noop", "verified_noop", "triggered")
-            else "dim"
+            else ""
         )
         follow_tone = (
             "red" if isinstance(follow, dict) and follow.get("errors")
             else "green" if isinstance(follow, dict) and follow.get("updated")
-            else "dim"
+            else ""
         )
         print(
-            f"  {_style(item['profile'], 'bold')}：{profile_badge} | {strategy} | "
+            f"  {item['profile']}：{profile_badge} | {strategy} | "
             f"网卡 {iface} | 上次选中 {item['selected_ip'] or '-'}"
         )
         print(
@@ -1382,9 +1375,9 @@ def _print_main_status_panel(config_path: str) -> None:
         _print_status_kv("主配置", _badge("读取失败", "red"))
         return
     if cfg is None:
-        _print_status_kv("转发状态", _badge("未配置", "dim"))
-        _print_status_kv("出口线路", _badge("未配置", "dim"))
-        _print_status_kv("IPv6 DDNS", _badge("未配置", "dim"))
+        _print_status_kv("转发状态", _badge("未配置", "red"))
+        _print_status_kv("出口线路", _badge("未配置", "red"))
+        _print_status_kv("IPv6 DDNS", _badge("未配置", "red"))
         return
 
     try:
@@ -1393,15 +1386,15 @@ def _print_main_status_panel(config_path: str) -> None:
         _print_status_kv("转发状态", _badge("读取失败", "red"))
     else:
         if not managed:
-            _print_status_kv("转发状态", _badge("暂无规则", "dim"))
+            _print_status_kv("转发状态", _badge("暂无规则", "yellow"))
         else:
             states = [_rule_active_state(cfg, rule) for rule in managed]
             running = sum(state is True for state in states)
             stopped = sum(state is False for state in states)
             unknown = sum(state is None for state in states)
             parts = [
-                f"运行中{_badge(str(running), 'green' if running else 'dim')}",
-                f"未运行{_badge(str(stopped), 'yellow' if stopped else 'dim')}",
+                f"运行中{_badge(str(running), 'green' if running > 0 else 'red')}",
+                f"未运行{_badge(str(stopped), 'yellow' if stopped > 0 else '')}",
             ]
             if unknown > 0:
                 parts.append(f"未知{_badge(str(unknown), 'red')}")
@@ -1411,7 +1404,7 @@ def _print_main_status_panel(config_path: str) -> None:
         line_parts = [f"{name}{_badge(lc.interface, 'yellow')}" for name, lc in cfg.lines.items()]
         _print_status_kv("出口线路", " | ".join(line_parts))
     else:
-        _print_status_kv("出口线路", _badge("未配置", "dim"))
+        _print_status_kv("出口线路", _badge("未配置", "red"))
 
     _print_ddns_bar(config_path, detailed=False, cfg=cfg)
 
@@ -1702,7 +1695,7 @@ def _menu_ddns_group(config_path: str) -> None:
         _print_menu_item("6", "立即同步 AAAA 记录")
         _print_menu_item("7", "启用 / 暂停 DDNS")
         _print_menu_item("8", "删除 DDNS 配置")
-        _print_menu_item("0", "返回主菜单", dim=True)
+        _print_menu_item("0", "返回主菜单")
         selected = _menu_prompt()
         if selected == "0":
             return
@@ -1755,7 +1748,7 @@ def _run_menu(config_path: str) -> int:
             _print_menu_item("5", "初始化与环境排查", "双线路由 / 环境检查 / 网络优化")
             _print_menu_item("6", "IPv6 DDNS 域名管理")
             _print_menu_item("7", "检查并更新工具")
-            _print_menu_item("0", "退出", dim=True)
+            _print_menu_item("0", "退出")
             selected = _menu_prompt()
             if selected == "0":
                 return 0

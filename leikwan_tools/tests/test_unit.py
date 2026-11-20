@@ -9,6 +9,7 @@ from contextlib import redirect_stdout
 from dataclasses import asdict, replace
 from pathlib import Path
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -409,30 +410,63 @@ class TestInteractiveShortcut(unittest.TestCase):
 
         self.assertEqual(_display_width("转发状态"), 8)
         self.assertEqual(
-            _display_width("\033[1;36m利群转发助手 | leikwan_tools\033[0m"),
+            _display_width("\033[36m利群转发助手 | leikwan_tools\033[0m"),
             _display_width("利群转发助手 | leikwan_tools"),
         )
 
-        clean_env = {k: v for k, v in os.environ.items() if k != "NO_COLOR"}
-        clean_env["TERM"] = "xterm-256color"
-        tty_out = TtyBuffer()
-        with (
-            patch.dict(os.environ, clean_env, clear=True),
-            patch("builtins.input", side_effect=["0"]),
-            redirect_stdout(tty_out),
-        ):
-            self.assertEqual(_run_menu("/nonexistent-leikwan-config.toml"), 0)
-        self.assertIn("\033[1;36m", tty_out.getvalue())
-        self.assertIn("\033[2m0. 退出\033[0m", tty_out.getvalue())
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            cred = base / "cf.env"
+            cfg_text = (REPO_ROOT / "examples" / "config.example.toml").read_text(encoding="utf-8")
+            cfg_text = (
+                cfg_text.replace("/etc/leikwan_tools/rules.d", str(base / "rules.d"))
+                .replace("/var/lib/leikwan_tools", str(base / "state"))
+                .replace("/run/leikwan_tools.lock", str(base / "tool.lock"))
+            )
+            cfg_text += (
+                '\n[ddns]\nenabled = false\n[ddns.ct]\n'
+                'enabled = true\nisp = "ct"\nprovider = "cloudflare"\n'
+                f'zone = "example.net"\nhost = "edge"\ncredential_file = "{cred}"\n'
+            )
+            cfg_path = base / "config.toml"
+            cfg_path.write_text(cfg_text, encoding="utf-8")
+            running_rule = replace(
+                load_rule_config(str(REPO_ROOT / "examples" / "rule-rfc-hk.example.toml")), name="rule-one"
+            )
+            stopped_rule = replace(running_rule, name="rule-two")
 
-        no_color_out = TtyBuffer()
-        with (
-            patch.dict(os.environ, {**clean_env, "NO_COLOR": "1"}, clear=True),
-            patch("builtins.input", side_effect=["0"]),
-            redirect_stdout(no_color_out),
-        ):
-            self.assertEqual(_run_menu("/nonexistent-leikwan-config.toml"), 0)
-        self.assertNotIn("\033[", no_color_out.getvalue())
+            clean_env = {k: v for k, v in os.environ.items() if k != "NO_COLOR"}
+            clean_env["TERM"] = "xterm-256color"
+            tty_out = TtyBuffer()
+            with (
+                patch.dict(os.environ, clean_env, clear=True),
+                patch("builtins.input", side_effect=["0"]),
+                patch("leikwan_tools.cli.list_managed_rules", return_value=[running_rule, stopped_rule]),
+                patch("leikwan_tools.cli.systemd_is_active", side_effect=[True, False, True]),
+                redirect_stdout(tty_out),
+            ):
+                self.assertEqual(_run_menu(str(cfg_path)), 0)
+
+            tty_text = tty_out.getvalue()
+            self.assertIn("\033[36m", tty_text)
+            self.assertIn("运行中[\033[32m1\033[0m]", tty_text)
+            self.assertIn("未运行[\033[33m1\033[0m]", tty_text)
+            self.assertIn("[\033[31m未配置\033[0m]", tty_text)
+            self.assertLessEqual(set(re.findall(r"\033\[[0-9;]*m", tty_text)), {
+                "\033[0m", "\033[31m", "\033[32m", "\033[33m", "\033[36m",
+            })
+            self.assertIn("  0. 退出", tty_text)
+
+            no_color_out = TtyBuffer()
+            with (
+                patch.dict(os.environ, {**clean_env, "NO_COLOR": "1"}, clear=True),
+                patch("builtins.input", side_effect=["0"]),
+                patch("leikwan_tools.cli.list_managed_rules", return_value=[running_rule, stopped_rule]),
+                patch("leikwan_tools.cli.systemd_is_active", side_effect=[True, False, True]),
+                redirect_stdout(no_color_out),
+            ):
+                self.assertEqual(_run_menu(str(cfg_path)), 0)
+            self.assertNotIn("\033[", no_color_out.getvalue())
 
 
 class TestTomlCompat(unittest.TestCase):
