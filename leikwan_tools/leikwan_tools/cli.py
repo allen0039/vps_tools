@@ -1103,32 +1103,41 @@ def _menu_ddns_edit(cfg: GlobalConfig, profile: Optional[DdnsProfileConfig] = No
         zone = _menu_domain(zone, "DDNS 托管域").removesuffix(".").encode("idna").decode("ascii")
         host = host.removesuffix(".").encode("idna").decode("ascii")
         _menu_domain(normalize_ddns_fqdn(zone, host), "DDNS 记录域名")
-    credential_file = _menu_field("已有 0600 凭据文件路径", profile.credential_file if profile else "")
-    if not credential_file:
-        raise ConfigError("请填写独立的凭据文件路径")
+    fields = {
+        "cloudflare": [("CF_API_TOKEN", "Cloudflare API Token")],
+        "dnspod": [("DNSPOD_TOKEN", "DNSPod Token（ID,Token）")],
+        "alidns": [("ALIDNS_ACCESS_KEY_ID", "阿里云 AccessKey ID"), ("ALIDNS_ACCESS_KEY_SECRET", "阿里云 AccessKey Secret")],
+        "webhook": [("WEBHOOK_URL", "Webhook URL（包含 {ip}）")],
+    }
+    keep_existing = bool(profile and profile.provider == provider and profile.credential_file)
+    first_key, first_label = fields[provider][0]
+    first_value = input(f"{first_label}{'（回车保留原凭据）' if keep_existing else ''}：").strip()
+    credentials = None
+    if first_value:
+        credentials = {first_key: first_value}
+        for key, label in fields[provider][1:]:
+            value = input(f"{label}：").strip()
+            if not value:
+                raise ConfigError(f"{label}不能为空")
+            credentials[key] = value
+    elif not keep_existing:
+        raise ConfigError(f"{first_label}不能为空")
     changes = {
         "isp": isp,
         "interface": interface,
         "provider": provider,
         "zone": zone,
         "host": host,
-        "credential_file": os.path.abspath(os.path.expanduser(credential_file)),
+        "credential_file": profile.credential_file if keep_existing else "",
     }
     if profile is None:
         changes["enabled"] = False
-    if provider == "cloudflare":
-        auth_modes = {"auto": "从凭据识别", "token": "API Token", "global_key": "Global API Key"}
-        auth_mode = _menu_pick(
-            list(auth_modes), "选择 Cloudflare 认证", (profile.auth_mode if profile else "") or "auto",
-            list(auth_modes.values()),
-        )
-        if not auth_mode:
-            return
-        changes["auth_mode"] = "" if auth_mode == "auto" else auth_mode
+    if credentials is not None:
+        changes["auth_mode"] = "token" if provider == "cloudflare" else ""
     target = normalize_ddns_fqdn(zone, host) if zone else "(Webhook)"
     print(f"{name} | {ISP_LABELS[isp]} @ {_format_ddns_interface(interface)} | {provider} | AAAA → {target}")
     if _confirm("保存 DDNS 配置"):
-        save_ddns_config(cfg, profile_name=name, changes=changes)
+        save_ddns_config(cfg, profile_name=name, changes=changes, new_credentials=credentials)
         print("DDNS 配置已保存。新建配置默认暂停，可测试后启用。" if profile is None else "DDNS 配置已保存。")
 
 

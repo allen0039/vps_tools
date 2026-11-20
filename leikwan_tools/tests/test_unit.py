@@ -1349,18 +1349,60 @@ class TestDdnsSubsystem(unittest.TestCase):
     def setUp(self) -> None:
         self.base_cfg_toml = (REPO_ROOT / "examples" / "config.example.toml").read_text(encoding="utf-8")
 
+    def test_direct_credentials_validation_and_failed_save_leave_no_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            config = base / "config.toml"
+            config.write_text(
+                self.base_cfg_toml.replace("/run/leikwan_tools.lock", str(base / "tool.lock")),
+                encoding="utf-8",
+            )
+            cfg = load_global_config(str(config))
+            changes = {
+                "enabled": False, "isp": "ct", "interface": "auto", "provider": "cloudflare",
+                "zone": "example.net", "host": "edge", "auth_mode": "token",
+            }
+            with self.assertRaises(DdnsError):
+                save_ddns_config(cfg, profile_name="ct", changes=changes, new_credentials={"CF_EMAIL": "x"})
+            self.assertFalse((base / "secrets").exists())
+            with (
+                patch("leikwan_tools.ddns.atomic_write_text", side_effect=OSError("write failed")),
+                self.assertRaisesRegex(OSError, "write failed"),
+            ):
+                save_ddns_config(cfg, profile_name="ct", changes=changes, new_credentials={"CF_API_TOKEN": "test-token"})
+            self.assertEqual(list((base / "secrets").iterdir()), [])
+            self.assertEqual(load_global_config(str(config)), cfg)
+
+    def test_menu_accepts_provider_credentials_directly(self) -> None:
+        cases = [
+            ("1", ["test-cf-token"], {"CF_API_TOKEN": "test-cf-token"}),
+            ("2", ["123,test-dns-token"], {"DNSPOD_TOKEN": "123,test-dns-token"}),
+            ("3", ["test-id", "test-secret"], {"ALIDNS_ACCESS_KEY_ID": "test-id", "ALIDNS_ACCESS_KEY_SECRET": "test-secret"}),
+            ("4", ["https://example.net/update?ip={ip}"], {"WEBHOOK_URL": "https://example.net/update?ip={ip}"}),
+        ]
+        for provider, values, expected in cases:
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as td:
+                base = Path(td)
+                config = base / "config.toml"
+                config.write_text(
+                    self.base_cfg_toml.replace("/run/leikwan_tools.lock", str(base / "tool.lock")),
+                    encoding="utf-8",
+                )
+                answers = ["7", "2", "ct", "1", provider, "example.net", "edge", *values, "y", "0", "0"]
+                with patch("builtins.input", side_effect=answers), redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(["--config", str(config), "menu"]), 0)
+                profile = load_global_config(str(config)).ddns.profiles["ct"]
+                self.assertEqual(load_credential_file(profile.credential_file)[0], expected)
+
     def test_ddns_menu_configures_and_manages_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             config = base / "config.toml"
-            credentials = base / "cloudflare.env"
-            credentials.write_text("CF_API_TOKEN=offline-test-token\n", encoding="utf-8")
-            credentials.chmod(0o600)
             original = self.base_cfg_toml.replace("/run/leikwan_tools.lock", str(base / "tool.lock"))
             config.write_text(original, encoding="utf-8")
             config.chmod(0o640)
-            create = ["2", "ct.edge", "1", "1", "example.net", "edge", str(credentials), ""]
-            edit = ["3", "ct.edge", "", "", "", "", "edge-new", "", ""]
+            create = ["2", "ct.edge", "1", "1", "example.net", "edge", "example-test-token"]
+            edit = ["3", "ct.edge", "", "", "", "", "edge-new", ""]
             answers = [
                 "7", "1", *create, "n", *create, "y", "1", "7", "ct.edge", "y", "8", "y",
                 *edit, "y", "4", "1", "5", "ct.edge", "6", "1", "n", "6", "1", "y", "0", "0",
@@ -1377,6 +1419,11 @@ class TestDdnsSubsystem(unittest.TestCase):
             saved = load_global_config(str(config))
             self.assertTrue(saved.ddns.enabled)
             profile = saved.ddns.profiles["ct.edge"]
+            credentials = Path(profile.credential_file)
+            self.assertEqual(credentials.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(load_credential_file(str(credentials))[0]["CF_API_TOKEN"], "example-test-token")
+            self.assertNotIn("example-test-token", config.read_text(encoding="utf-8"))
+            self.assertEqual(len(list((base / "secrets").iterdir())), 1)
             self.assertTrue(profile.enabled)
             self.assertEqual(profile.interface, "auto")
             self.assertEqual(profile.fqdn, "edge-new.example.net")

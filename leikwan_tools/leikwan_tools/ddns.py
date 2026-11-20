@@ -1251,6 +1251,7 @@ def save_ddns_config(
     profile_name: Optional[str] = None,
     changes: Optional[Dict[str, Any]] = None,
     enabled: Optional[bool] = None,
+    new_credentials: Optional[Dict[str, str]] = None,
 ) -> None:
     """Apply confirmed DDNS edits to the active TOML under the shared write lock."""
     path = Path(expected.config_path)
@@ -1264,6 +1265,18 @@ def save_ddns_config(
             data = loads_toml(original)
             if parse_global_config_dict(data, expected.config_path) != expected:
                 raise ConfigError("主配置已发生变化，请重新进入操作并确认")
+            if new_credentials is not None:
+                if profile_name is None or changes is None or not new_credentials:
+                    raise ConfigError("缺少 DDNS 配置或凭据")
+                if any(
+                    not _CRED_KEY_RE.fullmatch(key) or not value or "\n" in value or "\r" in value
+                    for key, value in new_credentials.items()
+                ):
+                    raise ConfigError("凭据不能为空或包含换行")
+                changes = dict(changes)
+                changes["credential_file"] = str(
+                    path.parent / "secrets" / f"ddns-{profile_name}-{secrets.token_hex(12)}.env"
+                )
             ddns = data.setdefault("ddns", {"enabled": expected.ddns.enabled})
             if enabled is not None:
                 ddns["enabled"] = enabled
@@ -1283,7 +1296,11 @@ def save_ddns_config(
                 return
             if profile_name is not None and changes and ("credential_file" in changes or changes.get("enabled")):
                 profile_cfg = desired.ddns.profiles[profile_name]
-                credentials, secret_values = load_credential_file(profile_cfg.credential_file)
+                if new_credentials is None:
+                    credentials, secret_values = load_credential_file(profile_cfg.credential_file)
+                else:
+                    credentials = new_credentials
+                    secret_values = _collect_secret_values(credentials)
                 try:
                     get_ddns_provider(profile_cfg.provider).validate_credentials(profile_cfg, credentials)
                 except (DdnsError, ValueError) as exc:
@@ -1300,10 +1317,29 @@ def save_ddns_config(
                 raise ConfigError("无法在保留主配置其余内容的情况下保存 DDNS")
         except TomlParseError as exc:
             raise ConfigError(f"保存 DDNS 配置时 TOML 解析失败: {path}") from exc
-        atomic_write_text(
-            path, updated, mode=stat.S_IMODE(file_stat.st_mode),
-            owner=(file_stat.st_uid, file_stat.st_gid),
-        )
+        credential_path = Path(changes["credential_file"]) if new_credentials is not None and changes else None
+        created = False
+        try:
+            if credential_path is not None:
+                credential_dir = credential_path.parent
+                credential_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                if credential_dir.is_symlink() or not credential_dir.is_dir():
+                    raise ConfigError(f"凭据目录必须是普通目录: {credential_dir}")
+                fd = os.open(str(credential_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                created = True
+                with os.fdopen(fd, "w", encoding="utf-8") as credential_file:
+                    for key, value in new_credentials.items():
+                        credential_file.write(f"{key}={value}\n")
+                    credential_file.flush()
+                    os.fsync(credential_file.fileno())
+            atomic_write_text(
+                path, updated, mode=stat.S_IMODE(file_stat.st_mode),
+                owner=(file_stat.st_uid, file_stat.st_gid),
+            )
+        except Exception:
+            if created and credential_path is not None:
+                credential_path.unlink(missing_ok=True)
+            raise
 
 
 def _ddns_state_path(global_cfg: GlobalConfig, profile_name: str) -> Path:
