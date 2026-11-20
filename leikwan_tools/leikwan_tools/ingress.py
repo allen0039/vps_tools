@@ -5,11 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import ipaddress
+import math
 import os
 from pathlib import Path
 import re
 import socket
 import ssl
+from statistics import median
 import struct
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -89,6 +91,7 @@ class ProbeResult:
     cert_status: str = "未启用"
     app_status: str = "未校验"
     exit_code: int = 0
+    verified_ms: Optional[float] = None
 
 
 def _encode_dns_name(domain: str) -> bytes:
@@ -498,14 +501,15 @@ def probe_candidate(
     base_stage = STATUS_DNS_CANDIDATE if in_dns else STATUS_NON_DNS
     start = time.monotonic()
     family = socket.AF_INET6 if ":" in ip else socket.AF_INET
-    sock = socket.socket(family, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-
+    sock = None
     try:
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
         sock.connect((ip, port))
         rtt_ms = round((time.monotonic() - start) * 1000.0, 2)
     except OSError as exc:
-        sock.close()
+        if sock is not None:
+            sock.close()
         return ProbeResult(
             ip=ip,
             port=port,
@@ -610,8 +614,12 @@ def probe_candidate(
                 stream.sendall(_encode_send_payload(send_payload))
             chunks: List[bytes] = []
             total = 0
-            stream.settimeout(timeout)
+            read_deadline = time.monotonic() + timeout
             while total < 4096:
+                remaining = read_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                stream.settimeout(remaining)
                 try:
                     data = stream.recv(4096 - total)
                 except socket.timeout:
@@ -646,6 +654,7 @@ def probe_candidate(
                         cert_status=cert_status,
                         app_status="匹配预期落地",
                         exit_code=0,
+                        verified_ms=round((time.monotonic() - start) * 1000.0, 2),
                     )
                 return ProbeResult(
                     ip=ip,
@@ -711,6 +720,7 @@ def probe_candidate(
             cert_status=cert_status,
             app_status="未校验",
             exit_code=0,
+            verified_ms=round((time.monotonic() - start) * 1000.0, 2) if verify_hostname and cert_ok else None,
         )
     except OSError as exc:
         return ProbeResult(
@@ -738,6 +748,80 @@ def probe_candidate(
             stream.close()
         except OSError:
             pass
+
+
+def probe_forward_endpoint(
+    host: str,
+    port: int,
+    *,
+    family: int = socket.AF_UNSPEC,
+    count: int = 3,
+    timeout: float = 2.0,
+    warn_ms: Optional[float] = None,
+    tls_sni: str = "",
+    tls_cafile: str = "",
+    send_payload: str = "",
+    expect_pattern: str = "",
+) -> Dict[str, Any]:
+    """Sample the client-facing endpoint from the current machine without changing a rule."""
+    if not 1 <= count <= 5 or not math.isfinite(timeout) or not 0 < timeout <= 10:
+        raise IngressError("探测次数须为 1–5，连接/各阶段超时须大于 0 且不超过 10 秒")
+    if warn_ms is not None and (not math.isfinite(warn_ms) or warn_ms <= 0):
+        raise IngressError("延迟阈值须大于 0 毫秒")
+    if not 1 <= port <= 65535 or not host:
+        raise IngressError("探测需要入口地址和 1–65535 的公网端口")
+    if send_payload and not expect_pattern:
+        raise IngressError("应用探测发送数据时须同时指定预期回包")
+    if tls_cafile and not tls_sni:
+        raise IngressError("自定义 CA 文件须同时指定要验证的落地 TLS 主机名")
+    if expect_pattern.startswith("re:"):
+        try:
+            re.compile(expect_pattern[3:])
+        except re.error as exc:
+            raise IngressError(f"预期回包正则无效: {exc}") from exc
+    try:
+        records = socket.getaddrinfo(host, port, family, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+        targets = list(dict.fromkeys(record[4][0] for record in records))
+    except (OSError, UnicodeError) as exc:
+        targets = []
+        resolution_error = str(exc)
+    else:
+        resolution_error = "没有符合入口地址族的记录"
+    result = {"host": host, "port": port, "resolved_ips": targets, "samples": 0, "tcp_ok": 0, "verified": 0,
+              "median_tcp_ms": None, "median_verified_ms": None, "slow": False, "details": []}
+    if not targets:
+        return {**result, "status": "dns_error", "details": [resolution_error]}
+
+    tcp_times, verified_times, details = [], [], []
+    for index in range(count):
+        address = targets[index % len(targets)]
+        sample = probe_candidate(
+            address, port, timeout=timeout, tls_sni=tls_sni, tls_cafile=tls_cafile,
+            send_payload=send_payload, expect_pattern=expect_pattern,
+        )
+        if sample.rtt_ms is not None:
+            tcp_times.append(sample.rtt_ms)
+        if sample.verified_ms is not None:
+            verified_times.append(sample.verified_ms)
+        if sample.exit_code != 0:
+            details.append(f"{address}: {sample.detail}")
+
+    tcp_ok, verified = len(tcp_times), len(verified_times)
+    if not tcp_ok:
+        status = "unreachable"
+    elif (tls_sni or expect_pattern) and not verified:
+        status = "landing_failed"
+    elif verified:
+        status = "verified"
+    else:
+        status = "entry_only"
+    tcp_ms = round(median(tcp_times), 2) if tcp_ok else None
+    verified_ms = round(median(verified_times), 2) if verified else None
+    measured_ms = verified_ms if verified else tcp_ms
+    return {**result, "status": status, "samples": count, "tcp_ok": tcp_ok, "verified": verified,
+            "median_tcp_ms": tcp_ms, "median_verified_ms": verified_ms, "details": list(dict.fromkeys(details)),
+            "slow": warn_ms is not None and measured_ms is not None and measured_ms > warn_ms,
+            "partial": 0 < (verified if tls_sni or expect_pattern else tcp_ok) < count}
 
 
 def protocol_preservation_notes(dial_addr: str, public_port: int, domain: str) -> List[str]:

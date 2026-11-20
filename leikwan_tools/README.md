@@ -239,7 +239,7 @@ DDNS 探测使用 Debian 的 `iproute2` 和 `iputils-ping`。
 - `interface = "auto"`（默认，可省略）在每次同步时扫描本机所有网卡；填写具体网卡名则只扫描该接口（**只过滤、不删除系统网卡地址**）：
   - 排除非 `scope global`、`deprecated`、`tentative`、`dadfailed`、`preferred_lft 0`、链路本地及非法 IPv6 地址，并剥离 `/64` 等 CIDR 后缀；
   - 依据 IPv6 前缀识别运营商（`240e:` 归属电信 `ct`，`2408:` 归属联通 `cu`，其余前缀忽略）；
-  - 对每个符合条件的候选执行 `ping -6 -c 1 -w <timeout> -I <候选IPv6> <probe_target>`，剔除不可达地址并按各线路独立选取 RTT 最低者；无可达地址时不更新对应 DDNS。
+  - 电信和联通都默认 `selection_strategy = "latest"`（新址优先）：按 `preferred_lft`（剩余首选寿命，并非实际下发时间）从长到短探测，`forever` 排在最前，寿命未知排在最后。同寿命优先保留上次成功发布的地址。每条配置也可以单独选 `selection_strategy = "latency"`（延迟优先），在探测通过的候选中选 RTT 最低者。全部不可达则不更新 DNS 或转发。
 
 ### 2. 配置与 `0600` 凭据文件
 在主配置 `/etc/leikwan_tools/config.toml` 中配置 `[ddns]`、`[ddns.ct]`、`[ddns.cu]`（完整字段见 `examples/config.example.toml`）。主配置禁止保存明文 Token/Secret，必须指向权限为 `0600` 的独立 `credential_file`（`chmod 600`）：
@@ -254,6 +254,10 @@ DDNS 探测使用 Debian 的 `iproute2` 和 `iputils-ping`。
 
 在 DDNS 菜单选 **7「启用 / 暂停 DDNS」**，可在同一列表中选择全局或指定配置。启用全局会立即同步所有已启用的配置。启用单条配置会立即同步该记录，全局处于暂停时会一并开启。暂停全局会暂停所有同步并保留各条配置的启用状态。选择 **6「立即同步 AAAA 记录」**并确认后，工具会重新探测并同步选中的已启用配置。选择 **8「删除 DDNS 配置」**会移除本地配置，远端 DNS 记录和凭据文件可继续使用。
 
+主菜单概览显示 DDNS 全局开关、定时器和各运营商启用数。DDNS 子菜单显示各配置的策略、网卡、上次选中地址，以及独立的 DNS 同步和转发跟随结果。进入菜单只读取本地状态；选 **1「查看配置与同步状态」**可查看具体失败原因。
+
+例如托管区为 `example.com`，主机记录可填 `ct.edge` 或 `ct.edge.example.com`，两种填法均在保存前预览 `ct.edge.example.com` 的 AAAA 记录，根域填 `@`。Cloudflare 的仅 DNS 记录可在菜单中设置 TTL（`1` 代表自动），编辑时回车保留原值。TTL 控制 DNS 缓存时间，DDNS 检测周期由 `interval_seconds` 控制；已启用代理的记录使用自动 TTL。
+
 ### 4. 自动调度、缓存与命令行
 - 命中 `<state_dir>/ddns/<profile>.json` 且 IPv6 未变化时跳过 API 调用；支持远端查询的 Provider 每隔 `verify_interval_seconds`（默认 600s）自动核对一次远端记录一致性（Webhook 不参与远端核对）。API 失败时不会污染成功缓存。
 - 安装脚本会启动独立的 `leikwan_tools-ddns.timer`，其调度周期由 `ddns.interval_seconds` 决定。服务每次运行时读取主配置，修改调度周期后需用原安装参数重新运行安装脚本。DDNS 执行结果可在 `journalctl -u leikwan_tools-ddns.service` 中查看。
@@ -266,6 +270,20 @@ sudo leikwan_tools ddns update               # 同步所有启用中的线路
 sudo leikwan_tools ddns update --profile cu  # 仅同步指定线路
 leikwan_tools ddns status                    # 查看当前选路与持久化状态
 ```
+
+### 5. 探测已配置转发的公网入口与延迟
+
+在主菜单选择 **2「转发规则管理」→ 6「连通性与延迟探测」**，选择一条规则或全部规则。按客户端公网端口拨号，DDNS 规则使用绑定域名的 AAAA、固定 IP 规则使用固定 IP。每条默认采样 3 次，显示成功次数和中位耗时。可输入毫秒阈值以标记延迟偏高。支持颜色的终端会将不可达和落地验证失败标红，`NO_COLOR` 或重定向时用文字区分。
+
+批量只测 TCP，成功显示「入口可达，落地未验证」。单条还可以验证落地 TLS 的证书及主机名，或发送显式指定的内容并校验落地回包。探测结果来自执行命令的机器，VPS 自测可能受公网回环限制。外网客户端可直接指定入口和端口，无需复制 VPS 的规则或凭据：
+
+```bash
+leikwan_tools probe-forward --all --warn-ms 200
+leikwan_tools probe-forward --rule edge --tls-sni origin.example.com
+leikwan_tools probe-forward --host ct.edge.example.com --port 443 --family ipv6 --tls-sni origin.example.com
+```
+
+命令支持全局 `--json`。`--timeout` 控制 TCP、TLS 和应用读写阶段的超时，域名解析使用探测机器的系统解析器及其超时设置。
 
 ---
 

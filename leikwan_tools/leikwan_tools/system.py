@@ -250,7 +250,7 @@ def _parse_ipv6_preferred_lft(line: str) -> Optional[int]:
         return None
     raw = match.group(1).strip().lower()
     if raw == "forever":
-        return 1
+        return 0xffffffff
     if raw.endswith("sec"):
         raw = raw[:-3]
     try:

@@ -103,7 +103,7 @@ class ProbedCandidate:
 
 @dataclass(frozen=True)
 class ProfileInspectResult:
-    """Candidate scan, filter, probe, and lowest-RTT selection result for one DDNS profile."""
+    """Candidate scan and selection result for one DDNS profile."""
 
     profile: str
     enabled: bool
@@ -122,6 +122,7 @@ class ProfileInspectResult:
     filtered_out: List[FilteredAddress]
     error: str = ""
     selected_interface: str = ""
+    selection_strategy: str = "latest"
 
 
 @dataclass(frozen=True)
@@ -444,13 +445,13 @@ def probe_ipv6_candidate(candidate_ip: str, probe_target: str, timeout_seconds: 
 
 
 def inspect_ddns_profile(global_cfg: GlobalConfig, profile: DdnsProfileConfig) -> ProfileInspectResult:
-    """Non-destructively scan interface IPv6 candidates, probe them, and select lowest RTT."""
+    """Select a reachable candidate by preferred lifetime or measured latency."""
     target = profile.probe_target or global_cfg.ddns.probe_target
     timeout_s = profile.probe_timeout_seconds or global_cfg.ddns.probe_timeout_seconds
     auto = profile.interface == DDNS_AUTO_INTERFACE
     scan_scope = "本机所有网卡" if auto else f"网卡 {profile.interface}"
     cmd = ["ip", "-6", "-o", "addr", "show"] if auto else ["ip", "-6", "addr", "show", "dev", profile.interface]
-    eligible: List[Tuple[str, str]] = []
+    eligible: Dict[Tuple[str, str], int] = {}
     filtered: List[FilteredAddress] = []
     error = ""
 
@@ -459,8 +460,10 @@ def inspect_ddns_profile(global_cfg: GlobalConfig, profile: DdnsProfileConfig) -
         if res.returncode != 0:
             detail = res.stderr.strip() or res.stdout.strip() or f"exit {res.returncode}"
             error = f"查询{scan_scope} IPv6 失败: {detail}"
-        elif auto:
+        else:
             for iface, entries in parse_ip_addr_ipv6(res.stdout).items():
+                if not auto and iface != profile.interface:
+                    continue
                 for entry in entries:
                     reason = entry.unusable_reason
                     if not reason and classify_ipv6_isp(entry.ip) != profile.isp:
@@ -468,15 +471,15 @@ def inspect_ddns_profile(global_cfg: GlobalConfig, profile: DdnsProfileConfig) -
                     if reason:
                         filtered.append(FilteredAddress(f"{iface}: {entry.ip}", reason))
                     else:
-                        eligible.append((iface, entry.ip))
-        else:
-            addresses, filtered = parse_ip6_addr_candidates(res.stdout, profile.isp)
-            eligible = [(profile.interface, address) for address in addresses]
+                        eligible[iface, entry.ip] = entry.preferred_lft if entry.preferred_lft is not None else -1
     except SystemErrorBase as exc:
         error = str(exc)
 
     probed: List[ProbedCandidate] = []
-    for iface, ip_str in dict.fromkeys(eligible):
+    state = _load_ddns_state(_ddns_state_path(global_cfg, profile.name))
+    previous = state.get("last_success_ip") if state.get("profile_signature") == _profile_signature(profile) else None
+    best = None
+    for iface, ip_str in sorted(eligible, key=lambda key: (-eligible[key], key[1] != previous, key[1], key[0])):
         ok, rtt, detail = probe_ipv6_candidate(ip_str, target, timeout_s)
         probed.append(
             ProbedCandidate(
@@ -489,8 +492,11 @@ def inspect_ddns_profile(global_cfg: GlobalConfig, profile: DdnsProfileConfig) -
             )
         )
 
-    reachable = (cand for cand in probed if cand.probe_ok and cand.rtt_ms is not None)
-    best = min(reachable, key=lambda cand: (cand.rtt_ms, cand.interface, cand.ip), default=None)
+        if ok and rtt is not None:
+            if best is None or rtt < best.rtt_ms:
+                best = probed[-1]
+            if profile.selection_strategy == "latest":
+                break
 
     return ProfileInspectResult(
         profile=profile.name,
@@ -510,6 +516,7 @@ def inspect_ddns_profile(global_cfg: GlobalConfig, profile: DdnsProfileConfig) -
         filtered_out=filtered,
         error=error,
         selected_interface=best.interface if best else "",
+        selection_strategy=profile.selection_strategy,
     )
 
 
@@ -757,6 +764,7 @@ class CloudflareProvider(DdnsProvider):
                 current_ip
                 and _canonicalize_ip6_cmp(current_ip, target_ip)
                 and current_proxied == profile.proxied
+                and (profile.proxied or primary.get("ttl") == profile.ttl)
             ):
                 return ProviderSyncResult(
                     action="noop",
@@ -765,7 +773,7 @@ class CloudflareProvider(DdnsProvider):
                     deleted_duplicates=deleted_dups,
                     detail=f"Cloudflare 记录已是最新 ({profile.fqdn} -> {target_ip})",
                 )
-            method = "PUT"
+            method = "PATCH"
             url = (
                 f"{CLOUDFLARE_API_BASE}/zones/{urllib.parse.quote(zone_id)}"
                 f"/dns_records/{urllib.parse.quote(rid)}"
@@ -781,7 +789,7 @@ class CloudflareProvider(DdnsProvider):
                 "type": profile.record_type,
                 "name": profile.fqdn,
                 "content": target_ip,
-                "ttl": profile.ttl,
+                "ttl": 1 if profile.proxied else profile.ttl,
                 "proxied": profile.proxied,
             }
         ).encode("utf-8")
@@ -1354,7 +1362,7 @@ def _load_ddns_state(path: Path) -> Dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return {}
 
 
@@ -1364,7 +1372,7 @@ def _write_ddns_state(path: Path, payload: Dict[str, Any]) -> None:
 
 def _profile_signature(profile: DdnsProfileConfig) -> str:
     fields = asdict(profile)
-    for key in ("enabled", "probe_target", "probe_timeout_seconds", "verify_interval_seconds"):
+    for key in ("enabled", "probe_target", "probe_timeout_seconds", "verify_interval_seconds", "selection_strategy"):
         del fields[key]
     return hashlib.sha256(json.dumps(fields, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -1469,6 +1477,7 @@ def update_ddns(
                 "last_action": str(prev.get("last_action", "")),
                 "record_id": str(prev.get("record_id", "")),
                 "last_error": str(prev.get("last_error", "")),
+                "forward_follow": prev.get("forward_follow"),
             }
 
             if not prof.enabled:
@@ -1617,6 +1626,15 @@ def update_ddns(
             if result["error"] or not result["selected_ip"]:
                 continue
             updated, errors = reconcile_ddns_rules_locked(global_cfg, result["profile"], result["selected_ip"])
+            state_path = _ddns_state_path(global_cfg, result["profile"])
+            state = _load_ddns_state(state_path)
+            state["forward_follow"] = {
+                "at_utc": datetime.now(timezone.utc).isoformat(),
+                "ip": result["selected_ip"],
+                "updated": updated,
+                "errors": errors,
+            }
+            _write_ddns_state(state_path, state)
             if updated:
                 result["detail"] += "；已更新转发：" + ", ".join(updated)
             if errors:
@@ -1688,6 +1706,8 @@ def status_ddns(global_cfg: GlobalConfig, profile_name: Optional[str] = None) ->
                 "record_type": prof.record_type,
                 "fqdn": prof.fqdn,
                 "credential_file": prof.credential_file,
+                "selection_strategy": prof.selection_strategy,
+                "forward_follow": state.get("forward_follow"),
                 "selected_interface": str(state.get("selected_interface", "")),
                 "selected_ip": str(state.get("selected_ip", "")),
                 "selected_rtt_ms": state.get("selected_rtt_ms"),

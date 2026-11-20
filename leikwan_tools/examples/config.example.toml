@@ -34,7 +34,7 @@ table = 102
 description = "CN2 GIA 出口线路"
 
 # ----------------------------------------------------------------------
-# 独立双线路 IPv6 DDNS（可选；默认未启用，与 [ingress] 和转发规则完全解耦）
+# 双线路 IPv6 DDNS（可选；规则可通过 ingress.ddns_profile 绑定）
 # 说明：第一版仅支持 IPv6 AAAA 记录（配置模型已预留 A 记录扩展）；
 #       明文 Token/Secret 请存放在 chmod 600 的独立凭据文件中，切勿写入主配置。
 # ----------------------------------------------------------------------
@@ -49,10 +49,12 @@ description = "CN2 GIA 出口线路"
 # enabled = true
 # isp = "ct"
 # interface = "auto"            # 默认自动识别，可填写网卡名锁定
+# selection_strategy = "latest" # latest: 剩余首选寿命优先；latency: 最低 RTT
 # provider = "cloudflare"        # cloudflare | dnspod | alidns | webhook
 # record_type = "AAAA"
 # zone = "example.com"
-# host = "ct"
+# host = "ct.edge"               # 也可填 ct.edge.example.com，根域填 @
+# ttl = 600                       # Cloudflare 中 1 代表自动；与检查周期独立
 # credential_file = "/etc/leikwan_tools/secrets/ddns-ct.env"
 #
 # [ddns.cu]

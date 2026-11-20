@@ -9,6 +9,7 @@ from contextlib import redirect_stdout
 from dataclasses import asdict, replace
 from pathlib import Path
 import os
+import socket
 import subprocess
 import sys
 import tarfile
@@ -22,7 +23,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from leikwan_tools import MANAGED_MARKER, REALM_RELEASES, __version__  # noqa: E402
-from leikwan_tools.cli import main  # noqa: E402
+from leikwan_tools.cli import _print_ddns_bar, _print_forward_probes, main  # noqa: E402
 from leikwan_tools.config import (  # noqa: E402
     ConfigError,
     DdnsProfileConfig,
@@ -69,6 +70,7 @@ from leikwan_tools.ingress import (  # noqa: E402
     evaluate_fixed_ip_policy,
     parse_dns_a_response,
     probe_candidate,
+    probe_forward_endpoint,
     query_dns_a_via_server,
 )
 from leikwan_tools.manager import ApplyError, PreflightReport, apply_rule, plan_rule  # noqa: E402
@@ -116,6 +118,28 @@ from leikwan_tools.updater import (  # noqa: E402
 
 
 class TestInteractiveShortcut(unittest.TestCase):
+    def test_probe_menu_uses_public_ddns_endpoint_and_skips_paused_rule(self) -> None:
+        cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))
+        profile = DdnsProfileConfig("ct", True, "ct", "auto", "cloudflare", zone="example.com", host="ct.edge")
+        cfg = replace(cfg, ddns=replace(cfg.ddns, enabled=True, profiles={"ct": profile}))
+        original = load_rule_config(str(REPO_ROOT / "examples" / "rule-rfc-hk.example.toml"))
+        bound = replace(original, listen_ip="240e::5", ddns_profile="ct", public_port=51012)
+        paused = replace(original, name="paused")
+        running = {"LoadState": "loaded", "ActiveState": "active", "UnitFileState": "enabled"}
+        stopped = {"LoadState": "loaded", "ActiveState": "inactive", "UnitFileState": "disabled"}
+        with (
+            patch("builtins.input", side_effect=["2", "6", "*", "", "0", "0"]),
+            patch("leikwan_tools.cli.load_global_config", return_value=cfg),
+            patch("leikwan_tools.cli.list_managed_rules", return_value=[bound, paused]),
+            patch("leikwan_tools.cli.systemd_show", side_effect=[running, stopped]),
+            patch("leikwan_tools.cli.probe_forward_endpoint", return_value={"status": "entry_only", "details": []}) as probe,
+            redirect_stdout(io.StringIO()) as out,
+        ):
+            self.assertEqual(main(["menu"]), 0)
+        probe.assert_called_once_with("ct.edge.example.com", 51012, family=socket.AF_INET6, warn_ms=None)
+        self.assertIn("入口可达，落地未验证", out.getvalue())
+        self.assertIn("已暂停", out.getvalue())
+
     def test_menu_ipv6_entry_uses_ipv4_landing_and_exit(self) -> None:
         cfg = load_global_config(str(REPO_ROOT / "examples" / "config.example.toml"))
         answers = ["2", "2", "direct-v6", "2408:820c:1::10", "51011", "192.0.2.22", "51011", "9929", "y", "0", "0"]
@@ -690,6 +714,17 @@ class TestIngressDnsAndProbing(unittest.TestCase):
             r_tcp_only = probe_candidate("127.0.0.1", port, in_dns=True)
             self.assertEqual(r_tcp_only.stage, STATUS_TCP_REACHABLE)
             self.assertFalse(r_tcp_only.landing_verified)
+
+            verified = probe_forward_endpoint(
+                "127.0.0.1", port, count=2, send_payload="PING\\n", expect_pattern="LANDING=zouter-jp-mock"
+            )
+            self.assertEqual((verified["status"], verified["tcp_ok"], verified["verified"]), ("verified", 2, 2))
+            self.assertGreaterEqual(verified["median_verified_ms"], verified["median_tcp_ms"])
+            mismatch = probe_forward_endpoint(
+                "127.0.0.1", port, count=1, send_payload="HELLO\\n", expect_pattern="LANDING=zouter-jp-mock"
+            )
+            self.assertEqual(mismatch["status"], "landing_failed")
+            self.assertEqual(probe_forward_endpoint("127.0.0.1", port, count=1)["status"], "entry_only")
         finally:
             srv.shutdown()
             srv.server_close()
@@ -698,6 +733,35 @@ class TestIngressDnsAndProbing(unittest.TestCase):
         r_closed = probe_candidate("127.0.0.1", port, in_dns=True, timeout=0.5)
         self.assertEqual(r_closed.stage, STATUS_DNS_CANDIDATE)
         self.assertFalse(r_closed.tcp_reachable)
+        result = probe_forward_endpoint("127.0.0.1", port, count=1, timeout=0.5)
+        self.assertEqual(result["status"], "unreachable")
+        with (
+            redirect_stdout(io.StringIO()) as out,
+            patch.dict(os.environ, {"TERM": "xterm"}, clear=True),
+            patch.object(out, "isatty", return_value=True),
+        ):
+            _print_forward_probes([result])
+            self.assertIn("\033[31m不可达", out.getvalue())
+            with patch.dict(os.environ, {"NO_COLOR": "1"}):
+                out.seek(0)
+                out.truncate()
+                _print_forward_probes([result])
+                self.assertNotIn("\033[", out.getvalue())
+
+    def test_forward_probe_labels_resolution_failure_and_slow_sample(self) -> None:
+        with patch("leikwan_tools.ingress.socket.getaddrinfo", side_effect=socket.gaierror("no AAAA")):
+            result = probe_forward_endpoint("ct.edge.example.com", 443, family=socket.AF_INET6)
+        self.assertEqual(result["status"], "dns_error")
+        self.assertEqual(result["samples"], 0)
+        with patch("leikwan_tools.ingress.socket.socket", side_effect=OSError("address family not supported")):
+            result = probe_forward_endpoint("::1", 443, family=socket.AF_INET6, count=1)
+        self.assertEqual(result["status"], "unreachable")
+        self.assertEqual(result["tcp_ok"], 0)
+        with patch("leikwan_tools.ingress.probe_candidate") as probe:
+            probe.return_value.rtt_ms = 120
+            probe.return_value.verified_ms = None
+            probe.return_value.exit_code = 0
+            self.assertTrue(probe_forward_endpoint("192.0.2.10", 443, count=1, warn_ms=100)["slow"])
 
     def test_fixed_ip_staleness_warning(self) -> None:
         dns = DnsQueryResult(
@@ -1413,7 +1477,8 @@ class TestDdnsSubsystem(unittest.TestCase):
                     self.base_cfg_toml.replace("/run/leikwan_tools.lock", str(base / "tool.lock")),
                     encoding="utf-8",
                 )
-                answers = ["7", "2", "ct", "1", provider, "example.net", "edge", *values, "y", "0", "0"]
+                ttl = [""] if provider == "1" else []
+                answers = ["7", "2", "ct", "1", provider, "example.net", "edge", *values, "", *ttl, "y", "0", "0"]
                 with (
                     patch("builtins.input", side_effect=answers),
                     patch("leikwan_tools.cli.update_ddns", return_value={"results": []}) as sync,
@@ -1435,7 +1500,7 @@ class TestDdnsSubsystem(unittest.TestCase):
                 self.base_cfg_toml.replace("/run/leikwan_tools.lock", str(base / "tool.lock")),
                 encoding="utf-8",
             )
-            answers = ["7", "2", "ct", "1", "1", "example.net", "edge", "test-cf-token", "y", "0", "0"]
+            answers = ["7", "2", "ct", "1", "1", "example.net", "edge", "test-cf-token", "", "", "y", "0", "0"]
             with (
                 patch("builtins.input", side_effect=answers),
                 patch("leikwan_tools.cli.update_ddns", side_effect=DdnsError("同步失败")),
@@ -1501,7 +1566,7 @@ class TestDdnsSubsystem(unittest.TestCase):
                 "ct", True, "ct", "auto", "cloudflare", "AAAA", "example.net", "edge",
                 "edge.example.net", "2400:3200::1", 1, "240e::5", 5.0, [], [],
             )
-            answers = ["7", "2", "ct", "1", "1", "example.net", "edge", "test-cf-token", "y", "0", "0"]
+            answers = ["7", "2", "ct", "1", "1", "example.net", "edge", "test-cf-token", "", "", "y", "0", "0"]
             with (
                 patch("builtins.input", side_effect=answers),
                 patch("leikwan_tools.ddns.inspect_ddns_profile", return_value=inspection),
@@ -1525,8 +1590,8 @@ class TestDdnsSubsystem(unittest.TestCase):
             original = self.base_cfg_toml.replace("/run/leikwan_tools.lock", str(base / "tool.lock"))
             config.write_text(original, encoding="utf-8")
             config.chmod(0o640)
-            create = ["2", "ct.edge", "1", "1", "example.net", "edge", "example-test-token"]
-            edit = ["3", "ct.edge", "", "", "", "", "edge-new", ""]
+            create = ["2", "ct.edge", "1", "1", "example.net", "edge", "example-test-token", "2", "300"]
+            edit = ["3", "ct.edge", "", "", "", "", "edge-new.example.net", "", "", ""]
             answers = [
                 "7", "1", *create, "n", *create, "y", "1",
                 *edit, "y", "4", "1", "5", "ct.edge", "6", "1", "n", "6", "1", "y", "0", "0",
@@ -1551,6 +1616,8 @@ class TestDdnsSubsystem(unittest.TestCase):
             self.assertTrue(profile.enabled)
             self.assertEqual(profile.interface, "auto")
             self.assertEqual(profile.fqdn, "edge-new.example.net")
+            self.assertEqual(profile.ttl, 300)
+            self.assertEqual(profile.selection_strategy, "latency")
             self.assertEqual(config.stat().st_mode & 0o777, 0o640)
             self.assertTrue(config.read_text(encoding="utf-8").startswith(original))
             self.assertIn("7. IPv6 DDNS 域名管理", output.getvalue())
@@ -1633,10 +1700,24 @@ class TestDdnsSubsystem(unittest.TestCase):
             ):
                 with patch("leikwan_tools.ddns.reconcile_ddns_rules_locked", side_effect=[([], ["edge: failed"]), (["edge"], [])]) as reconcile:
                     self.assertFalse(update_ddns(before)["ok"])
+                    persisted = status_ddns(before)["profiles"][0]
+                    self.assertEqual(persisted["last_action"], "updated")
+                    self.assertEqual(persisted["last_error"], "")
+                    self.assertEqual(persisted["forward_follow"]["errors"], ["edge: failed"])
+                    with (
+                        patch("leikwan_tools.cli.systemd_is_active", return_value=False),
+                        redirect_stdout(io.StringIO()) as out,
+                    ):
+                        _print_ddns_bar(str(config), detailed=True)
+                    self.assertIn("定时器：未运行", out.getvalue())
+                    self.assertIn("最近 DNS：已更新记录", out.getvalue())
+                    self.assertIn("最近转发：失败，待重试", out.getvalue())
+                    sync.assert_called_once()
                     retry = update_ddns(before)
                     self.assertTrue(retry["ok"])
                     self.assertEqual(retry["results"][0]["action"], "skipped_cached")
                     self.assertEqual(reconcile.call_count, 2)
+                    self.assertEqual(status_ddns(before)["profiles"][0]["forward_follow"]["errors"], [])
                 save_ddns_config(before, profile_name="ct", changes={"host": "new"})
                 with self.assertRaisesRegex(ConfigError, "DDNS 探测期间配置已变化"):
                     update_ddns(before)
@@ -1734,7 +1815,7 @@ credential_file = "/etc/leikwan_tools/secrets/ddns-cu.env"
     inet6 240e:3b4:1::zero/64 scope global dynamic
        valid_lft 3600sec preferred_lft 0sec
     inet6 240e:3b4:1::10/64 scope global dynamic noprefixroute
-       valid_lft 2591990sec preferred_lft 604790sec
+       valid_lft 2591990sec preferred_lft 604799sec
     inet6 240e:3b4:1::20/64 scope global dynamic
        valid_lft 2591990sec preferred_lft 604790sec
     inet6 2408:820c:1::30/64 scope global dynamic
@@ -1829,12 +1910,14 @@ credential_file = "/tmp/cu.env"
         with patch("leikwan_tools.ddns.run_cmd", side_effect=fake_run_cmd):
             res_ct = inspect_ddns_profile(gcfg, gcfg.ddns.profiles["ct"])
             res_cu = inspect_ddns_profile(gcfg, gcfg.ddns.profiles["cu"])
+            latency = inspect_ddns_profile(gcfg, replace(gcfg.ddns.profiles["ct"], selection_strategy="latency"))
 
         # Non-destructive: never calls `ip -6 addr del`
         self.assertFalse(any("del" in c for c in executed_cmds))
-        # Picks lowest RTT reachable candidate for CT
-        self.assertEqual(res_ct.selected_ip, "240e:3b4:1::20")
-        self.assertEqual(res_ct.selected_rtt_ms, 9.3)
+        self.assertEqual(res_ct.selected_ip, "240e:3b4:1::10")
+        self.assertEqual(res_ct.selected_rtt_ms, 28.1)
+        self.assertEqual(len(res_ct.candidates), 1)
+        self.assertEqual(latency.selected_ip, "240e:3b4:1::20")
         # Failed probe for CU returns empty IP
         self.assertEqual(res_cu.selected_ip, "")
         self.assertFalse(res_cu.candidates[0].probe_ok)
@@ -1985,7 +2068,7 @@ credential_file = "/tmp/cu.env"
                 }
             if method == "DELETE":
                 return 200, {"success": True, "result": {"id": "rec-dup"}}
-            if method == "PUT":
+            if method == "PATCH":
                 return 200, {"success": True, "result": {"id": "rec-1"}}
             if method == "POST":
                 return 200, {"success": True, "result": {"id": "rec-new"}}
@@ -1995,22 +2078,27 @@ credential_file = "/tmp/cu.env"
             res_upd = cf.sync_record(prof, "240e::99", creds)
         self.assertEqual(res_upd.action, "updated")
         self.assertEqual(res_upd.deleted_duplicates, ["rec-dup"])
-        put_payload = [c[2] for c in calls if c[0] == "PUT"][0]
-        self.assertFalse(put_payload["proxied"])
-        self.assertEqual(put_payload["name"], "ct.example.com")
-        self.assertEqual(put_payload["content"], "240e::99")
+        patch_payload = [c[2] for c in calls if c[0] == "PATCH"][0]
+        self.assertFalse(patch_payload["proxied"])
+        self.assertEqual(patch_payload["name"], "ct.example.com")
+        self.assertEqual(patch_payload["content"], "240e::99")
 
-        # Unchanged IP skips PUT/POST
+        # Unchanged IP and TTL skip PATCH/POST
         def fake_http_noop(method, url, headers=None, body=None, timeout=15.0, secrets_values=()):
             if method == "GET" and "/zones?name=" in url:
                 return 200, {"success": True, "result": [{"id": "zone-1"}]}
             if method == "GET" and "/dns_records?" in url:
-                return 200, {"success": True, "result": [{"id": "rec-1", "content": "240e::99", "proxied": False}]}
+                return 200, {"success": True, "result": [{"id": "rec-1", "content": "240e::99", "proxied": False, "ttl": prof.ttl}]}
+            if method == "PATCH":
+                self.assertEqual(json.loads(body)["ttl"], 300)
+                return 200, {"success": True, "result": {"id": "rec-1"}}
             raise AssertionError((method, url))
 
         with patch("leikwan_tools.ddns._http_json", side_effect=fake_http_noop):
             res_noop = cf.sync_record(prof, "240e::99", creds)
+            ttl_update = cf.sync_record(replace(prof, ttl=300), "240e::99", creds)
         self.assertEqual(res_noop.action, "noop")
+        self.assertEqual(ttl_update.action, "updated")
 
         # Empty records creates via POST
         post_calls = []

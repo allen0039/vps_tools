@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import socket
+from subprocess import TimeoutExpired
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -23,6 +24,8 @@ from . import (
 from .config import (
     DDNS_AUTO_INTERFACE,
     DDNS_PROFILE_NAME_RE,
+    DDNS_SELECTION_LABELS,
+    DEFAULT_DDNS_TTL,
     VALID_DDNS_PROVIDERS,
     ConfigError,
     DdnsProfileConfig,
@@ -52,6 +55,7 @@ from .ingress import (
     IngressError,
     check_fixed_ip_staleness,
     probe_candidate,
+    probe_forward_endpoint,
     protocol_preservation_notes,
     query_dns_a,
 )
@@ -85,6 +89,7 @@ from .system import (
     PreflightError,
     SystemErrorBase,
     systemd_is_active,
+    systemd_show,
     unit_name_for_rule,
 )
 from .updater import (
@@ -854,6 +859,135 @@ def _menu_list_forwards(cfg: GlobalConfig) -> None:
         print(f"     落地目标   : {rule.remote_endpoint}")
 
 
+_FORWARD_PROBE_LABELS = {
+    "dns_error": "不可达（DNS 解析失败）",
+    "unreachable": "不可达（TCP 建连失败）",
+    "landing_failed": "落地验证失败",
+    "verified": "端到端已验证",
+    "entry_only": "入口可达，落地未验证",
+    "paused": "已暂停",
+    "not_tested": "未检测",
+}
+_FORWARD_PROBE_FAILURES = {"dns_error", "unreachable", "landing_failed"}
+
+
+def _probe_managed_forward(cfg: GlobalConfig, rule: RuleConfig, **options: Any) -> Dict[str, Any]:
+    unit = unit_name_for_rule(cfg.tool.systemd_unit_template, rule.name)
+    metadata = {"rule": rule.name, "line": rule.line}
+    try:
+        props = systemd_show(unit)
+    except (SystemErrorBase, OSError, TimeoutExpired):
+        return {**metadata, "status": "not_tested", "details": ["无法读取 systemd 规则状态"]}
+    if props.get("ActiveState") == "inactive" and props.get("UnitFileState") == "disabled":
+        return {**metadata, "status": "paused", "details": []}
+    if props.get("LoadState") != "loaded":
+        return {**metadata, "status": "not_tested", "details": ["规则服务未加载"]}
+
+    host = rule.dial_addr
+    if rule.ddns_profile:
+        profile = cfg.ddns.profiles.get(rule.ddns_profile)
+        if profile is None or not profile.fqdn:
+            return {**metadata, "status": "not_tested", "details": ["绑定的 DDNS 配置没有可用域名"]}
+        host = profile.fqdn
+    family = socket.AF_INET6 if rule.direct_ipv6 else socket.AF_INET
+    return {**metadata, **probe_forward_endpoint(host, rule.public_port, family=family, **options)}
+
+
+def _print_forward_probes(results: List[Dict[str, Any]], *, as_json: bool = False) -> None:
+    source = socket.gethostname()
+    if as_json:
+        _print_json({"source": source, "results": results})
+        return
+    print(f"探测来源：{source}（从本机拨号，公网可达性以外部客户端实测为准）")
+    use_color = sys.stdout.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb"
+    for result in results:
+        status = result["status"]
+        name = result.get("rule", "")
+        if name:
+            name += f" [{result['line']}]"
+        endpoint = format_endpoint(result["host"], result["port"]) if result.get("host") else ""
+        label = _FORWARD_PROBE_LABELS[status]
+        if result.get("partial"):
+            label += "（部分样本失败）"
+        if result.get("slow"):
+            label += " · 延迟偏高"
+        color = "31" if status in _FORWARD_PROBE_FAILURES else "33" if result.get("slow") or result.get("partial") else ""
+        if use_color and color:
+            label = f"\033[{color}m{label}\033[0m"
+        print("  " + " | ".join(filter(None, (name, endpoint, label))))
+        if len(result.get("resolved_ips", [])) > 1:
+            print(f"    解析候选：{', '.join(result['resolved_ips'])}")
+        if result.get("samples"):
+            print(f"    TCP 成功 {result['tcp_ok']}/{result['samples']}，落地已验证 {result['verified']}/{result['samples']}")
+        for field, measure in (("median_tcp_ms", "TCP 建连"), ("median_verified_ms", "端到端验证")):
+            if result.get(field) is not None:
+                print(f"    {measure}中位耗时 {result[field]:.2f} ms")
+        for detail in result["details"]:
+            print(f"    {detail}")
+
+
+def _menu_probe_forwards(cfg: GlobalConfig) -> None:
+    rules = {rule.name: rule for rule in list_managed_rules(cfg)}
+    if not rules:
+        print("当前还没有已配置的转发规则。")
+        return
+    choice = _menu_pick([*rules, "*"], "选择要探测的转发", labels=[*rules, "全部转发"])
+    if not choice:
+        return
+    warn = _menu_field("延迟提示阈值（毫秒，回车仅显示实测值）")
+    if warn and not re.fullmatch(r"[0-9]{1,8}(?:\.[0-9]{1,3})?", warn):
+        raise ConfigError("延迟阈值须填写正数（毫秒）")
+    warn_ms = float(warn) if warn else None
+    if warn_ms == 0:
+        raise ConfigError("延迟阈值须填写正数（毫秒）")
+    options: Dict[str, Any] = {"warn_ms": warn_ms}
+    if choice != "*":
+        method = _menu_pick(
+            ["tcp", "tls", "response"], "选择验证方式", "tcp",
+            ["仅 TCP 入口", "验证落地 TLS 证书与主机名", "验证落地应用回包"],
+        )
+        if not method:
+            return
+        if method == "tls":
+            sni = _menu_field("落地 TLS 主机名（留空返回）")
+            if not sni:
+                return
+            options["tls_sni"] = _menu_domain(sni, "落地 TLS 主机名")
+        elif method == "response":
+            expected = _menu_field("预期落地回包（留空返回）")
+            if not expected:
+                return
+            options["expect_pattern"] = expected
+            options["send_payload"] = _menu_field(r"发送内容（支持 \n，留空只读回包）")
+    selected = list(rules.values()) if choice == "*" else [rules[choice]]
+    _print_forward_probes([_probe_managed_forward(cfg, rule, **options) for rule in selected])
+
+
+def _cmd_probe_forward(args: argparse.Namespace) -> int:
+    options = {
+        "count": args.count, "timeout": args.timeout, "warn_ms": args.warn_ms,
+        "tls_sni": args.tls_sni, "tls_cafile": args.tls_cafile,
+        "send_payload": args.send, "expect_pattern": args.expect,
+    }
+    if args.host:
+        if args.port is None:
+            raise ConfigError("使用 --host 时须指定 --port")
+        family = {"auto": socket.AF_UNSPEC, "ipv4": socket.AF_INET, "ipv6": socket.AF_INET6}[args.family]
+        results = [probe_forward_endpoint(args.host, args.port, family=family, **options)]
+    else:
+        if args.port is not None or args.family != "auto":
+            raise ConfigError("--port 和 --family 仅用于 --host")
+        if args.all and (args.tls_sni or args.tls_cafile or args.send or args.expect):
+            raise ConfigError("TLS 或应用回包验证须指定单条规则或单个入口")
+        cfg = load_global_config(args.config)
+        rules = [rule for rule in list_managed_rules(cfg) if args.all or rule.name == args.rule]
+        if not rules:
+            raise ConfigError("未找到要探测的托管转发")
+        results = [_probe_managed_forward(cfg, rule, **options) for rule in rules]
+    _print_forward_probes(results, as_json=args.json)
+    return int(any(item["status"] in _FORWARD_PROBE_FAILURES | {"not_tested"} or item.get("partial") for item in results))
+
+
 def _menu_rules_group(config_path: str) -> None:
     handlers = {
         "1": _menu_list_forwards,
@@ -861,6 +995,7 @@ def _menu_rules_group(config_path: str) -> None:
         "3": lambda cfg: _menu_forward(cfg, edit=True),
         "4": _menu_toggle_rule,
         "5": _menu_delete_rule,
+        "6": _menu_probe_forwards,
     }
     while True:
         print(f"\nleikwan_tools v{__version__} > 转发规则管理")
@@ -869,6 +1004,7 @@ def _menu_rules_group(config_path: str) -> None:
         print("  3. 修改转发")
         print("  4. 暂停 / 恢复转发")
         print("  5. 删除转发")
+        print("  6. 连通性与延迟探测")
         print("  0. 返回主菜单")
         selected = input("请选择：").strip()
         if selected == "0":
@@ -1045,6 +1181,66 @@ def _format_ddns_interface(interface: str, selected: str = "") -> str:
     return f"自动（{selected}）" if selected else "自动"
 
 
+def _ddns_forward_label(follow: Optional[dict]) -> str:
+    if not isinstance(follow, dict):
+        return "尚未检查"
+    if follow.get("errors"):
+        return "失败，待重试"
+    if follow.get("updated"):
+        return f"已更新 {len(follow['updated'])} 条"
+    return "无启用规则需要更新"
+
+
+def _print_ddns_bar(config_path: str, *, detailed: bool = False) -> None:
+    try:
+        cfg = _maybe_load_global(config_path)
+        if cfg is None:
+            print("IPv6 DDNS：未配置")
+            return
+        state = status_ddns(cfg)
+    except _MENU_ERRORS:
+        print("IPv6 DDNS：配置或状态不可读")
+        return
+    try:
+        active = systemd_is_active("leikwan_tools-ddns.timer")
+    except (SystemErrorBase, OSError, TimeoutExpired):
+        active = None
+    timer = {True: "运行中", False: "未运行", None: "未知"}[active]
+    enabled = state["ddns_enabled"]
+    summary = []
+    for isp, label in ISP_LABELS.items():
+        profiles = [item for item in state["profiles"] if item["isp"] == isp]
+        count = sum(item["enabled"] for item in profiles)
+        if not profiles:
+            status = "未配置"
+        elif not enabled:
+            status = "全局暂停"
+        elif not count:
+            status = "暂停"
+        else:
+            status = f"开启 {count}/{len(profiles)}"
+        summary.append(f"{label}：{status}")
+    print(f"IPv6 DDNS：全局{'开启' if enabled else '暂停'} | 定时器：{timer} | " + " | ".join(summary))
+    if not detailed:
+        return
+    dns_actions = {
+        "created": "已创建记录", "updated": "已更新记录", "noop": "记录一致",
+        "verified_noop": "远端已核对", "skipped_cached": "地址未变（缓存）",
+        "skipped_no_ip": "无可达地址", "error": "失败", "triggered": "Webhook 已通知",
+    }
+    for item in state["profiles"]:
+        iface = _format_ddns_interface(item["interface"], item["selected_interface"])
+        strategy = DDNS_SELECTION_LABELS[item["selection_strategy"]]
+        action = item["last_action"]
+        dns = dns_actions.get(action, action or "尚未同步")
+        profile_status = "开启" if enabled and item["enabled"] else "暂停"
+        attempted = item["last_attempt_at_utc"] or "-"
+        follow = item["forward_follow"]
+        follow_time = follow.get("at_utc", "-") if isinstance(follow, dict) else "-"
+        print(f"  {item['profile']}：{profile_status} | {strategy} | 网卡 {iface} | 上次选中 {item['selected_ip'] or '-'}")
+        print(f"    最近 DNS：{dns} @ {attempted} | 最近转发：{_ddns_forward_label(follow)} @ {follow_time}")
+
+
 def _print_ddns_inspect(items: List[ProfileInspectResult]) -> None:
     print("协议说明   : 当前仅支持 IPv6 AAAA 记录（配置模型已预留 A 记录扩展）")
     print("安全模式   : 只读候选过滤（不删除系统网卡上的 deprecated / preferred_lft 0 地址）")
@@ -1143,7 +1339,7 @@ def _print_ddns_status(res: Dict[str, Any]) -> None:
         print("-" * 72)
         isp_zh = ISP_LABELS.get(item["isp"], item["isp"])
         state_zh = "启用" if item["enabled"] else "禁用"
-        print(f"配置名称   : {item['profile']} ({isp_zh} | {state_zh})")
+        print(f"配置名称   : {item['profile']} ({isp_zh} | {state_zh} | {DDNS_SELECTION_LABELS[item['selection_strategy']]})")
         interface = _format_ddns_interface(item["interface"], item.get("selected_interface", ""))
         print(f"接口/服务  : dev={interface} | {item['provider']} {item['record_type']} -> {item['fqdn'] or '(Webhook)'}")
         print(f"凭据文件   : {item['credential_file'] or '(未配置)'}")
@@ -1161,6 +1357,12 @@ def _print_ddns_status(res: Dict[str, Any]) -> None:
         )
         if item.get("last_error"):
             print(f"最近错误   : {item['last_error']}")
+        follow = item.get("forward_follow")
+        print(f"转发跟随   : {_ddns_forward_label(follow)}")
+        if isinstance(follow, dict):
+            print(f"  时间/IP  : {follow['at_utc']} | {follow['ip']}")
+            for error in follow["errors"]:
+                print(f"  跟随错误 : {error}")
 
 
 def _menu_ddns_profile(cfg: GlobalConfig, *, allow_all: bool = False) -> str:
@@ -1204,7 +1406,7 @@ def _menu_ddns_edit(cfg: GlobalConfig, profile: Optional[DdnsProfileConfig] = No
     if not provider:
         return
     zone = _menu_field("DNS 托管域（如 example.com）", profile.zone if profile else "")
-    host = _menu_field("主机记录（如 ct，根域填 @）", profile.host if profile else "@") if zone else ""
+    host = _menu_field("主机记录（如 ct.edge 或 ct.edge.example.com，根域填 @）", profile.host if profile else "@") if zone else ""
     if zone or provider != "webhook":
         zone = _menu_domain(zone, "DDNS 托管域").removesuffix(".").encode("idna").decode("ascii")
         host = host.removesuffix(".").encode("idna").decode("ascii")
@@ -1237,6 +1439,24 @@ def _menu_ddns_edit(cfg: GlobalConfig, profile: Optional[DdnsProfileConfig] = No
         "credential_file": profile.credential_file if keep_existing else "",
     }
     changes["enabled"] = True
+    strategy = _menu_pick(
+        list(DDNS_SELECTION_LABELS), "选择 IPv6 策略",
+        profile.selection_strategy if profile else "latest",
+        ["新址优先（按剩余首选寿命，不代表确切下发时间）", "延迟优先（在可达地址中选最低 RTT）"],
+    )
+    if not strategy:
+        return
+    changes["selection_strategy"] = strategy
+    if provider == "cloudflare":
+        print("Cloudflare：普通 TCP 直连使用「仅 DNS」。TTL 影响客户端缓存，不是 DDNS 检测周期。")
+        if profile and profile.proxied:
+            print("此配置已开启代理，Cloudflare 使用自动 TTL；保留代理设置。")
+        else:
+            default_ttl = profile.ttl if profile and profile.provider == provider else DEFAULT_DDNS_TTL
+            ttl_input = _menu_field("TTL（秒，1=自动，60–86400，企业版最低 30）", default_ttl)
+            if not re.fullmatch(r"[0-9]{1,5}", ttl_input) or not (int(ttl_input) == 1 or 30 <= int(ttl_input) <= 86400):
+                raise ConfigError("Cloudflare TTL 必须为 1（自动）或 60–86400 秒（企业版 30–86400 秒）")
+            changes["ttl"] = int(ttl_input)
     if credentials is not None:
         changes["auth_mode"] = "token" if provider == "cloudflare" else ""
     target = normalize_ddns_fqdn(zone, host) if zone else "(Webhook)"
@@ -1297,6 +1517,7 @@ def _menu_ddns_toggle(cfg: GlobalConfig) -> None:
 def _menu_ddns_group(config_path: str) -> None:
     while True:
         print(f"\nleikwan_tools v{__version__} > IPv6 DDNS 域名管理")
+        _print_ddns_bar(config_path, detailed=True)
         print("  1. 查看配置与同步状态")
         print("  2. 新建 DDNS 配置")
         print("  3. 修改 DDNS 配置")
@@ -1349,6 +1570,7 @@ def _run_menu(config_path: str) -> int:
     try:
         while True:
             print(f"\nleikwan_tools 利群转发助手 v{__version__}")
+            _print_ddns_bar(config_path)
             print("  1. 查看转发状态")
             print("  2. 转发规则管理（查看 / 新建 / 修改 / 暂停恢复 / 删除）")
             print("  3. 查询官方公网入口 IP")
@@ -1445,6 +1667,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("rule_name", nargs="?", help="可选规则名；省略则列出全部规则")
     p_status.add_argument("--check-dns", action="store_true", help="同时检查固定公网 IP 是否从 DNS 消失")
 
+    p_probe = sub.add_parser("probe-forward", help="从当前机器探测已配置转发的公网入口与延迟")
+    target = p_probe.add_mutually_exclusive_group(required=True)
+    target.add_argument("--rule", help="已托管规则名")
+    target.add_argument("--all", action="store_true", help="批量检测所有规则的 TCP 入口")
+    target.add_argument("--host", help="从外部客户端直接指定公网入口 IP 或域名")
+    p_probe.add_argument("--port", type=int, help="与 --host 配合使用的公网端口")
+    p_probe.add_argument("--family", choices=("auto", "ipv4", "ipv6"), default="auto", help="与 --host 配合使用的地址族")
+    p_probe.add_argument("--count", type=int, default=3, help="每条规则采样次数（1–5，默认 3）")
+    p_probe.add_argument("--timeout", type=float, default=2.0, help="每阶段超时秒数（默认 2）")
+    p_probe.add_argument("--warn-ms", type=float, help="中位耗时高于此毫秒数时提示")
+    p_probe.add_argument("--tls-sni", default="", help="验证落地 TLS 证书和此主机名")
+    p_probe.add_argument("--tls-cafile", default="", help="可选 TLS CA PEM 路径，须指定 --tls-sni")
+    p_probe.add_argument("--send", default="", help="显式发送应用探测数据，须指定 --expect")
+    p_probe.add_argument("--expect", default="", help="预期应用回包，支持 re:<正则>")
+
     sub.add_parser("list", help="列出所有已托管规则")
 
     p_disable = sub.add_parser("disable", aliases=["stop"], help="停用指定规则并取消开机自启（保留配置文件）")
@@ -1534,7 +1771,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ddns = sub.add_parser("ddns", help="独立双线路 IPv6 DDNS 检查、测试、状态与同步（仅支持 AAAA）")
     ddns_sub = p_ddns.add_subparsers(dest="ddns_cmd", required=True)
 
-    p_di = ddns_sub.add_parser("inspect", help="只读扫描网卡公网 IPv6 候选并主动 ping 探测最低 RTT")
+    p_di = ddns_sub.add_parser("inspect", help="按配置的选址策略探测可达公网 IPv6")
     p_di.add_argument("--profile", default="", help="可选 DDNS 配置名（如 ct / cu）；省略则检查全部")
 
     p_du = ddns_sub.add_parser("update", help="按最优 IPv6 同步 DDNS（带缓存、600s 远端校验与并发锁）")
@@ -1560,6 +1797,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         if args.command == "menu":
             return _run_menu(args.config)
+
+        if args.command == "probe-forward":
+            return _cmd_probe_forward(args)
 
         if args.command == "system":
             feature = "status" if args.system_feature == "network" else args.system_feature

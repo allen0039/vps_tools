@@ -28,6 +28,7 @@ DEFAULT_DDNS_VERIFY_INTERVAL_SECONDS = 600
 DEFAULT_DDNS_PROBE_TARGET = "2400:3200::1"
 DEFAULT_DDNS_PROBE_TIMEOUT_SECONDS = 1
 DEFAULT_DDNS_TTL = 600
+DDNS_SELECTION_LABELS = {"latest": "新址优先", "latency": "延迟优先"}
 DDNS_AUTO_INTERFACE = "auto"
 DEFAULT_DNSPOD_RECORD_LINE = "默认"
 VALID_DDNS_PROVIDERS = ("cloudflare", "dnspod", "alidns", "webhook")
@@ -273,6 +274,7 @@ class DdnsProfileConfig:
     probe_target: Optional[str] = None
     probe_timeout_seconds: Optional[int] = None
     verify_interval_seconds: Optional[int] = None
+    selection_strategy: str = "latest"
 
     @property
     def fqdn(self) -> str:
@@ -422,6 +424,7 @@ def _parse_ddns_settings(raw: Any) -> DdnsSettings:
         "ttl",
         "record_line",
         "auth_mode",
+        "selection_strategy",
         "probe_target",
         "probe_timeout_seconds",
         "verify_interval_seconds",
@@ -502,6 +505,9 @@ def _parse_ddns_settings(raw: Any) -> DdnsSettings:
 
         proxied = validate_bool(prof_raw.get("proxied", False), f"{ctx}.proxied")
         ttl = validate_positive_int(prof_raw.get("ttl", DEFAULT_DDNS_TTL), f"{ctx}.ttl")
+        selection_strategy = _require_str(prof_raw, "selection_strategy", ctx) if "selection_strategy" in prof_raw else "latest"
+        if selection_strategy not in DDNS_SELECTION_LABELS:
+            raise ConfigError(f"{ctx}.selection_strategy 必须为 latest 或 latency")
         record_line = _require_str(prof_raw, "record_line", ctx, allow_empty=True) or DEFAULT_DNSPOD_RECORD_LINE
 
         auth_mode_raw = prof_raw.get("auth_mode", "")
@@ -544,6 +550,7 @@ def _parse_ddns_settings(raw: Any) -> DdnsSettings:
             probe_target=p_probe_target,
             probe_timeout_seconds=p_probe_timeout,
             verify_interval_seconds=p_verify_interval,
+            selection_strategy=selection_strategy,
         )
         if profile.provider != "webhook":
             dedup_key = (profile.fqdn, profile.record_type)
