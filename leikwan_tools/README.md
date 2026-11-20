@@ -6,6 +6,69 @@
 
 原版 `Toolkit`、`LeiKwanManager`、`v6-mng.sh` 和外部 Realm 实例由各自原有工具管理。本工具只管理自己的 Realm 实例。经显式确认的路由初始化仅向主配置指定的独立 IPv4 表添加所需条目，保留主路由、全局防火墙、SSH 配置和第三方路由；IPv6 出站优先使用每条 Realm 规则的 socket 绑定和系统已有 IPv6 路由，不自动修改系统 IPv6 路由。整机网络优化是独立的手动功能，见[系统网络优化](#十系统网络优化)。
 
+## 一键单独安装
+
+在运行 systemd 的 Debian 12 / 13 VPS 上，以 **root** 执行整段命令（非 root 用户可先运行 `sudo -i`）。脚本只安装利群助手，不安装整个工具箱。即使系统未装 `git`、`curl` 或 Python 3，也会通过 APT 补齐缺失的依赖。
+
+默认从 GitHub 安装；如需使用 Gitee，把下面的 `channel=github` 改为 `channel=gitee`：
+
+```bash
+(
+  set -e
+  channel=github
+  case "$channel" in
+    github) url=https://raw.githubusercontent.com/allen0039/vps_tools/main ;;
+    gitee) url=https://gitee.com/allen0039/vps_tools/raw/main ;;
+    *) exit 2 ;;
+  esac
+  if ! command -v curl >/dev/null || [ ! -s /etc/ssl/certs/ca-certificates.crt ]; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates
+  fi
+  installer=$(mktemp)
+  trap 'rm -f -- "$installer"' EXIT
+  curl -fsSL --retry 3 --connect-timeout 15 "$url/leikwan_tools/install-online.sh" -o "$installer"
+  bash "$installer" "$channel"
+)
+```
+
+需要可用的 APT 软件源和网络。联网入口会按需安装 `git`、`python3`、`iproute2`、`iputils-ping` 和 `ca-certificates`，然后下载完整安装文件。不会自动安装可选的 `nftables`，也不会启用示例转发规则。
+
+安装后执行 `lqtool` 打开菜单（非 root 用户运行 `sudo lqtool`）。已有完整仓库、需指定离线 Realm 包或自定义安装目录时，仍可使用本地 `install.sh`；配置和启用步骤见[从安装到应用的完整可复制命令](#六从安装到应用的完整可复制命令)。
+
+### 单文件上传安装
+
+如果 VPS 无法稳定连接 GitHub，可以先在本地下载下面的单文件脚本，再通过 SFTP、控制台上传或其他文件传输方式复制到 VPS。脚本本身不依赖 `git`，运行时会自动安装缺失的 Debian 依赖，从 Gitee 下载源码，并通过多个地址下载、校验 Realm。
+
+本地下载地址：
+
+```text
+https://gitee.com/allen0039/vps_tools/raw/main/leikwan_tools/install-standalone.sh
+```
+
+上传到 VPS 后执行：
+
+```bash
+chmod +x /root/install-standalone.sh
+sudo /root/install-standalone.sh
+```
+
+脚本默认使用 Gitee 源码和 GitHub 镜像下载 Realm。也可以切换源码渠道：
+
+```bash
+sudo /root/install-standalone.sh --source github
+```
+
+脚本会识别 `x86_64` 和 `arm64`，并验证 Realm v2.9.6 的 SHA-256。安装过程不会启用示例转发规则，也不会覆盖已有配置。需要自定义目录时，可继续传给正式安装器：
+
+```bash
+sudo /root/install-standalone.sh \
+  --config-dir /opt/leikwan-config \
+  --state-dir /var/lib/leikwan-state
+```
+
+如果只想先安装程序、稍后准备 Realm，可以使用 `--skip-realm-install`；启用转发规则前再运行 `sudo leikwan_tools install-realm`。
+
 ---
 
 ## 一、转发链路
