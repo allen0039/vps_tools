@@ -1,6 +1,6 @@
 """独立「leikwan_tools」(leikwan_tools) 核心包。"""
 
-__version__ = "0.1.11"
+__version__ = "0.1.12"
 
 INSTALL_LIB_DIR = "/usr/local/lib/leikwan_tools"
 INSTALL_MANIFEST_PATH = "/usr/local/lib/leikwan_tools/install-manifest.json"

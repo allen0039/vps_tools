@@ -40,34 +40,36 @@
 
 如果 VPS 无法稳定连接 GitHub，可以先在本地下载下面的单文件脚本，再通过 SFTP、控制台上传或其他文件传输方式复制到 VPS。脚本本身不依赖 `git`，运行时会自动安装缺失的 Debian 依赖，从 Gitee 下载源码，并通过多个地址下载、校验 Realm。
 
-本地下载地址：
-
-```text
-https://gitee.com/allen0039/vps_tools/raw/main/leikwan_tools/install-standalone.sh
-```
-
-上传到 VPS 后执行：
+在本地电脑执行以下命令下载脚本，也可以在浏览器中打开该地址后保存文件：
 
 ```bash
-chmod +x /root/install-standalone.sh
-sudo /root/install-standalone.sh
+curl -fL 'https://gitee.com/allen0039/vps_tools/raw/main/leikwan_tools/install-standalone.sh' \
+  -o install-standalone.sh
 ```
 
-脚本默认使用 Gitee 源码和 GitHub 镜像下载 Realm。也可以切换源码渠道：
+通过 SFTP 等方式将文件上传到 VPS 的 `/root/install-standalone.sh`，然后以 root 执行：
 
 ```bash
-sudo /root/install-standalone.sh --source github
+bash /root/install-standalone.sh
+```
+
+非 root 用户可上传到自己的家目录，然后运行 `sudo bash "$HOME/install-standalone.sh"`。安装需要联网访问 Debian APT 软件源、Gitee 和至少一个 Realm 下载地址。
+
+安装完成后运行 `lqtool` 打开菜单。脚本默认使用 Gitee 源码和 GitHub 镜像下载 Realm。也可以切换源码渠道：
+
+```bash
+sudo bash /root/install-standalone.sh --source github
 ```
 
 脚本会识别 `x86_64` 和 `arm64`，并验证 Realm v2.9.6 的 SHA-256。安装过程不会启用示例转发规则，也不会覆盖已有配置。需要自定义目录时，可继续传给正式安装器：
 
 ```bash
-sudo /root/install-standalone.sh \
+sudo bash /root/install-standalone.sh \
   --config-dir /opt/leikwan-config \
   --state-dir /var/lib/leikwan-state
 ```
 
-如果只想先安装程序、稍后准备 Realm，可以使用 `--skip-realm-install`；启用转发规则前再运行 `sudo leikwan_tools install-realm`。
+如果 VPS 暂时无法下载 Realm，可以运行 `bash /root/install-standalone.sh --skip-realm-install` 先安装程序。启用转发规则前，可运行 `sudo leikwan_tools install-realm` 补装 Realm。
 
 ---
 
@@ -205,7 +207,7 @@ ip -4 route get 192.0.2.10 from 10.8.0.146 oif eth1
 
 ## 六、从安装到应用的完整可复制命令
 
-安装后以 `sudo lqtool` 打开菜单（主菜单包含 **1** 查看转发状态、**2** 转发规则管理、**3** 查询官方公网入口 IP、**4** 查询并设置转发的客户端入口 IP、**5** 初始化与环境排查、**6** 从仓库检查并更新工具）。先进入 **5 -> 1** 预览并确认初始化双线出口路由，再进入 **2** 转发规则管理（**1** 查看已有转发、**2** 新建转发、**3** 修改转发、**4** 暂停 / 恢复转发、**5** 删除转发）。菜单 **4** 查询规则域名的 A 记录，可用配置中的 DNS 服务器或临时指定解析器。菜单显示其他公网候选作为客户端备用，固定或恢复域名只更新客户端入口元数据。需要验证某个候选实际通往落地时，用 `lqtool ingress verify`。菜单 **6** 支持从 GitHub 或 Gitee 仓库检查更新并原地升级，原有主配置、规则和运行中连接均保留不变。
+安装后以 `sudo lqtool` 打开菜单（主菜单包含 **1** 查看转发状态、**2** 转发规则管理、**3** 查询官方公网入口 IP、**4** 设置客户端入口 IP、**5** 初始化与环境排查、**6** IPv6 DDNS 域名管理、**7** 检查并更新工具）。先进入 **5 -> 1** 预览并确认初始化双线出口路由，再进入 **2** 转发规则管理（**1** 查看已有转发、**2** 新建转发、**3** 修改转发、**4** 暂停 / 恢复转发、**5** 删除转发、**6** 连通性与延迟探测）。菜单 **4** 查询规则域名的 A 记录，可用配置中的 DNS 服务器或临时指定解析器。菜单显示其他公网候选作为客户端备用，固定或恢复域名只更新客户端入口元数据。需要验证某个候选实际通往落地时，用 `lqtool ingress verify`。菜单 **7** 支持从 GitHub 或 Gitee 仓库检查更新并原地升级，原有主配置、规则和运行中连接均保留不变。
 
 使用公网 IPv6 直连时，在 **2 -> 2**（新建转发）或 **2 -> 3**（修改转发）的入口处填本机公网 IPv6 地址，端口同时用作客户端入口和本机监听端口。用 TOML 配置时，`forward.listen_ip` 填 IPv6 地址，`forward.listen_port` 与 `ingress.public_port` 一致，`ingress.domain` 和 `ingress.fixed_ip` 留空。Realm 绑定该 IPv6 地址，入口回程沿用系统 IPv6 路由；落地填写 IPv4，菜单列出 IPv4 出口线路（如 `9929`/`cn2`）。
 
@@ -313,7 +315,7 @@ DDNS 探测使用 Debian 的 `iproute2` 和 `iputils-ping`。
 
 ### 3. 从交互菜单管理 DDNS
 
-在 VPS 上运行 `sudo lqtool`，选择主菜单第 **7 项「IPv6 DDNS 域名管理」**。选择「新建 DDNS 配置」后，选电信或联通即可自动识别网卡，接着填写 DNS 服务商、托管域、主机记录和对应的 Token 或密钥。输入内容在终端明文显示；确认后工具保存配置、启用全局和该条 DDNS，并立即尝试同步，后续通过定时任务自动检测。若全局原先关闭，开启后其他已启用的配置也会在定时任务中运行，保存前会列出其名称。首次同步失败时配置仍保留，可查看错误，定时器运行时会继续重试。工具自动创建 `0600` 凭据文件，主配置只保存路径。修改配置时直接回车保留原凭据，输入新凭据会创建新文件并保留原文件；确认保存同样会启用该配置并立即同步。旧配置仍按原网卡绑定；如需切换，在「修改 DDNS 配置」中将网卡设为 `auto`。
+在 VPS 上运行 `sudo lqtool`，选择主菜单第 **6 项「IPv6 DDNS 域名管理」**。选择「新建 DDNS 配置」后，选电信或联通即可自动识别网卡，接着填写 DNS 服务商、托管域、主机记录和对应的 Token 或密钥。输入内容在终端明文显示；确认后工具保存配置、启用全局和该条 DDNS，并立即尝试同步，后续通过定时任务自动检测。若全局原先关闭，开启后其他已启用的配置也会在定时任务中运行，保存前会列出其名称。首次同步失败时配置仍保留，可查看错误，定时器运行时会继续重试。工具自动创建 `0600` 凭据文件，主配置只保存路径。修改配置时直接回车保留原凭据，输入新凭据会创建新文件并保留原文件；确认保存同样会启用该配置并立即同步。旧配置仍按原网卡绑定；如需切换，在「修改 DDNS 配置」中将网卡设为 `auto`。
 
 在 DDNS 菜单选 **7「启用 / 暂停 DDNS」**，可在同一列表中选择全局或指定配置。启用全局会立即同步所有已启用的配置。启用单条配置会立即同步该记录，全局处于暂停时会一并开启。暂停全局会暂停所有同步并保留各条配置的启用状态。选择 **6「立即同步 AAAA 记录」**并确认后，工具会重新探测并同步选中的已启用配置。选择 **8「删除 DDNS 配置」**会移除本地配置，远端 DNS 记录和凭据文件可继续使用。
 

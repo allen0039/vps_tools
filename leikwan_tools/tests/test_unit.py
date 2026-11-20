@@ -196,8 +196,13 @@ class TestInteractiveShortcut(unittest.TestCase):
                 env=env,
                 check=True,
             )
-            self.assertIn(f"leikwan_tools 利群转发助手 v{__version__}", menu.stdout)
+            self.assertIn(f"利群转发助手 | leikwan_tools v{__version__}", menu.stdout)
             self.assertIn("转发规则管理", menu.stdout)
+            self.assertIn("6. IPv6 DDNS 域名管理", menu.stdout)
+            self.assertIn("7. 检查并更新工具", menu.stdout)
+            self.assertIn("0. 退出", menu.stdout)
+            self.assertLess(menu.stdout.index("6. IPv6 DDNS 域名管理"), menu.stdout.index("7. 检查并更新工具"))
+            self.assertLess(menu.stdout.index("7. 检查并更新工具"), menu.stdout.index("0. 退出"))
             self.assertNotIn("预览规则部署", menu.stdout)
             self.assertNotIn("应用规则文件", menu.stdout)
             self.assertIn("无效选项", menu.stdout)
@@ -321,7 +326,7 @@ class TestInteractiveShortcut(unittest.TestCase):
             version_changed=True,
         )
         # First cancel on "n", then confirm on "y"
-        answers = ["6", "2", "n", "6", "2", "y", "0"]
+        answers = ["7", "2", "n", "7", "2", "y", "0"]
         with (
             patch("builtins.input", side_effect=answers),
             patch("leikwan_tools.cli.check_for_update", return_value=info) as m_check,
@@ -332,9 +337,102 @@ class TestInteractiveShortcut(unittest.TestCase):
         self.assertEqual(m_check.call_count, 2)
         m_upd.assert_called_once_with(channel="gitee", prechecked=info)
         out = stdout.getvalue()
-        self.assertIn("6. 从仓库检查并更新工具", out)
+        self.assertIn("7. 检查并更新工具", out)
         self.assertIn("发现新版本 v0.1.3", out)
         self.assertIn("已从 v0.1.2 更新到 v0.1.3", out)
+
+    def test_menu_status_panel_alignment_and_plain_mode(self) -> None:
+        from leikwan_tools.cli import _display_width
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            cred = base / "cf.env"
+            cred.write_text("CF_API_TOKEN=test-token\n", encoding="utf-8")
+            cred.chmod(0o600)
+            cfg_text = (REPO_ROOT / "examples" / "config.example.toml").read_text(encoding="utf-8")
+            cfg_text = (
+                cfg_text.replace("/etc/leikwan_tools/rules.d", str(base / "rules.d"))
+                .replace("/var/lib/leikwan_tools", str(base / "state"))
+                .replace("/run/leikwan_tools.lock", str(base / "tool.lock"))
+            )
+            cfg_text += (
+                '\n[ddns]\nenabled = false\n[ddns.ct]\n'
+                'enabled = true\nisp = "ct"\nprovider = "cloudflare"\n'
+                f'zone = "example.net"\nhost = "edge"\ncredential_file = "{cred}"\n'
+            )
+            cfg_path = base / "config.toml"
+            cfg_path.write_text(cfg_text, encoding="utf-8")
+            r1 = replace(load_rule_config(str(REPO_ROOT / "examples" / "rule-rfc-hk.example.toml")), name="rule-one")
+            r2 = replace(r1, name="rule-two")
+
+            with (
+                patch("builtins.input", side_effect=["0"]),
+                patch("leikwan_tools.cli.list_managed_rules", return_value=[r1, r2]),
+                patch("leikwan_tools.cli.systemd_is_active", side_effect=[True, False, True]),
+                redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.assertEqual(main(["--config", str(cfg_path), "menu"]), 0)
+
+        out = stdout.getvalue()
+        self.assertNotIn("\033[", out)
+        self.assertIn("=" * 64, out)
+        self.assertIn("-" * 64, out)
+        self.assertIn("共 2 条 (运行中[1] | 未运行[1])", out)
+        self.assertIn("9929[eth0] | cn2[eth1]", out)
+        self.assertIn("全局[暂停] | 定时器[运行中]", out)
+        self.assertIn("电信[全局暂停] | 联通[未配置]", out)
+        status_lines = [
+            line for line in out.splitlines()
+            if any(line.startswith(prefix) for prefix in ("转发状态", "出口线路", "IPv6 DDNS", "双线 DDNS"))
+        ]
+        self.assertEqual(len(status_lines), 4)
+        for line in status_lines:
+            self.assertEqual(_display_width(line.split(":", 1)[0]), 10)
+        self.assertLess(out.index("6. IPv6 DDNS 域名管理"), out.index("7. 检查并更新工具"))
+        self.assertLess(out.index("7. 检查并更新工具"), out.index("0. 退出"))
+
+    def test_menu_remains_usable_with_an_invalid_utf8_config(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            config_path = Path(td) / "config.toml"
+            config_path.write_bytes(b"\xff")
+            with patch("builtins.input", side_effect=["6", "0", "0"]), redirect_stdout(io.StringIO()) as stdout:
+                self.assertEqual(main(["--config", str(config_path), "menu"]), 0)
+            self.assertIn("[读取失败]", stdout.getvalue())
+            self.assertIn("[配置或状态不可读]", stdout.getvalue())
+
+    def test_menu_tty_color_and_no_color_override(self) -> None:
+        from leikwan_tools.cli import _display_width, _run_menu
+
+        class TtyBuffer(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        self.assertEqual(_display_width("转发状态"), 8)
+        self.assertEqual(
+            _display_width("\033[1;36m利群转发助手 | leikwan_tools\033[0m"),
+            _display_width("利群转发助手 | leikwan_tools"),
+        )
+
+        clean_env = {k: v for k, v in os.environ.items() if k != "NO_COLOR"}
+        clean_env["TERM"] = "xterm-256color"
+        tty_out = TtyBuffer()
+        with (
+            patch.dict(os.environ, clean_env, clear=True),
+            patch("builtins.input", side_effect=["0"]),
+            redirect_stdout(tty_out),
+        ):
+            self.assertEqual(_run_menu("/nonexistent-leikwan-config.toml"), 0)
+        self.assertIn("\033[1;36m", tty_out.getvalue())
+        self.assertIn("\033[2m0. 退出\033[0m", tty_out.getvalue())
+
+        no_color_out = TtyBuffer()
+        with (
+            patch.dict(os.environ, {**clean_env, "NO_COLOR": "1"}, clear=True),
+            patch("builtins.input", side_effect=["0"]),
+            redirect_stdout(no_color_out),
+        ):
+            self.assertEqual(_run_menu("/nonexistent-leikwan-config.toml"), 0)
+        self.assertNotIn("\033[", no_color_out.getvalue())
 
 
 class TestTomlCompat(unittest.TestCase):
@@ -1478,7 +1576,7 @@ class TestDdnsSubsystem(unittest.TestCase):
                     encoding="utf-8",
                 )
                 ttl = [""] if provider == "1" else []
-                answers = ["7", "2", "ct", "1", provider, "example.net", "edge", *values, "", *ttl, "y", "0", "0"]
+                answers = ["6", "2", "ct", "1", provider, "example.net", "edge", *values, "", *ttl, "y", "0", "0"]
                 with (
                     patch("builtins.input", side_effect=answers),
                     patch("leikwan_tools.cli.update_ddns", return_value={"results": []}) as sync,
@@ -1500,7 +1598,7 @@ class TestDdnsSubsystem(unittest.TestCase):
                 self.base_cfg_toml.replace("/run/leikwan_tools.lock", str(base / "tool.lock")),
                 encoding="utf-8",
             )
-            answers = ["7", "2", "ct", "1", "1", "example.net", "edge", "test-cf-token", "", "", "y", "0", "0"]
+            answers = ["6", "2", "ct", "1", "1", "example.net", "edge", "test-cf-token", "", "", "y", "0", "0"]
             with (
                 patch("builtins.input", side_effect=answers),
                 patch("leikwan_tools.cli.update_ddns", side_effect=DdnsError("同步失败")),
@@ -1537,7 +1635,7 @@ class TestDdnsSubsystem(unittest.TestCase):
             ]
             for choice, confirm, global_enabled, profile_enabled, sync_args in steps:
                 with self.subTest(choice=choice, confirm=confirm, enabled=profile_enabled):
-                    answers = ["7", "7", choice, confirm, "0", "0"]
+                    answers = ["6", "7", choice, confirm, "0", "0"]
                     with (
                         patch("builtins.input", side_effect=answers) as menu_input,
                         patch("leikwan_tools.cli.update_ddns", return_value={"results": []}) as sync,
@@ -1566,7 +1664,7 @@ class TestDdnsSubsystem(unittest.TestCase):
                 "ct", True, "ct", "auto", "cloudflare", "AAAA", "example.net", "edge",
                 "edge.example.net", "2400:3200::1", 1, "240e::5", 5.0, [], [],
             )
-            answers = ["7", "2", "ct", "1", "1", "example.net", "edge", "test-cf-token", "", "", "y", "0", "0"]
+            answers = ["6", "2", "ct", "1", "1", "example.net", "edge", "test-cf-token", "", "", "y", "0", "0"]
             with (
                 patch("builtins.input", side_effect=answers),
                 patch("leikwan_tools.ddns.inspect_ddns_profile", return_value=inspection),
@@ -1593,7 +1691,7 @@ class TestDdnsSubsystem(unittest.TestCase):
             create = ["2", "ct.edge", "1", "1", "example.net", "edge", "example-test-token", "2", "300"]
             edit = ["3", "ct.edge", "", "", "", "", "edge-new.example.net", "", "", ""]
             answers = [
-                "7", "1", *create, "n", *create, "y", "1",
+                "6", "1", *create, "n", *create, "y", "1",
                 *edit, "y", "4", "1", "5", "ct.edge", "6", "1", "n", "6", "1", "y", "0", "0",
             ]
             with (
@@ -1620,7 +1718,7 @@ class TestDdnsSubsystem(unittest.TestCase):
             self.assertEqual(profile.selection_strategy, "latency")
             self.assertEqual(config.stat().st_mode & 0o777, 0o640)
             self.assertTrue(config.read_text(encoding="utf-8").startswith(original))
-            self.assertIn("7. IPv6 DDNS 域名管理", output.getvalue())
+            self.assertIn("6. IPv6 DDNS 域名管理", output.getvalue())
             self.assertIn("自动识别电信 IPv6，无需填写网卡名", output.getvalue())
             self.assertIn("配置已保存并启用", output.getvalue())
             inspect.assert_called_once_with(saved, None)
@@ -1631,7 +1729,7 @@ class TestDdnsSubsystem(unittest.TestCase):
             self.assertEqual(sync.call_args_list[2].args[1], None)
             self.assertTrue(all(call.kwargs["force"] for call in sync.call_args_list))
 
-            with patch("builtins.input", side_effect=["7", "8", "ct.edge", "y", "0", "0"]), redirect_stdout(io.StringIO()):
+            with patch("builtins.input", side_effect=["6", "8", "ct.edge", "y", "0", "0"]), redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["--config", str(config), "menu"]), 0)
             remaining = load_global_config(str(config))
             self.assertEqual(remaining.ddns.profiles, {})
@@ -1709,7 +1807,7 @@ class TestDdnsSubsystem(unittest.TestCase):
                         redirect_stdout(io.StringIO()) as out,
                     ):
                         _print_ddns_bar(str(config), detailed=True)
-                    self.assertIn("定时器：未运行", out.getvalue())
+                    self.assertIn("定时器[未运行]", out.getvalue())
                     self.assertIn("最近 DNS：已更新记录", out.getvalue())
                     self.assertIn("最近转发：失败，待重试", out.getvalue())
                     sync.assert_called_once()

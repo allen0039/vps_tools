@@ -14,6 +14,7 @@ import socket
 from subprocess import TimeoutExpired
 import sys
 from typing import Any, Dict, List, Optional
+import unicodedata
 
 from . import (
     DEFAULT_INGRESS_DOMAIN,
@@ -116,6 +117,92 @@ _MENU_ERRORS = (
     OSError,
 )
 
+_MENU_WIDTH = 64
+_STATUS_LABEL_WIDTH = 10
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+_ANSI = {
+    "cyan": "1;36",
+    "title": "1;36",
+    "green": "92",
+    "yellow": "93",
+    "red": "91",
+    "dim": "2",
+    "bold": "1",
+}
+
+
+def _supports_color(stream: Any = None) -> bool:
+    target = sys.stdout if stream is None else stream
+    return (
+        bool(getattr(target, "isatty", lambda: False)())
+        and "NO_COLOR" not in os.environ
+        and os.environ.get("TERM") != "dumb"
+    )
+
+
+def _style(text: str, tone: str = "", *, stream: Any = None) -> str:
+    code = _ANSI.get(tone, "")
+    if not code or not _supports_color(stream):
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _badge(text: str, tone: str = "", *, stream: Any = None) -> str:
+    return f"[{_style(text, tone, stream=stream)}]"
+
+
+def _display_width(text: str) -> int:
+    plain = _ANSI_RE.sub("", text)
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in plain)
+
+
+def _center_text(text: str, width: int = _MENU_WIDTH) -> str:
+    pad = max(0, (width - _display_width(text)) // 2)
+    return f"{' ' * pad}{text}"
+
+
+def _pad_label(label: str, width: int = _STATUS_LABEL_WIDTH) -> str:
+    pad = max(0, width - _display_width(label))
+    return f"{label}{' ' * pad}"
+
+
+def _print_menu_header(title: str, subtitle: str = "") -> None:
+    heading = f"{title} | {subtitle}" if subtitle else title
+    bar = _style("=" * _MENU_WIDTH, "cyan")
+    print(f"\n{bar}")
+    print(_style(_center_text(heading), "title"))
+    print(bar)
+
+
+def _print_menu_divider() -> None:
+    print(_style("-" * _MENU_WIDTH, "cyan"))
+
+
+def _print_status_kv(label: str, value: str, *, width: int = _STATUS_LABEL_WIDTH) -> None:
+    print(f"{_pad_label(label, width)}: {value}")
+
+
+def _print_menu_item(key: str, title: str, hint: str = "", *, dim: bool = False) -> None:
+    if dim:
+        print(f"  {_style(f'{key}. {title}', 'dim')}")
+        return
+    num = _style(f"{key}.", "cyan")
+    suffix = f"  {_style(f'({hint})', 'dim')}" if hint else ""
+    print(f"  {num} {title}{suffix}")
+
+
+def _menu_prompt(label: str = "请选择") -> str:
+    _print_menu_divider()
+    return input(_style(f"{label}: ", "bold")).strip()
+
+
+def _print_error(message: str) -> None:
+    print(f"{_style('错误:', 'red', stream=sys.stderr)} {message}", file=sys.stderr)
+
+
+def _print_invalid_choice() -> None:
+    print(_style("无效选项，请重新输入。", "yellow"))
+
 
 def _maybe_load_global(config_path: str) -> Optional[GlobalConfig]:
     if Path(config_path).is_file():
@@ -153,7 +240,7 @@ def _print_plan(res: Dict[str, Any]) -> None:
     line_family = res.get("line_family") or line_info.get("family") or ("ipv6" if ":" in str(res["through"]) else "ipv4")
     gw_part = f", 网关={line_info['gateway']}" if line_info.get("gateway") else ""
     tbl_part = f", 表={line_info['table']}" if line_info.get("table") is not None else ""
-    print(f"=== 变更预览 [{res['action']}]（{action_zh}） 转发: {res['rule_name']} ===")
+    print(_style(f"=== 变更预览 [{res['action']}]（{action_zh}） 转发: {res['rule_name']} ===", "cyan"))
     print(
         f"出口线路   : {line_info['name']} ({line_family.upper()}, 网卡={line_info['interface']}, "
         f"源IP={res['through']}{gw_part}{tbl_part})"
@@ -171,7 +258,7 @@ def _print_plan(res: Dict[str, Any]) -> None:
     if res.get("forced_non_dns"):
         print("覆盖标记   : 已通过 --allow-non-dns 显式强制覆盖固定公网 IP 校验")
     if res.get("stale_ip_warning"):
-        print(f"警告       : {res['stale_ip_warning']}")
+        print(_style(f"警告       : {res['stale_ip_warning']}", "yellow"))
     print("将写入文件 :")
     for k, v in res["target_paths"].items():
         print(f"  - {k}: {v}")
@@ -187,9 +274,10 @@ def _print_apply(res: Dict[str, Any]) -> None:
         "noop": "幂等跳过（配置与运行状态一致）",
     }
     label = label_map.get(res["status"], res["status"])
+    tone = "green" if res["status"] in ("created", "updated") else "cyan"
     bound_in_iface = res.get("bound_listen_interface", "")
     listen_desc = f"{res['listen']}@{bound_in_iface}" if bound_in_iface else res["listen"]
-    print(f"[{label}] 规则={res['rule_name']} 单元={res['unit_name']} PID={res['main_pid']}")
+    print(f"{_badge(label, tone)} 规则={res['rule_name']} 单元={res['unit_name']} PID={res['main_pid']}")
     print(
         f"转发链路 : 客户端({format_endpoint(res['dial_addr'], res['public_port'])}) -> 本机({listen_desc}) "
         f"-> 经({res['through']}@{res['egress_interface']}) -> 落地({res['remote']})"
@@ -200,7 +288,7 @@ def _print_apply(res: Dict[str, Any]) -> None:
     if res.get("forced_non_dns"):
         print("覆盖标记 : 已通过 --allow-non-dns 显式强制覆盖固定公网 IP")
     if res.get("stale_ip_warning"):
-        print(f"入口警告 : {res['stale_ip_warning']}")
+        print(_style(f"入口警告 : {res['stale_ip_warning']}", "yellow"))
 
 
 def _format_line_display(
@@ -226,11 +314,11 @@ def _format_rule_status_summary(item: Dict[str, Any]) -> str:
     sub_state = item["sub_state"]
     if active_state == "active" and sub_state == "running":
         if item["listening_ok"]:
-            return f"运行中（监听正常，PID={item['main_pid']}，重启={item['n_restarts']}）"
-        return f"异常（进程运行中但监听端口异常，PID={item['main_pid']}，重启={item['n_restarts']}）"
+            return f"{_style('运行中', 'green')}（监听正常，PID={item['main_pid']}，重启={item['n_restarts']}）"
+        return f"{_style('异常', 'red')}（进程运行中但监听端口异常，PID={item['main_pid']}，重启={item['n_restarts']}）"
     if not item["enabled"] and active_state in ("inactive", "dead"):
-        return f"已暂停（未开机自启，状态={active_state}/{sub_state}）"
-    return f"未运行（状态={active_state}/{sub_state}，重启={item['n_restarts']}）"
+        return f"{_style('已暂停', 'yellow')}（未开机自启，状态={active_state}/{sub_state}）"
+    return f"{_style('未运行', 'red')}（状态={active_state}/{sub_state}，重启={item['n_restarts']}）"
 
 
 def _print_status_list(items: List[Dict[str, Any]]) -> None:
@@ -239,7 +327,7 @@ def _print_status_list(items: List[Dict[str, Any]]) -> None:
         return
     for idx, item in enumerate(items):
         if idx > 0:
-            print("-" * 72)
+            print(_style("-" * _MENU_WIDTH, "dim"))
         dial = format_endpoint(item["dial_addr"], item["public_port"])
         autostart = "已开启" if item["enabled"] else "未开启"
         line_desc = _format_line_display(
@@ -250,7 +338,7 @@ def _print_status_list(items: List[Dict[str, Any]]) -> None:
         )
         bound_in_iface = item.get("listen_interface", "")
         listen_desc = f"{item['listen']} (入口网卡={bound_in_iface})" if bound_in_iface else item["listen"]
-        print(f"转发名称   : {item['rule_name']}  ({item['description'] or '无备注'})")
+        print(f"转发名称   : {_style(item['rule_name'], 'bold')}  ({item['description'] or '无备注'})")
         print(f"当前状态   : {_format_rule_status_summary(item)} | 开机自启: {autostart}")
         print(f"出口线路   : {line_desc}")
         print(f"客户端连接 : {dial}")
@@ -264,7 +352,8 @@ def _print_status_list(items: List[Dict[str, Any]]) -> None:
                 f"固定公网IP : {item['ingress_fixed_ip'] or '(未固定，使用域名解析)'}  "
                 f"[域名: {item['ingress_domain']}]"
             )
-        print(f"出口路由   : {'正常' if item['route_ok'] else '异常'}（仅内核查路，不代表落地 TCP 可达） | {item['route_detail']}")
+        route_label = _style("正常", "green") if item["route_ok"] else _style("异常", "red")
+        print(f"出口路由   : {route_label}（仅内核查路，不代表落地 TCP 可达） | {item['route_detail']}")
         pending = item.get("pending_network", {})
         if pending.get("line_removed"):
             print(f"待应用     : 主配置已移除出口线路 {item['line']}")
@@ -278,7 +367,7 @@ def _print_status_list(items: List[Dict[str, Any]]) -> None:
             print(f"待应用入口 : 监听网卡={pending['listen_interface'] or '未指定'}")
         print(f"运行服务   : Realm {item['realm_version']} @ {item['realm_bin']} | systemd={item['unit_name']}")
         if item.get("stale_ip_warning"):
-            print(f"入口警告   : {item['stale_ip_warning']}")
+            print(_style(f"入口警告   : {item['stale_ip_warning']}", "yellow"))
 
 
 def _cmd_ingress_query(args: argparse.Namespace) -> int:
@@ -526,7 +615,7 @@ def _menu_pick(
 ) -> str:
     display_items = labels if labels is not None else items
     for number, label in enumerate(display_items, 1):
-        print(f"  {number}. {label}")
+        print(f"  {_style(f'{number}.', 'cyan')} {label}")
     hint = f"，回车保留 {default}" if default else "，回车取消"
     value = input(f"{prompt}（输入编号，0 返回{hint}）：").strip()
     if not value:
@@ -546,7 +635,7 @@ def _rule_active_state(cfg: GlobalConfig, rule: RuleConfig) -> Optional[bool]:
     unit_name = unit_name_for_rule(cfg.tool.systemd_unit_template, rule.name)
     try:
         return systemd_is_active(unit_name)
-    except (SystemErrorBase, OSError):
+    except (SystemErrorBase, OSError, TimeoutExpired):
         return None
 
 
@@ -706,10 +795,15 @@ def _menu_toggle_rule(cfg: GlobalConfig) -> None:
     labels = []
     for rule in managed:
         state = states[rule.name]
-        badge = "运行中" if state is True else ("已暂停" if state is False else "状态未知")
+        if state is True:
+            badge = _badge("运行中", "green")
+        elif state is False:
+            badge = _badge("已暂停", "yellow")
+        else:
+            badge = _badge("状态未知", "red")
         dial = format_endpoint(rule.dial_addr, rule.public_port)
         labels.append(
-            f"[{badge}] {rule.name}  (出口: {_format_line_brief(cfg, rule.line)} | 入口: {dial} -> 落地: {rule.remote_endpoint})"
+            f"{badge} {rule.name}  (出口: {_format_line_brief(cfg, rule.line)} | 入口: {dial} -> 落地: {rule.remote_endpoint})"
         )
     selected = _menu_pick(list(rules), "选择要暂停或恢复的转发", labels=labels)
     if not selected:
@@ -726,7 +820,7 @@ def _menu_toggle_rule(cfg: GlobalConfig) -> None:
     if pause:
         if _confirm(f"确认暂停转发 {rule.name}（将停止服务并取消开机自启，保留配置以便随时恢复）"):
             res = disable_rule(cfg, rule.name)
-            print(f"[已暂停] 转发={res['rule_name']} 单元={res['unit_name']}（配置已保留，可随时恢复）")
+            print(f"{_badge('已暂停', 'yellow')} 转发={res['rule_name']} 单元={res['unit_name']}（配置已保留，可随时恢复）")
         else:
             print("已取消。")
         return
@@ -837,7 +931,12 @@ def _menu_list_forwards(cfg: GlobalConfig) -> None:
     print(f"\n当前共有 {len(managed)} 条已配置转发：")
     for idx, rule in enumerate(managed, 1):
         state = _rule_active_state(cfg, rule)
-        badge = "运行中" if state is True else ("已暂停" if state is False else "状态未知")
+        if state is True:
+            badge = _badge("运行中", "green")
+        elif state is False:
+            badge = _badge("已暂停", "yellow")
+        else:
+            badge = _badge("状态未知", "red")
         lc = cfg.lines.get(rule.line)
         line_desc = _format_line_display(
             rule.line,
@@ -852,7 +951,7 @@ def _menu_list_forwards(cfg: GlobalConfig) -> None:
             entry_note = "已固定公网 IP"
         else:
             entry_note = "域名自动解析"
-        print(f"  {idx}. [{badge}] {rule.name}")
+        print(f"  {_style(f'{idx}.', 'cyan')} {badge} {_style(rule.name, 'bold')}")
         print(f"     出口线路   : {line_desc}")
         print(f"     客户端入口 : {dial}（{entry_note}）")
         print(f"     本机监听   : {rule.listen_endpoint}")
@@ -899,7 +998,7 @@ def _print_forward_probes(results: List[Dict[str, Any]], *, as_json: bool = Fals
         _print_json({"source": source, "results": results})
         return
     print(f"探测来源：{source}（从本机拨号，公网可达性以外部客户端实测为准）")
-    use_color = sys.stdout.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb"
+    use_color = _supports_color()
     for result in results:
         status = result["status"]
         name = result.get("rule", "")
@@ -998,25 +1097,25 @@ def _menu_rules_group(config_path: str) -> None:
         "6": _menu_probe_forwards,
     }
     while True:
-        print(f"\nleikwan_tools v{__version__} > 转发规则管理")
-        print("  1. 查看已有转发")
-        print("  2. 新建转发")
-        print("  3. 修改转发")
-        print("  4. 暂停 / 恢复转发")
-        print("  5. 删除转发")
-        print("  6. 连通性与延迟探测")
-        print("  0. 返回主菜单")
-        selected = input("请选择：").strip()
+        _print_menu_header(f"利群转发助手 v{__version__}", "转发规则管理")
+        _print_menu_item("1", "查看已有转发")
+        _print_menu_item("2", "新建转发")
+        _print_menu_item("3", "修改转发")
+        _print_menu_item("4", "暂停 / 恢复转发")
+        _print_menu_item("5", "删除转发")
+        _print_menu_item("6", "连通性与延迟探测")
+        _print_menu_item("0", "返回主菜单", dim=True)
+        selected = _menu_prompt()
         if selected == "0":
             return
         handler = handlers.get(selected)
         if handler is None:
-            print("无效选项，请重新输入。")
+            _print_invalid_choice()
             continue
         try:
             handler(load_global_config(config_path))
         except _MENU_ERRORS as exc:
-            print(f"错误: {exc}", file=sys.stderr)
+            _print_error(str(exc))
 
 
 _NETWORK_ACTIONS = {
@@ -1059,7 +1158,7 @@ def _menu_system_network(config_path: str) -> None:
         "IPv6 入站收口 nftables：启用 / 撤销",
     ]
     while True:
-        print("\n系统网络优化")
+        _print_menu_header(f"利群转发助手 v{__version__}", "系统网络优化")
         try:
             feature = _menu_pick(features, "请选择", labels=labels)
             if not feature:
@@ -1073,7 +1172,7 @@ def _menu_system_network(config_path: str) -> None:
             if not action:
                 continue
             if feature in _NETWORK_WARNINGS and action != "restore":
-                print(_NETWORK_WARNINGS[feature])
+                print(_style(_NETWORK_WARNINGS[feature], "yellow"))
             options = ["--yes"]
             if (feature, action) == ("dns", "set"):
                 options.extend(["--", _menu_field("DNS IP（逗号分隔）", DEFAULT_DNS)])
@@ -1085,30 +1184,30 @@ def _menu_system_network(config_path: str) -> None:
             if _confirm(f"确认{actions[action]}"):
                 main([*command, feature, action, *options])
         except _MENU_ERRORS as exc:
-            print(f"错误: {exc}", file=sys.stderr)
+            _print_error(str(exc))
 
 
 def _menu_system_group(config_path: str) -> None:
     while True:
-        print(f"\nleikwan_tools v{__version__} > 初始化与环境排查")
-        print("  1. 初始化双线出口路由（首次装机时执行）")
-        print("  2. 检查运行环境与线路状态")
-        print("  3. 系统网络优化")
-        print("  0. 返回主菜单")
-        selected = input("请选择：").strip()
+        _print_menu_header(f"利群转发助手 v{__version__}", "初始化与环境排查")
+        _print_menu_item("1", "初始化双线出口路由", "首次装机时执行")
+        _print_menu_item("2", "检查运行环境与线路状态")
+        _print_menu_item("3", "系统网络优化")
+        _print_menu_item("0", "返回主菜单", dim=True)
+        selected = _menu_prompt()
         if selected == "0":
             return
         if selected == "1":
             try:
                 _menu_routing(load_global_config(config_path))
             except _MENU_ERRORS as exc:
-                print(f"错误: {exc}", file=sys.stderr)
+                _print_error(str(exc))
         elif selected == "2":
             main(["--config", config_path, "check-prereqs"])
         elif selected == "3":
             _menu_system_network(config_path)
         else:
-            print("无效选项，请重新输入。")
+            _print_invalid_choice()
 
 
 def _print_update_check(info: UpdateCheckInfo) -> None:
@@ -1118,12 +1217,14 @@ def _print_update_check(info: UpdateCheckInfo) -> None:
         "ahead": f"本地版本 (v{info.current_version}) 高于仓库版本 (v{info.remote_version})",
         "unknown": f"仓库版本为 v{info.remote_version}（当前 v{info.current_version}）",
     }
+    tone_map = {"upgrade": "green", "same": "cyan", "ahead": "yellow", "unknown": "yellow"}
     print(f"更新渠道   : {info.channel_label} ({info.repo} @ {info.branch})")
     print(f"当前版本   : v{info.current_version}")
     print(f"仓库版本   : v{info.remote_version}  (提交 {info.short_sha})")
     if info.commit_message:
         print(f"最新提交   : {info.commit_message}")
-    print(f"检查结论   : {status_map.get(info.status, info.status)}")
+    conclusion = _style(status_map.get(info.status, info.status), tone_map.get(info.status, ""))
+    print(f"检查结论   : {conclusion}")
 
 
 def _print_update_result(res: UpdateResult) -> None:
@@ -1131,13 +1232,14 @@ def _print_update_result(res: UpdateResult) -> None:
         ver_msg = f"已从 v{res.previous_version} 更新到 v{res.installed_version}"
     else:
         ver_msg = f"已同步仓库最新提交 {res.short_sha}（版本号仍为 v{res.installed_version}）"
-    print(f"[更新完成] {ver_msg}（来源：{res.channel_label}，已校验并更新 {res.files_updated} 个程序文件）")
+    print(f"{_badge('更新完成', 'green')} {ver_msg}（来源：{res.channel_label}，已校验并更新 {res.files_updated} 个程序文件）")
     print("提示：原有主配置、转发规则、Realm 程序及运行中的转发连接均已保留。")
 
 
 def _menu_update(config_path: str) -> bool:
-    print(f"\n当前版本：v{__version__}")
-    print("说明：将从仓库拉取最新程序文件并原地升级，现有转发配置与运行中的连接不受影响。")
+    _print_menu_header(f"利群转发助手 v{__version__}", "检查并更新工具")
+    print(f"当前版本：{_style(f'v{__version__}', 'cyan')}")
+    print(_style("说明：将从仓库拉取最新程序文件并原地升级，现有转发配置与运行中的连接不受影响。", "dim"))
     channel = _menu_pick(
         ["github", "gitee"],
         "选择更新渠道",
@@ -1191,37 +1293,50 @@ def _ddns_forward_label(follow: Optional[dict]) -> str:
     return "无启用规则需要更新"
 
 
-def _print_ddns_bar(config_path: str, *, detailed: bool = False) -> None:
+def _print_ddns_bar(
+    config_path: str,
+    *,
+    detailed: bool = False,
+    cfg: Optional[GlobalConfig] = None,
+) -> None:
     try:
-        cfg = _maybe_load_global(config_path)
         if cfg is None:
-            print("IPv6 DDNS：未配置")
-            return
+            cfg = _maybe_load_global(config_path)
+            if cfg is None:
+                _print_status_kv("IPv6 DDNS", _badge("未配置", "dim"))
+                return
         state = status_ddns(cfg)
-    except _MENU_ERRORS:
-        print("IPv6 DDNS：配置或状态不可读")
+    except _MENU_ERRORS + (UnicodeError,):
+        _print_status_kv("IPv6 DDNS", _badge("配置或状态不可读", "red"))
         return
     try:
         active = systemd_is_active("leikwan_tools-ddns.timer")
     except (SystemErrorBase, OSError, TimeoutExpired):
         active = None
-    timer = {True: "运行中", False: "未运行", None: "未知"}[active]
+    timer_text, timer_tone = {
+        True: ("运行中", "green"),
+        False: ("未运行", "red"),
+        None: ("未知", "yellow"),
+    }[active]
     enabled = state["ddns_enabled"]
-    summary = []
+    global_badge = _badge("开启", "green") if enabled else _badge("暂停", "yellow")
+    _print_status_kv("IPv6 DDNS", f"全局{global_badge} | 定时器{_badge(timer_text, timer_tone)}")
+
+    isp_parts = []
     for isp, label in ISP_LABELS.items():
         profiles = [item for item in state["profiles"] if item["isp"] == isp]
         count = sum(item["enabled"] for item in profiles)
         if not profiles:
-            status = "未配置"
+            badge = _badge("未配置", "dim")
         elif not enabled:
-            status = "全局暂停"
+            badge = _badge("全局暂停", "yellow")
         elif not count:
-            status = "暂停"
+            badge = _badge("暂停", "yellow")
         else:
-            status = f"开启 {count}/{len(profiles)}"
-        summary.append(f"{label}：{status}")
-    print(f"IPv6 DDNS：全局{'开启' if enabled else '暂停'} | 定时器：{timer} | " + " | ".join(summary))
-    if not detailed:
+            badge = _badge(f"开启 {count}/{len(profiles)}", "green")
+        isp_parts.append(f"{label}{badge}")
+    _print_status_kv("双线 DDNS", " | ".join(isp_parts))
+    if not detailed or not state["profiles"]:
         return
     dns_actions = {
         "created": "已创建记录", "updated": "已更新记录", "noop": "记录一致",
@@ -1233,12 +1348,72 @@ def _print_ddns_bar(config_path: str, *, detailed: bool = False) -> None:
         strategy = DDNS_SELECTION_LABELS[item["selection_strategy"]]
         action = item["last_action"]
         dns = dns_actions.get(action, action or "尚未同步")
-        profile_status = "开启" if enabled and item["enabled"] else "暂停"
+        is_on = enabled and item["enabled"]
+        profile_badge = _badge("开启" if is_on else "暂停", "green" if is_on else "yellow")
         attempted = item["last_attempt_at_utc"] or "-"
         follow = item["forward_follow"]
+        follow_label = _ddns_forward_label(follow)
         follow_time = follow.get("at_utc", "-") if isinstance(follow, dict) else "-"
-        print(f"  {item['profile']}：{profile_status} | {strategy} | 网卡 {iface} | 上次选中 {item['selected_ip'] or '-'}")
-        print(f"    最近 DNS：{dns} @ {attempted} | 最近转发：{_ddns_forward_label(follow)} @ {follow_time}")
+        dns_tone = (
+            "red" if action == "error"
+            else "yellow" if action == "skipped_no_ip"
+            else "green" if action in ("created", "updated", "noop", "verified_noop", "triggered")
+            else "dim"
+        )
+        follow_tone = (
+            "red" if isinstance(follow, dict) and follow.get("errors")
+            else "green" if isinstance(follow, dict) and follow.get("updated")
+            else "dim"
+        )
+        print(
+            f"  {_style(item['profile'], 'bold')}：{profile_badge} | {strategy} | "
+            f"网卡 {iface} | 上次选中 {item['selected_ip'] or '-'}"
+        )
+        print(
+            f"    最近 DNS：{_style(dns, dns_tone)} @ {attempted} | "
+            f"最近转发：{_style(follow_label, follow_tone)} @ {follow_time}"
+        )
+
+
+def _print_main_status_panel(config_path: str) -> None:
+    try:
+        cfg = _maybe_load_global(config_path)
+    except _MENU_ERRORS + (UnicodeError,):
+        _print_status_kv("主配置", _badge("读取失败", "red"))
+        return
+    if cfg is None:
+        _print_status_kv("转发状态", _badge("未配置", "dim"))
+        _print_status_kv("出口线路", _badge("未配置", "dim"))
+        _print_status_kv("IPv6 DDNS", _badge("未配置", "dim"))
+        return
+
+    try:
+        managed = list_managed_rules(cfg)
+    except _MENU_ERRORS + (UnicodeError, TimeoutExpired):
+        _print_status_kv("转发状态", _badge("读取失败", "red"))
+    else:
+        if not managed:
+            _print_status_kv("转发状态", _badge("暂无规则", "dim"))
+        else:
+            states = [_rule_active_state(cfg, rule) for rule in managed]
+            running = sum(state is True for state in states)
+            stopped = sum(state is False for state in states)
+            unknown = sum(state is None for state in states)
+            parts = [
+                f"运行中{_badge(str(running), 'green' if running else 'dim')}",
+                f"未运行{_badge(str(stopped), 'yellow' if stopped else 'dim')}",
+            ]
+            if unknown > 0:
+                parts.append(f"未知{_badge(str(unknown), 'red')}")
+            _print_status_kv("转发状态", f"共 {len(managed)} 条 ({' | '.join(parts)})")
+
+    if cfg.lines:
+        line_parts = [f"{name}{_badge(lc.interface, 'yellow')}" for name, lc in cfg.lines.items()]
+        _print_status_kv("出口线路", " | ".join(line_parts))
+    else:
+        _print_status_kv("出口线路", _badge("未配置", "dim"))
+
+    _print_ddns_bar(config_path, detailed=False, cfg=cfg)
 
 
 def _print_ddns_inspect(items: List[ProfileInspectResult]) -> None:
@@ -1516,22 +1691,23 @@ def _menu_ddns_toggle(cfg: GlobalConfig) -> None:
 
 def _menu_ddns_group(config_path: str) -> None:
     while True:
-        print(f"\nleikwan_tools v{__version__} > IPv6 DDNS 域名管理")
+        _print_menu_header(f"利群转发助手 v{__version__}", "IPv6 DDNS 域名管理")
         _print_ddns_bar(config_path, detailed=True)
-        print("  1. 查看配置与同步状态")
-        print("  2. 新建 DDNS 配置")
-        print("  3. 修改 DDNS 配置")
-        print("  4. 探测网卡 IPv6")
-        print("  5. 测试配置与凭据")
-        print("  6. 立即同步 AAAA 记录")
-        print("  7. 启用 / 暂停 DDNS")
-        print("  8. 删除 DDNS 配置")
-        print("  0. 返回主菜单")
-        selected = input("请选择：").strip()
+        _print_menu_divider()
+        _print_menu_item("1", "查看配置与同步状态")
+        _print_menu_item("2", "新建 DDNS 配置")
+        _print_menu_item("3", "修改 DDNS 配置")
+        _print_menu_item("4", "探测网卡 IPv6")
+        _print_menu_item("5", "测试配置与凭据")
+        _print_menu_item("6", "立即同步 AAAA 记录")
+        _print_menu_item("7", "启用 / 暂停 DDNS")
+        _print_menu_item("8", "删除 DDNS 配置")
+        _print_menu_item("0", "返回主菜单", dim=True)
+        selected = _menu_prompt()
         if selected == "0":
             return
         if len(selected) != 1 or selected not in "12345678":
-            print("无效选项，请重新输入。")
+            _print_invalid_choice()
             continue
         try:
             cfg = load_global_config(config_path)
@@ -1563,23 +1739,24 @@ def _menu_ddns_group(config_path: str) -> None:
                         save_ddns_config(cfg, profile_name=name)
                         print(f"DDNS 配置 {name} 已删除。")
         except _MENU_ERRORS + (UnicodeError,) as exc:
-            print(f"错误: {exc}", file=sys.stderr)
+            _print_error(str(exc))
 
 
 def _run_menu(config_path: str) -> int:
     try:
         while True:
-            print(f"\nleikwan_tools 利群转发助手 v{__version__}")
-            _print_ddns_bar(config_path)
-            print("  1. 查看转发状态")
-            print("  2. 转发规则管理（查看 / 新建 / 修改 / 暂停恢复 / 删除）")
-            print("  3. 查询官方公网入口 IP")
-            print("  4. 查询并设置转发的客户端入口 IP")
-            print("  5. 初始化与环境排查（双线路由 / 环境检查 / 系统网络优化）")
-            print("  6. 从仓库检查并更新工具")
-            print("  7. IPv6 DDNS 域名管理")
-            print("  0. 退出")
-            selected = input("请选择：").strip()
+            _print_menu_header(f"利群转发助手 | leikwan_tools v{__version__}")
+            _print_main_status_panel(config_path)
+            _print_menu_divider()
+            _print_menu_item("1", "查看转发状态")
+            _print_menu_item("2", "转发规则管理", "查看 / 新建 / 修改 / 启停 / 删除 / 探测")
+            _print_menu_item("3", "查询官方公网入口 IP")
+            _print_menu_item("4", "设置客户端入口 IP", "固定公网 IP / 恢复域名")
+            _print_menu_item("5", "初始化与环境排查", "双线路由 / 环境检查 / 网络优化")
+            _print_menu_item("6", "IPv6 DDNS 域名管理")
+            _print_menu_item("7", "检查并更新工具")
+            _print_menu_item("0", "退出", dim=True)
+            selected = _menu_prompt()
             if selected == "0":
                 return 0
             if selected == "1":
@@ -1592,21 +1769,21 @@ def _run_menu(config_path: str) -> int:
                 try:
                     _menu_ingress(load_global_config(config_path))
                 except _MENU_ERRORS as exc:
-                    print(f"错误: {exc}", file=sys.stderr)
+                    _print_error(str(exc))
             elif selected == "5":
                 _menu_system_group(config_path)
             elif selected == "6":
+                _menu_ddns_group(config_path)
+            elif selected == "7":
                 updated = False
                 try:
                     updated = _menu_update(config_path)
                 except _MENU_ERRORS as exc:
-                    print(f"错误: {exc}", file=sys.stderr)
+                    _print_error(str(exc))
                 if updated:
                     _reexec_updated_menu(config_path)
-            elif selected == "7":
-                _menu_ddns_group(config_path)
             else:
-                print("无效选项，请重新输入。")
+                _print_invalid_choice()
     except (EOFError, KeyboardInterrupt):
         print()
         return 0
@@ -1910,7 +2087,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.json:
                 _print_json(res)
             else:
-                print(f"Realm 检查: {'通过' if res['realm_ok'] else '失败'} -> {res['realm']}")
+                realm_status = _style("通过", "green") if res["realm_ok"] else _style("失败", "red")
+                print(f"Realm 检查: {realm_status} -> {res['realm']}")
                 print("说明      : 以下路由校验仅核对内核查路与本机接口/源地址，不代表远端落地 TCP 端口可达。")
                 for line in res["lines"]:
                     if line["ok"]:
@@ -1921,11 +2099,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                             extras.append(f"table {line['table']}")
                         extra_str = f" -> {', '.join(extras)}" if extras else ""
                         print(
-                            f"线路 {line['line']} [通过]: {line['interface']} ({line['source_ip']}{extra_str}) "
+                            f"线路 {line['line']} {_badge('通过', 'green')}: {line['interface']} ({line['source_ip']}{extra_str}) "
                             f"| {line['route_output']}"
                         )
                     else:
-                        print(f"线路 {line['line']} [失败]: {line['error']}")
+                        print(f"线路 {line['line']} {_badge('失败', 'red')}: {line['error']}")
             return 0 if res["ok"] else 1
 
         if args.command == "_verify-startup":
@@ -2097,7 +2275,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.json:
             _print_json({"error": str(exc)})
         else:
-            print(f"错误: {exc}", file=sys.stderr)
+            _print_error(str(exc))
         return 1
 
 

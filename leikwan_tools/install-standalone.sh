@@ -2,8 +2,7 @@
 set -euo pipefail
 
 SOURCE_CHANNEL="gitee"
-SOURCE_ARCHIVE=""
-REALM_ARCHIVE=""
+SKIP_REALM_INSTALL=0
 WORK_DIR=""
 
 usage() {
@@ -49,7 +48,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --skip-realm-install)
-            INSTALL_ARGS+=("$1")
+            SKIP_REALM_INSTALL=1
             shift
             ;;
         -h|--help)
@@ -97,23 +96,8 @@ if (( ${#packages[@]} > 0 )); then
         "${packages[@]}" || die "依赖安装失败"
 fi
 
-case "$(uname -m)" in
-    x86_64|amd64)
-        REALM_ASSET="realm-x86_64-unknown-linux-musl.tar.gz"
-        REALM_SHA256="b1cc335547bea8bb2a88178bef12ec7f2363e36200e7ea1d4e1e67627929bf65"
-        ;;
-    aarch64|arm64)
-        REALM_ASSET="realm-aarch64-unknown-linux-musl.tar.gz"
-        REALM_SHA256="f4c0318dd86854da483dcb7645b4f39cae2cc3f91c688fef969d53220b949488"
-        ;;
-    *)
-        die "暂不支持当前架构: $(uname -m)，请使用已有 Realm 或 --skip-realm-install"
-        ;;
-esac
-
 WORK_DIR="$(mktemp -d -t leikwan-standalone.XXXXXX)"
 SOURCE_TARBALL="${WORK_DIR}/vps_tools.tar.gz"
-REALM_ARCHIVE="${WORK_DIR}/${REALM_ASSET}"
 
 printf '[1/3] 下载利群助手源码（%s）...\n' "${SOURCE_CHANNEL}"
 curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 180 \
@@ -123,6 +107,29 @@ tar -xzf "${SOURCE_TARBALL}" -C "${WORK_DIR}"
 SOURCE_DIR="$(find "${WORK_DIR}" -mindepth 1 -maxdepth 1 -type d -name 'vps_tools-*' -print -quit)"
 [[ -n "${SOURCE_DIR}" && -f "${SOURCE_DIR}/leikwan_tools/install.sh" ]] ||
     die "源码压缩包内容不完整"
+
+if (( SKIP_REALM_INSTALL )); then
+    printf '[2/3] 跳过 Realm 下载。\n'
+    printf '[3/3] 安装利群助手...\n'
+    bash "${SOURCE_DIR}/leikwan_tools/install.sh" --skip-realm-install "${INSTALL_ARGS[@]}"
+    exit
+fi
+
+realm_arch=$(uname -m)
+case "${realm_arch}" in
+    x86_64|amd64)
+        REALM_ASSET="realm-x86_64-unknown-linux-musl.tar.gz"
+        REALM_SHA256="b1cc335547bea8bb2a88178bef12ec7f2363e36200e7ea1d4e1e67627929bf65"
+        ;;
+    aarch64|arm64)
+        REALM_ASSET="realm-aarch64-unknown-linux-musl.tar.gz"
+        REALM_SHA256="f4c0318dd86854da483dcb7645b4f39cae2cc3f91c688fef969d53220b949488"
+        ;;
+    *)
+        die "暂不支持当前架构: ${realm_arch}，可使用 --skip-realm-install"
+        ;;
+esac
+REALM_ARCHIVE="${WORK_DIR}/${REALM_ASSET}"
 
 printf '[2/3] 下载并校验 Realm v2.9.6...\n'
 REALM_UPSTREAM="https://github.com/zhboner/realm/releases/download/v2.9.6/${REALM_ASSET}"
